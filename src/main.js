@@ -1,4 +1,6 @@
 const path = require('node:path');
+const fs = require('node:fs');
+const chokidar = require('chokidar');
 const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, screen } = require('electron');
 const { loadConfig, saveConfig } = require('./core/config-store');
 const { discoverRepositories } = require('./core/repo-discovery');
@@ -15,12 +17,15 @@ let floatingWindow = null;
 let config = null;
 let state = emptyState();
 let watcher = null;
+let configWatcher = null;
+let rootDiscoveryWatcher = null;
 let pollTimer = null;
 let tray = null;
 let isAlwaysOnTop = true;
 let isCollapsed = false;
 let isQuitting = false;
 let saveFloatingBounds = null;
+const scheduleRefreshAllProjects = debounce(refreshAllProjects, 1000);
 
 async function createFloatingWindow() {
   isAlwaysOnTop = config.floatingWindow.alwaysOnTop;
@@ -105,6 +110,8 @@ async function bootstrap() {
     }
   });
   watcher.watch(state.projects);
+  startConfigWatcher();
+  startRootDiscoveryWatcher();
 
   pollTimer = setInterval(refreshAllProjects, config.pollFallbackMs);
 }
@@ -119,6 +126,82 @@ async function refreshAllProjects() {
   } catch (error) {
     warn('Refresh failed', error.message);
   }
+}
+
+async function reloadConfigAndRefresh() {
+  try {
+    const previousDiscoverySignature = discoverySignature(config);
+    const previousPollFallbackMs = config.pollFallbackMs;
+    const nextConfig = await loadConfig(defaultConfigDir());
+    const shouldRefreshDiscovery = previousDiscoverySignature !== discoverySignature(nextConfig);
+    config = nextConfig;
+
+    if (pollTimer && previousPollFallbackMs !== config.pollFallbackMs) {
+      clearInterval(pollTimer);
+      pollTimer = setInterval(refreshAllProjects, config.pollFallbackMs);
+    }
+
+    watcher.config = config;
+    if (shouldRefreshDiscovery) {
+      startRootDiscoveryWatcher();
+      await refreshAllProjects();
+    }
+    updateTrayMenu();
+    log('Config reloaded');
+  } catch (error) {
+    warn('Config reload failed', error.message);
+  }
+}
+
+function discoverySignature(nextConfig) {
+  return JSON.stringify({
+    roots: nextConfig.roots,
+    ignoredDirs: nextConfig.ignoredDirs,
+    scanDepth: nextConfig.scanDepth
+  });
+}
+
+function startConfigWatcher() {
+  configWatcher?.close().catch((error) => warn('Failed to close config watcher', error.message));
+  configWatcher = chokidar.watch(config.configPath, {
+    ignoreInitial: true,
+    persistent: true,
+    awaitWriteFinish: {
+      stabilityThreshold: 200,
+      pollInterval: 100
+    }
+  });
+
+  configWatcher
+    .on('change', debounce(reloadConfigAndRefresh, 500))
+    .on('error', (error) => warn('Config watcher error', error.message));
+}
+
+function startRootDiscoveryWatcher() {
+  rootDiscoveryWatcher?.close().catch((error) => warn('Failed to close root watcher', error.message));
+  const existingRoots = config.roots.filter((root) => fs.existsSync(root));
+  if (existingRoots.length === 0) {
+    rootDiscoveryWatcher = null;
+    return;
+  }
+
+  const ignoredDirs = new Set(config.ignoredDirs);
+  const ignored = (targetPath) => {
+    const parts = targetPath.split(/[\\/]/);
+    return parts.some((part) => ignoredDirs.has(part));
+  };
+
+  rootDiscoveryWatcher = chokidar.watch(existingRoots, {
+    ignored,
+    ignoreInitial: true,
+    persistent: true,
+    depth: config.scanDepth + 1
+  });
+
+  rootDiscoveryWatcher
+    .on('addDir', scheduleRefreshAllProjects)
+    .on('unlinkDir', scheduleRefreshAllProjects)
+    .on('error', (error) => warn('Root watcher error', error.message));
 }
 
 async function publishState() {
@@ -146,6 +229,8 @@ app.on('before-quit', async () => {
     clearInterval(pollTimer);
   }
   await watcher?.close();
+  await configWatcher?.close();
+  await rootDiscoveryWatcher?.close();
 });
 
 function registerFloatingIpc() {
@@ -250,6 +335,10 @@ function updateTrayMenu() {
     {
       label: '隐藏悬浮窗',
       click: () => floatingWindow?.hide()
+    },
+    {
+      label: '刷新项目列表',
+      click: () => refreshAllProjects()
     },
     { type: 'separator' },
     {
