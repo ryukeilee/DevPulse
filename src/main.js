@@ -27,20 +27,32 @@ let isQuitting = false;
 let saveFloatingBounds = null;
 const scheduleRefreshAllProjects = debounce(refreshAllProjects, 1000);
 
-function configureMacBackgroundMode() {
+function hideMacDock() {
   if (process.platform !== 'darwin') {
     return;
   }
 
   app.setActivationPolicy('accessory');
-  app.once('ready', () => {
+  if (app.dock) {
     app.dock.hide();
-    app.hide();
+  }
+  app.hide();
+}
+
+function configureMacBackgroundMode() {
+  if (process.platform !== 'darwin') {
+    return;
+  }
+
+  app.once('ready', () => {
+    hideMacDock();
   });
   app.on('activate', () => {
-    app.dock.hide();
+    hideMacDock();
   });
 }
+
+hideMacDock();
 
 async function createFloatingWindow() {
   isAlwaysOnTop = config.floatingWindow.alwaysOnTop;
@@ -70,7 +82,10 @@ async function createFloatingWindow() {
   });
 
   floatingWindow.setAlwaysOnTop(isAlwaysOnTop, isAlwaysOnTop ? 'floating' : 'normal');
-  floatingWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
+  floatingWindow.setVisibleOnAllWorkspaces(true, {
+    visibleOnFullScreen: false,
+    skipTransformProcessType: true
+  });
   floatingWindow.setSkipTaskbar(true);
   floatingWindow.setMenuBarVisibility(false);
 
@@ -100,6 +115,8 @@ async function createFloatingWindow() {
 }
 
 async function bootstrap() {
+  hideMacDock();
+
   const configDir = defaultConfigDir();
   config = await loadConfig(configDir);
   state = await loadState(configDir);
