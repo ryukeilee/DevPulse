@@ -6,6 +6,7 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test",
+    "build:icon": "node scripts/generate-icon.mjs",
     "build:app": "electron-builder --mac",
     "scan:secrets": "scripts/secret-scan.sh tracked"
   },
@@ -33,6 +34,7 @@
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
       "target": [
         "dmg"
       ]

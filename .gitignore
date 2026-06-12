@@ -26,7 +26,11 @@ env/
 
 # Build outputs
 dist/
-build/
+build/*
+!build/
+!build/icon.svg
+!build/icon.png
+!build/icon.icns
 out/
 coverage/
 .next/
@@ -49,4 +53,3 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
-
