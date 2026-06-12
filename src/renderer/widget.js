@@ -1,7 +1,6 @@
 const widget = document.getElementById('widget');
 const projectName = document.getElementById('project-name');
 const projectMeta = document.getElementById('project-meta');
-const statusPill = document.getElementById('status-pill');
 const changeSummary = document.getElementById('change-summary');
 const changedCount = document.getElementById('changed-count');
 const lastUpdate = document.getElementById('last-update');
@@ -10,7 +9,6 @@ const miniTitle = document.getElementById('mini-title');
 const miniMeta = document.getElementById('mini-meta');
 const collapseButton = document.getElementById('collapse-button');
 const pinButton = document.getElementById('pin-button');
-const closeButton = document.getElementById('close-button');
 const miniExpandButton = document.getElementById('mini-expand-button');
 
 let latestState = null;
@@ -26,8 +24,6 @@ function render(state) {
   if (!active) {
     projectName.textContent = '暂无活跃项目';
     projectMeta.textContent = 'waiting · local Git only';
-    statusPill.textContent = 'Clean';
-    statusPill.classList.remove('status-pill--dirty');
     changeSummary.textContent = '等待本地 Git 变化';
     changedCount.textContent = '0 files';
     lastUpdate.textContent = formatClock(state.updatedAt);
@@ -43,8 +39,6 @@ function render(state) {
 
   projectName.textContent = active.name;
   projectMeta.textContent = `${active.branch || 'unknown'} · ${active.dirty ? 'dirty' : 'clean'}`;
-  statusPill.textContent = active.dirty ? 'Dirty' : 'Clean';
-  statusPill.classList.toggle('status-pill--dirty', active.dirty);
   changeSummary.textContent = active.summary || '项目文件改动';
   changedCount.textContent = `${count} ${count === 1 ? 'file' : 'files'}`;
   lastUpdate.textContent = formatClock(updateAt);
@@ -116,10 +110,6 @@ collapseButton.addEventListener('click', async () => {
 pinButton.addEventListener('click', async () => {
   const isAlwaysOnTop = await window.floatingWindow.toggleAlwaysOnTop();
   renderFloating({ isAlwaysOnTop });
-});
-
-closeButton.addEventListener('click', () => {
-  window.floatingWindow.hide();
 });
 
 miniExpandButton.addEventListener('click', async () => {
