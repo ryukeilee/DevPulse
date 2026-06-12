@@ -9,7 +9,7 @@ const { debounce } = require('./utils/debounce');
 const { log, warn } = require('./utils/logger');
 
 const expandedSize = { width: 360, height: 260 };
-const collapsedSize = { width: 260, height: 72 };
+const collapsedSize = { width: 300, height: 72 };
 
 let floatingWindow = null;
 let config = null;

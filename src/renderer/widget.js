@@ -11,6 +11,7 @@ const miniMeta = document.getElementById('mini-meta');
 const collapseButton = document.getElementById('collapse-button');
 const pinButton = document.getElementById('pin-button');
 const closeButton = document.getElementById('close-button');
+const miniExpandButton = document.getElementById('mini-expand-button');
 
 let latestState = null;
 let floatingState = {
@@ -119,6 +120,11 @@ pinButton.addEventListener('click', async () => {
 
 closeButton.addEventListener('click', () => {
   window.floatingWindow.hide();
+});
+
+miniExpandButton.addEventListener('click', async () => {
+  const isCollapsed = await window.floatingWindow.toggleCollapse();
+  renderFloating({ isCollapsed });
 });
 
 window.devPulse.getState().then(render);

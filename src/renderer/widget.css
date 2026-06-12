@@ -216,7 +216,14 @@ button {
 }
 
 .widget.is-collapsed .mini-view {
-  display: block;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: 10px;
+}
+
+.mini-copy {
+  min-width: 0;
 }
 
 .mini-title {
@@ -227,4 +234,26 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.mini-expand {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.9);
+  font: inherit;
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1;
+  padding: 0;
+}
+
+.mini-expand:hover {
+  background: rgba(255, 255, 255, 0.17);
+  color: rgba(255, 255, 255, 1);
 }
