@@ -70,7 +70,10 @@ class RepoWatcher {
     this.running.add(repoPath);
 
     try {
-      const project = await readGitStatus(repoPath);
+      const project = {
+        ...(await readGitStatus(repoPath)),
+        activityObservedAt: new Date().toISOString()
+      };
       await this.onProjectUpdate(project);
     } finally {
       this.running.delete(repoPath);

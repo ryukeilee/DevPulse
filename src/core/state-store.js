@@ -37,10 +37,20 @@ function buildState(projects, previousState = emptyState(), now = new Date()) {
     const previous = previousByPath.get(project.path);
     const changedFiles = project.changedFiles || [];
     const summary = classifyChanges(changedFiles);
+    const currentSignature = changeSignature(project);
+    const previousSignature = previous ? changeSignature(previous) : '';
+    const lastActivityAt = resolveLastActivityAt({
+      project,
+      previous,
+      currentSignature,
+      previousSignature,
+      now
+    });
 
     return {
       ...project,
-      lastActivityAt: project.lastActivityAt || previous?.lastActivityAt || project.lastCommitAt || null,
+      changeSignature: currentSignature,
+      lastActivityAt,
       summary: summary.title,
       tags: summary.tags
     };
@@ -54,6 +64,33 @@ function buildState(projects, previousState = emptyState(), now = new Date()) {
     activeProjectPath: activeProject?.path || null,
     updatedAt: now.toISOString()
   };
+}
+
+function resolveLastActivityAt({ project, previous, currentSignature, previousSignature, now }) {
+  if (project.activityObservedAt) {
+    return project.activityObservedAt;
+  }
+
+  if (project.dirty && currentSignature && currentSignature !== previousSignature) {
+    return now.toISOString();
+  }
+
+  if (project.dirty) {
+    return previous?.lastActivityAt || null;
+  }
+
+  return previous?.lastActivityAt || project.lastCommitAt || null;
+}
+
+function changeSignature(project) {
+  const entries = project.changedEntries?.length
+    ? project.changedEntries
+    : (project.changedFiles || []).map((filePath) => ({ status: '', path: filePath }));
+
+  return entries
+    .map((entry) => `${entry.status || ''}:${entry.path}`)
+    .sort()
+    .join('|');
 }
 
 module.exports = {

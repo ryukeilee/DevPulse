@@ -59,8 +59,7 @@ async function readGitStatus(repoPath) {
     changedEntries,
     changedFiles,
     lastCommitMessage: lastCommitMessage.trim(),
-    lastCommitAt: lastCommitAt.trim() || null,
-    lastActivityAt: changedFiles.length > 0 ? new Date().toISOString() : null
+    lastCommitAt: lastCommitAt.trim() || null
   };
 }
 
