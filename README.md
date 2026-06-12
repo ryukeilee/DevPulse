@@ -62,6 +62,21 @@ Default roots:
 
 Edit `roots` to add project directories. Missing directories are skipped.
 
+Floating window state is saved in the same config file:
+
+```json
+{
+  "floatingWindow": {
+    "x": 1200,
+    "y": 120,
+    "alwaysOnTop": true,
+    "collapsed": false
+  }
+}
+```
+
+The floating window defaults to always-on-top, uses `showInactive()` so it does not steal focus, and can be collapsed, unpinned, hidden, or restored from the menu bar item.
+
 Runtime state is stored locally at:
 
 ```text

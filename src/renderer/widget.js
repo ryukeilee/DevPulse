@@ -1,45 +1,88 @@
+const widget = document.getElementById('widget');
 const projectName = document.getElementById('project-name');
+const projectMeta = document.getElementById('project-meta');
+const statusPill = document.getElementById('status-pill');
 const changeSummary = document.getElementById('change-summary');
+const changedCount = document.getElementById('changed-count');
+const lastUpdate = document.getElementById('last-update');
 const recentFiles = document.getElementById('recent-files');
-const statusText = document.getElementById('status-text');
-const otherProjects = document.getElementById('other-projects');
-const otherList = document.getElementById('other-list');
+const miniTitle = document.getElementById('mini-title');
+const miniMeta = document.getElementById('mini-meta');
+const collapseButton = document.getElementById('collapse-button');
+const pinButton = document.getElementById('pin-button');
+const closeButton = document.getElementById('close-button');
+
+let latestState = null;
+let floatingState = {
+  isAlwaysOnTop: true,
+  isCollapsed: false
+};
 
 function render(state) {
+  latestState = state;
   const active = (state.projects || []).find((project) => project.path === state.activeProjectPath);
 
   if (!active) {
     projectName.textContent = '暂无活跃项目';
+    projectMeta.textContent = 'waiting · local Git only';
+    statusPill.textContent = 'Clean';
+    statusPill.classList.remove('status-pill--dirty');
     changeSummary.textContent = '等待本地 Git 变化';
-    recentFiles.replaceChildren(listItem('暂无'));
-    statusText.textContent = '正在监听项目目录';
-    otherProjects.hidden = true;
+    changedCount.textContent = '0 files';
+    lastUpdate.textContent = formatClock(state.updatedAt);
+    recentFiles.replaceChildren(fileItem('', '暂无'));
+    miniTitle.textContent = 'DevPulse · watching';
+    miniMeta.textContent = `local Git · ${formatClock(state.updatedAt)}`;
     return;
   }
 
+  const entries = normalizeEntries(active);
+  const count = entries.length;
+  const updateAt = active.lastActivityAt || state.updatedAt;
+
   projectName.textContent = active.name;
+  projectMeta.textContent = `${active.branch || 'unknown'} · ${active.dirty ? 'dirty' : 'clean'}`;
+  statusPill.textContent = active.dirty ? 'Dirty' : 'Clean';
+  statusPill.classList.toggle('status-pill--dirty', active.dirty);
   changeSummary.textContent = active.summary || '项目文件改动';
+  changedCount.textContent = `${count} ${count === 1 ? 'file' : 'files'}`;
+  lastUpdate.textContent = formatClock(updateAt);
+  recentFiles.replaceChildren(...(entries.length ? entries.slice(0, 5).map((entry) => {
+    return fileItem(entry.status, basename(entry.path));
+  }) : [fileItem('', '暂无')]));
 
-  const files = (active.changedFiles || []).slice(0, 3).map((file) => basename(file));
-  recentFiles.replaceChildren(...(files.length ? files.map(listItem) : [listItem('暂无')]));
+  miniTitle.textContent = `DevPulse · ${count} ${count === 1 ? 'file' : 'files'} changed`;
+  miniMeta.textContent = `${active.branch || 'unknown'} · ${formatClock(updateAt)}`;
+}
 
-  const changedCount = active.changedFiles?.length || 0;
-  const dirtyText = active.dirty ? `${changedCount} 个文件已修改` : '工作区干净';
-  statusText.textContent = `${dirtyText} · ${relativeTime(active.lastActivityAt || state.updatedAt)}`;
+function renderFloating(nextState) {
+  floatingState = { ...floatingState, ...nextState };
+  widget.classList.toggle('is-collapsed', floatingState.isCollapsed);
+  collapseButton.textContent = floatingState.isCollapsed ? '+' : '-';
+  collapseButton.title = floatingState.isCollapsed ? '展开' : '折叠';
+  pinButton.textContent = floatingState.isAlwaysOnTop ? 'Pin' : 'Free';
+  pinButton.title = floatingState.isAlwaysOnTop ? '关闭置顶' : '开启置顶';
+}
 
-  const others = (state.projects || [])
-    .filter((project) => project.path !== active.path && project.score > 0)
-    .slice(0, 2);
+function normalizeEntries(project) {
+  if (project.changedEntries?.length) {
+    return project.changedEntries;
+  }
 
-  otherProjects.hidden = others.length === 0;
-  otherList.replaceChildren(...others.map((project) => {
-    return listItem(`${project.name} · ${relativeTime(project.lastActivityAt || project.lastCommitAt)}`);
+  return (project.changedFiles || []).map((path) => ({
+    status: project.dirty ? 'M' : '',
+    path
   }));
 }
 
-function listItem(text) {
+function fileItem(status, text) {
   const item = document.createElement('li');
-  item.textContent = text;
+  const statusNode = document.createElement('span');
+  const pathNode = document.createElement('span');
+  statusNode.className = 'file-status';
+  statusNode.textContent = status;
+  pathNode.textContent = text;
+  item.append(statusNode, pathNode);
   return item;
 }
 
@@ -47,28 +90,45 @@ function basename(filePath) {
   return String(filePath || '').split(/[\\/]/).pop() || '';
 }
 
-function relativeTime(value) {
+function formatClock(value) {
   if (!value) {
-    return '刚刚';
+    return '--:--';
   }
 
-  const deltaMs = Date.now() - new Date(value).getTime();
-  if (!Number.isFinite(deltaMs) || deltaMs < 60 * 1000) {
-    return '刚刚';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '--:--';
   }
 
-  const minutes = Math.floor(deltaMs / 60000);
-  if (minutes < 60) {
-    return `${minutes} 分钟前`;
-  }
-
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) {
-    return `${hours} 小时前`;
-  }
-
-  return `${Math.floor(hours / 24)} 天前`;
+  return new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).format(date);
 }
+
+collapseButton.addEventListener('click', async () => {
+  const isCollapsed = await window.floatingWindow.toggleCollapse();
+  renderFloating({ isCollapsed });
+});
+
+pinButton.addEventListener('click', async () => {
+  const isAlwaysOnTop = await window.floatingWindow.toggleAlwaysOnTop();
+  renderFloating({ isAlwaysOnTop });
+});
+
+closeButton.addEventListener('click', () => {
+  window.floatingWindow.hide();
+});
 
 window.devPulse.getState().then(render);
 window.devPulse.onStateChanged(render);
+
+window.floatingWindow.getState().then(renderFloating);
+window.floatingWindow.onStateChanged(renderFloating);
+window.floatingWindow.onCollapsedChanged((isCollapsed) => {
+  renderFloating({ isCollapsed });
+  if (latestState) {
+    render(latestState);
+  }
+});

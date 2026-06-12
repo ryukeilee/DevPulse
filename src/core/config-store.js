@@ -25,7 +25,13 @@ function defaultConfig() {
     scanDepth: 3,
     maxRecentFiles: 3,
     refreshDebounceMs: 1000,
-    pollFallbackMs: 30000
+    pollFallbackMs: 30000,
+    floatingWindow: {
+      x: null,
+      y: null,
+      alwaysOnTop: true,
+      collapsed: false
+    }
   };
 }
 
@@ -48,6 +54,13 @@ async function loadConfig(configDir = defaultConfigDir()) {
   }
 }
 
+async function saveConfig(config, configDir = defaultConfigDir()) {
+  await fs.mkdir(configDir, { recursive: true });
+  const configPath = config.configPath || path.join(configDir, 'config.json');
+  const { configPath: _configPath, ...serializableConfig } = config;
+  await fs.writeFile(configPath, `${JSON.stringify(serializableConfig, null, 2)}\n`);
+}
+
 function normalizeConfig(config, configPath) {
   return {
     ...config,
@@ -57,12 +70,23 @@ function normalizeConfig(config, configPath) {
     scanDepth: Number.isInteger(config.scanDepth) ? config.scanDepth : 3,
     maxRecentFiles: Number.isInteger(config.maxRecentFiles) ? config.maxRecentFiles : 3,
     refreshDebounceMs: Number.isInteger(config.refreshDebounceMs) ? config.refreshDebounceMs : 1000,
-    pollFallbackMs: Number.isInteger(config.pollFallbackMs) ? config.pollFallbackMs : 30000
+    pollFallbackMs: Number.isInteger(config.pollFallbackMs) ? config.pollFallbackMs : 30000,
+    floatingWindow: normalizeFloatingWindow(config.floatingWindow)
+  };
+}
+
+function normalizeFloatingWindow(floatingWindow = {}) {
+  return {
+    x: Number.isFinite(floatingWindow.x) ? floatingWindow.x : null,
+    y: Number.isFinite(floatingWindow.y) ? floatingWindow.y : null,
+    alwaysOnTop: typeof floatingWindow.alwaysOnTop === 'boolean' ? floatingWindow.alwaysOnTop : true,
+    collapsed: typeof floatingWindow.collapsed === 'boolean' ? floatingWindow.collapsed : false
   };
 }
 
 module.exports = {
   DEFAULT_IGNORED_DIRS,
   defaultConfig,
-  loadConfig
+  loadConfig,
+  saveConfig
 };

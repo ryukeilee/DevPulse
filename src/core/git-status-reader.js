@@ -20,16 +20,24 @@ async function runGit(args, cwd, timeout = GIT_TIMEOUT_MS) {
 }
 
 function parseStatusShort(output) {
+  return parseStatusEntries(output).map((entry) => entry.path);
+}
+
+function parseStatusEntries(output) {
   return output
     .split(/\r?\n/)
     .map((line) => line.trimEnd())
     .filter(Boolean)
     .map((line) => {
+      const status = line.slice(0, 2).trim() || '??';
       const rawPath = line.slice(3).trim();
       const renameTarget = rawPath.includes(' -> ') ? rawPath.split(' -> ').pop() : rawPath;
-      return renameTarget.replace(/^"|"$/g, '');
+      return {
+        status,
+        path: renameTarget.replace(/^"|"$/g, '')
+      };
     })
-    .filter(Boolean);
+    .filter((entry) => entry.path);
 }
 
 async function readGitStatus(repoPath) {
@@ -40,13 +48,15 @@ async function readGitStatus(repoPath) {
     runGit(['log', '-1', '--pretty=%cI'], repoPath)
   ]);
 
-  const changedFiles = parseStatusShort(statusOutput);
+  const changedEntries = parseStatusEntries(statusOutput);
+  const changedFiles = changedEntries.map((entry) => entry.path);
 
   return {
     name: path.basename(repoPath),
     path: repoPath,
     branch: branch || 'unknown',
     dirty: changedFiles.length > 0,
+    changedEntries,
     changedFiles,
     lastCommitMessage,
     lastCommitAt: lastCommitAt || null,
@@ -55,6 +65,7 @@ async function readGitStatus(repoPath) {
 }
 
 module.exports = {
+  parseStatusEntries,
   parseStatusShort,
   readGitStatus,
   runGit
