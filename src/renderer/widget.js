@@ -10,6 +10,7 @@ const miniMeta = document.getElementById('mini-meta');
 const collapseButton = document.getElementById('collapse-button');
 const pinButton = document.getElementById('pin-button');
 const miniExpandButton = document.getElementById('mini-expand-button');
+const closeButton = document.getElementById('widget-close-button');
 
 let latestState = null;
 let floatingState = {
@@ -57,6 +58,8 @@ function renderFloating(nextState) {
   collapseButton.title = floatingState.isCollapsed ? '展开' : '折叠';
   pinButton.textContent = floatingState.isAlwaysOnTop ? 'Pin' : 'Free';
   pinButton.title = floatingState.isAlwaysOnTop ? '关闭置顶' : '开启置顶';
+  miniExpandButton.textContent = '+';
+  miniExpandButton.title = '展开详细信息';
 }
 
 function normalizeEntries(project) {
@@ -115,6 +118,10 @@ pinButton.addEventListener('click', async () => {
 miniExpandButton.addEventListener('click', async () => {
   const isCollapsed = await window.floatingWindow.toggleCollapse();
   renderFloating({ isCollapsed });
+});
+
+closeButton.addEventListener('click', () => {
+  window.desktopWidget?.quitApp();
 });
 
 window.devPulse.getState().then(render);

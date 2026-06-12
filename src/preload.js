@@ -9,6 +9,10 @@ contextBridge.exposeInMainWorld('devPulse', {
   }
 });
 
+contextBridge.exposeInMainWorld('desktopWidget', {
+  quitApp: () => ipcRenderer.invoke('app:quit')
+});
+
 contextBridge.exposeInMainWorld('floatingWindow', {
   getState: () => ipcRenderer.invoke('floating:get-state'),
   toggleAlwaysOnTop: () => ipcRenderer.invoke('floating:toggle-always-on-top'),

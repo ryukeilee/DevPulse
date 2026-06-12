@@ -27,6 +27,21 @@ let isQuitting = false;
 let saveFloatingBounds = null;
 const scheduleRefreshAllProjects = debounce(refreshAllProjects, 1000);
 
+function configureMacBackgroundMode() {
+  if (process.platform !== 'darwin') {
+    return;
+  }
+
+  app.setActivationPolicy('accessory');
+  app.once('ready', () => {
+    app.dock.hide();
+    app.hide();
+  });
+  app.on('activate', () => {
+    app.dock.hide();
+  });
+}
+
 async function createFloatingWindow() {
   isAlwaysOnTop = config.floatingWindow.alwaysOnTop;
   isCollapsed = config.floatingWindow.collapsed;
@@ -85,16 +100,16 @@ async function createFloatingWindow() {
 }
 
 async function bootstrap() {
-  if (process.platform === 'darwin') {
-    app.setActivationPolicy('accessory');
-    app.dock.hide();
-  }
-
   const configDir = defaultConfigDir();
   config = await loadConfig(configDir);
   state = await loadState(configDir);
 
   ipcMain.handle('devpulse:get-state', () => state);
+  ipcMain.handle('app:quit', () => {
+    isQuitting = true;
+    app.quit();
+    return true;
+  });
   registerFloatingIpc();
 
   await createFloatingWindow();
@@ -217,10 +232,13 @@ function mergeProject(projects, updatedProject) {
   return [...byPath.values()];
 }
 
+configureMacBackgroundMode();
 app.whenReady().then(bootstrap);
 
 app.on('window-all-closed', (event) => {
-  event.preventDefault();
+  if (!isQuitting) {
+    event.preventDefault();
+  }
 });
 
 app.on('before-quit', async () => {

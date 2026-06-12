@@ -3,6 +3,8 @@
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
   background: transparent;
   color: rgba(255, 255, 255, 0.92);
+  --control-size: 24px;
+  --control-radius: 8px;
 }
 
 * {
@@ -23,6 +25,7 @@ body {
 }
 
 .widget {
+  position: relative;
   width: 100%;
   height: 100%;
   overflow: hidden;
@@ -50,6 +53,7 @@ button {
   align-items: center;
   justify-content: space-between;
   min-height: 24px;
+  padding-right: 112px;
   margin-bottom: 12px;
 }
 
@@ -60,19 +64,23 @@ button {
   letter-spacing: 0;
 }
 
-.actions {
+.window-controls {
+  position: absolute;
+  top: 8px;
+  right: 8px;
   display: flex;
   gap: 6px;
+  z-index: 9999;
 }
 
 .icon-button {
   display: inline-flex;
-  width: 24px;
-  height: 22px;
+  width: var(--control-size);
+  height: var(--control-size);
   align-items: center;
   justify-content: center;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 7px;
+  border-radius: var(--control-radius);
   background: rgba(255, 255, 255, 0.08);
   color: rgba(255, 255, 255, 0.82);
   font: inherit;
@@ -85,6 +93,32 @@ button {
 .icon-button:hover {
   background: rgba(255, 255, 255, 0.14);
   color: rgba(255, 255, 255, 0.96);
+}
+
+.widget-close-button {
+  display: inline-flex;
+  width: var(--control-size);
+  height: var(--control-size);
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.8);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  outline: none;
+}
+
+.widget-close-button:hover {
+  background: rgba(255, 95, 86, 0.9);
+  color: #ffffff;
 }
 
 .summary-row {
@@ -186,18 +220,23 @@ button {
   padding: 11px 14px;
 }
 
-.widget.is-collapsed .widget__header,
 .widget.is-collapsed .summary-row,
 .widget.is-collapsed .block,
 .widget.is-collapsed .stats {
   display: none;
 }
 
+.widget.is-collapsed .collapse-control,
+.widget.is-collapsed .pin-control {
+  display: none;
+}
+
+.widget:not(.is-collapsed) .expand-control {
+  display: none;
+}
+
 .widget.is-collapsed .mini-view {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 34px;
-  align-items: center;
-  gap: 10px;
 }
 
 .mini-copy {
@@ -212,26 +251,4 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.mini-expand {
-  display: inline-flex;
-  width: 32px;
-  height: 32px;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 11px;
-  background: rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.9);
-  font: inherit;
-  font-size: 18px;
-  font-weight: 650;
-  line-height: 1;
-  padding: 0;
-}
-
-.mini-expand:hover {
-  background: rgba(255, 255, 255, 0.17);
-  color: rgba(255, 255, 255, 1);
 }

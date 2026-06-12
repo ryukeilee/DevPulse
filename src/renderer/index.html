@@ -10,11 +10,14 @@
     <main class="widget" id="widget" aria-live="polite">
       <header class="widget__header drag-region">
         <div class="brand">DevPulse</div>
-        <div class="actions no-drag" aria-label="窗口操作">
-          <button class="icon-button" id="collapse-button" type="button" title="折叠">-</button>
-          <button class="icon-button" id="pin-button" type="button" title="关闭置顶">Pin</button>
-        </div>
       </header>
+
+      <div class="window-controls no-drag" aria-label="窗口操作">
+        <button class="widget-close-button" id="widget-close-button" type="button" title="关闭应用" aria-label="关闭应用">×</button>
+        <button class="icon-button collapse-control" id="collapse-button" type="button" title="折叠">-</button>
+        <button class="icon-button pin-control" id="pin-button" type="button" title="关闭置顶">Pin</button>
+        <button class="icon-button expand-control" id="mini-expand-button" type="button" title="展开详细信息">+</button>
+      </div>
 
       <section class="summary-row">
         <div>
@@ -51,7 +54,6 @@
           <div class="mini-title" id="mini-title">DevPulse · watching</div>
           <div class="mini-meta" id="mini-meta">main · --:--</div>
         </div>
-        <button class="mini-expand no-drag" id="mini-expand-button" type="button" title="展开详细信息">+</button>
       </section>
     </main>
 
