@@ -94,7 +94,9 @@ function composeTitle(primaryKey, secondaryKey) {
     'data:menu': '数据读取与界面状态',
     'menu:data': '界面与数据读取',
     'config:menu': '配置与界面调整',
-    'menu:config': '界面与偏好设置'
+    'menu:config': '界面与偏好设置',
+    'config:docs': '配置与文档更新',
+    'docs:config': '文档与配置更新'
   };
 
   const key = `${primaryKey}:${secondaryKey}`;

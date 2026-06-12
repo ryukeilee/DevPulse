@@ -33,6 +33,15 @@ test('multiple categories compose a combined summary', () => {
   assert.deepEqual(result.tags, ['refresh', 'menu']);
 });
 
+test('config and docs compose a natural summary', () => {
+  const result = classifyChanges([
+    'README.md',
+    'apps/api/src/config/configuration.ts'
+  ]);
+
+  assert.equal(result.title, '配置与文档更新');
+});
+
 test('unknown files fall back to generic project change summary', () => {
   const result = classifyChanges(['src/core/alpha.js']);
   assert.equal(result.title, '项目文件改动');

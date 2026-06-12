@@ -13,7 +13,7 @@ async function runGit(args, cwd, timeout = GIT_TIMEOUT_MS) {
       maxBuffer: 1024 * 256,
       windowsHide: true
     });
-    return stdout.trim();
+    return stdout.trimEnd();
   } catch {
     return '';
   }
@@ -54,12 +54,12 @@ async function readGitStatus(repoPath) {
   return {
     name: path.basename(repoPath),
     path: repoPath,
-    branch: branch || 'unknown',
+    branch: branch.trim() || 'unknown',
     dirty: changedFiles.length > 0,
     changedEntries,
     changedFiles,
-    lastCommitMessage,
-    lastCommitAt: lastCommitAt || null,
+    lastCommitMessage: lastCommitMessage.trim(),
+    lastCommitAt: lastCommitAt.trim() || null,
     lastActivityAt: changedFiles.length > 0 ? new Date().toISOString() : null
   };
 }

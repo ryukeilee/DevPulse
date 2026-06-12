@@ -14,6 +14,10 @@ test('parses git status short changed file paths', () => {
   ]);
 });
 
+test('preserves modified path when status output starts with a leading space', () => {
+  assert.deepEqual(parseStatusShort(' M README.md'), ['README.md']);
+});
+
 test('parses rename target from git status short', () => {
   assert.deepEqual(parseStatusShort('R  old.js -> src/new.js'), ['src/new.js']);
 });
