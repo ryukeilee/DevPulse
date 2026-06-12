@@ -1,0 +1,44 @@
+{
+  "name": "devpulse",
+  "version": "0.1.0",
+  "description": "A local-first macOS desktop widget for recent Git activity.",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "build:app": "electron-builder --mac",
+    "scan:secrets": "scripts/secret-scan.sh tracked"
+  },
+  "keywords": [
+    "electron",
+    "git",
+    "macos",
+    "desktop-widget"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "chokidar": "^3.6.0"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "local.devpulse.app",
+    "productName": "DevPulse",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg"
+      ]
+    }
+  },
+  "allowScripts": {
+    "electron@31.7.7": true
+  }
+}

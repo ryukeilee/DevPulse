@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DevPulse</title>
+    <link rel="stylesheet" href="./widget.css">
+  </head>
+  <body>
+    <main class="widget" aria-live="polite">
+      <header class="widget__header">
+        <div class="brand">DevPulse</div>
+        <div class="status-dot" aria-hidden="true"></div>
+      </header>
+
+      <section class="block">
+        <div class="label">当前项目</div>
+        <div class="value value--project" id="project-name">暂无活跃项目</div>
+      </section>
+
+      <section class="block">
+        <div class="label">刚刚改动</div>
+        <div class="value" id="change-summary">等待本地 Git 变化</div>
+      </section>
+
+      <section class="block">
+        <div class="label">最近文件</div>
+        <ul class="file-list" id="recent-files">
+          <li>暂无</li>
+        </ul>
+      </section>
+
+      <section class="block block--status">
+        <div class="label">状态</div>
+        <div class="status-text" id="status-text">正在监听项目目录</div>
+      </section>
+
+      <section class="other-projects" id="other-projects" hidden>
+        <div class="label">其他活跃</div>
+        <ul class="other-list" id="other-list"></ul>
+      </section>
+    </main>
+
+    <script src="./widget.js"></script>
+  </body>
+</html>

@@ -1,0 +1,145 @@
+:root {
+  color-scheme: light dark;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+  background: transparent;
+  color: rgba(20, 24, 31, 0.92);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+body {
+  padding: 8px;
+}
+
+.widget {
+  width: 100%;
+  height: 100%;
+  padding: 14px 15px 13px;
+  border: 1px solid rgba(255, 255, 255, 0.58);
+  border-radius: 18px;
+  background: rgba(246, 248, 251, 0.78);
+  box-shadow:
+    0 18px 48px rgba(21, 31, 48, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.56);
+  -webkit-app-region: drag;
+  backdrop-filter: blur(22px) saturate(1.2);
+}
+
+.widget__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.brand {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #20a96b;
+  box-shadow: 0 0 0 4px rgba(32, 169, 107, 0.12);
+}
+
+.block {
+  margin-top: 9px;
+}
+
+.label {
+  color: rgba(71, 79, 92, 0.72);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.15;
+}
+
+.value {
+  margin-top: 3px;
+  color: rgba(14, 19, 27, 0.94);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.value--project {
+  font-size: 15px;
+}
+
+.file-list,
+.other-list {
+  display: grid;
+  gap: 3px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.file-list li,
+.other-list li,
+.status-text {
+  color: rgba(30, 37, 48, 0.82);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-text {
+  margin-top: 3px;
+}
+
+.other-projects {
+  margin-top: 8px;
+}
+
+.other-list {
+  grid-template-columns: 1fr;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: rgba(245, 247, 250, 0.94);
+  }
+
+  .widget {
+    border-color: rgba(255, 255, 255, 0.11);
+    background: rgba(30, 34, 42, 0.72);
+    box-shadow:
+      0 18px 52px rgba(0, 0, 0, 0.32),
+      inset 0 1px 0 rgba(255, 255, 255, 0.09);
+  }
+
+  .label {
+    color: rgba(214, 220, 229, 0.62);
+  }
+
+  .value {
+    color: rgba(250, 252, 255, 0.94);
+  }
+
+  .file-list li,
+  .other-list li,
+  .status-text {
+    color: rgba(229, 234, 242, 0.78);
+  }
+}
