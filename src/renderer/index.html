@@ -14,9 +14,9 @@
 
       <div class="window-controls no-drag" aria-label="窗口操作">
         <button class="widget-close-button" id="widget-close-button" type="button" title="关闭应用" aria-label="关闭应用">×</button>
-        <button class="icon-button collapse-control" id="collapse-button" type="button" title="折叠">-</button>
+        <button class="icon-button mode-control" id="collapse-button" type="button" title="切换为迷你模式">迷你</button>
         <button class="icon-button pin-control" id="pin-button" type="button" title="关闭置顶">Pin</button>
-        <button class="icon-button expand-control" id="mini-expand-button" type="button" title="展开详细信息">+</button>
+        <button class="icon-button expand-control" id="mini-expand-button" type="button" title="切换为完整模式">完整</button>
       </div>
 
       <section class="summary-row">
@@ -29,6 +29,16 @@
       <section class="block">
         <div class="label">Git 状态摘要</div>
         <div class="value" id="change-summary">等待本地 Git 变化</div>
+      </section>
+
+      <section class="block risk-block">
+        <div class="label">风险提示</div>
+        <div class="risk-hint risk-hint--low" id="risk-hint">暂无明显风险</div>
+      </section>
+
+      <section class="block commit-readiness-block">
+        <div class="label">提交建议</div>
+        <div class="commit-readiness commit-readiness--empty" id="commit-readiness">暂无待提交改动</div>
       </section>
 
       <section class="stats">
@@ -46,6 +56,13 @@
         <div class="label">最近改动</div>
         <ul class="file-list" id="recent-files">
           <li>暂无</li>
+        </ul>
+      </section>
+
+      <section class="block activity-block">
+        <div class="label">最近活动</div>
+        <ul class="activity-list" id="activity-list">
+          <li>暂无最近活动</li>
         </ul>
       </section>
 

@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('floatingWindow', {
   getState: () => ipcRenderer.invoke('floating:get-state'),
   toggleAlwaysOnTop: () => ipcRenderer.invoke('floating:toggle-always-on-top'),
   toggleCollapse: () => ipcRenderer.invoke('floating:toggle-collapse'),
+  setDisplayMode: (displayMode) => ipcRenderer.invoke('floating:set-display-mode', displayMode),
   hide: () => ipcRenderer.invoke('floating:hide'),
   show: () => ipcRenderer.invoke('floating:show'),
   onStateChanged: (callback) => {

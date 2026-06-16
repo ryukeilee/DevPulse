@@ -63,6 +63,66 @@ test('watcher-observed activity outranks stale dirty projects', () => {
   assert.equal(next.projects[0].name, 'devpulse');
 });
 
+test('buildState includes recent activity records', () => {
+  const next = buildState([
+    project('devpulse', {
+      dirty: true,
+      changedEntries: [{ status: 'M', path: 'src/core/state-store.js' }],
+      changedFiles: ['src/core/state-store.js']
+    })
+  ], {
+    projects: [],
+    activities: [],
+    activeProjectPath: null,
+    updatedAt: '2026-06-12T11:00:00.000Z'
+  }, new Date('2026-06-12T12:00:00.000Z'));
+
+  assert.equal(next.activities.length, 1);
+  assert.equal(next.activities[0].projectName, 'devpulse');
+  assert.equal(next.activities[0].changedFileCount, 1);
+  assert.equal(next.activities[0].changeTypeSummary, '本地存储调整');
+});
+
+test('buildState includes risk hints from changed files', () => {
+  const next = buildState([
+    project('devpulse', {
+      dirty: true,
+      changedEntries: [{ status: 'M', path: 'src/preload.js' }],
+      changedFiles: ['src/preload.js']
+    })
+  ], {
+    projects: [],
+    activities: [],
+    activeProjectPath: null,
+    updatedAt: '2026-06-12T11:00:00.000Z'
+  }, new Date('2026-06-12T12:00:00.000Z'));
+
+  assert.equal(next.projects[0].riskHint.level, 'high');
+  assert.equal(next.projects[0].riskHint.message, '主进程或 Electron 配置已变更，建议重点验证窗口行为与启动流程。');
+  assert.deepEqual(next.projects[0].riskHint.matchedRules, ['electron-main-or-preload']);
+  assert.deepEqual(next.projects[0].riskHint.matchedFiles, ['src/preload.js']);
+});
+
+test('buildState includes commit readiness from changed files', () => {
+  const next = buildState([
+    project('devpulse', {
+      dirty: true,
+      changedEntries: [{ status: 'M', path: 'README.md' }],
+      changedFiles: ['README.md']
+    })
+  ], {
+    projects: [],
+    activities: [],
+    activeProjectPath: null,
+    updatedAt: '2026-06-12T11:00:00.000Z'
+  }, new Date('2026-06-12T12:00:00.000Z'));
+
+  assert.equal(next.projects[0].commitReadiness.status, 'ready');
+  assert.equal(next.projects[0].commitReadiness.statusLabel, '适合提交');
+  assert.equal(next.projects[0].commitReadiness.message, '文档类改动，适合直接提交。');
+  assert.deepEqual(next.projects[0].commitReadiness.matchedRules, ['docs-only-change']);
+});
+
 function project(name, overrides = {}) {
   return {
     name,

@@ -3,10 +3,14 @@ const path = require('node:path');
 const { defaultConfigDir } = require('../utils/path-utils');
 const { classifyChanges } = require('./change-classifier');
 const { pickActiveProject, rankProjects } = require('./activity-ranker');
+const { updateActivityTimeline } = require('./activity-timeline');
+const { assessRiskHint } = require('./risk-hint');
+const { assessCommitReadiness } = require('./commit-readiness');
 
 function emptyState() {
   return {
     projects: [],
+    activities: [],
     activeProjectPath: null,
     updatedAt: new Date().toISOString()
   };
@@ -52,7 +56,9 @@ function buildState(projects, previousState = emptyState(), now = new Date()) {
       changeSignature: currentSignature,
       lastActivityAt,
       summary: summary.title,
-      tags: summary.tags
+      tags: summary.tags,
+      riskHint: assessRiskHint(changedFiles),
+      commitReadiness: assessCommitReadiness(changedFiles)
     };
   });
 
@@ -61,6 +67,7 @@ function buildState(projects, previousState = emptyState(), now = new Date()) {
 
   return {
     projects: rankedProjects,
+    activities: updateActivityTimeline(rankedProjects, previousState, now),
     activeProjectPath: activeProject?.path || null,
     updatedAt: now.toISOString()
   };

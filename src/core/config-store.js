@@ -30,7 +30,8 @@ function defaultConfig() {
       x: null,
       y: null,
       alwaysOnTop: true,
-      collapsed: false
+      collapsed: false,
+      displayMode: 'full'
     }
   };
 }
@@ -44,13 +45,13 @@ async function loadConfig(configDir = defaultConfigDir()) {
     const parsed = JSON.parse(raw);
     return normalizeConfig({ ...defaultConfig(), ...parsed }, configPath);
   } catch (error) {
-    if (error.code !== 'ENOENT') {
-      throw error;
+    if (error.code === 'ENOENT') {
+      const config = defaultConfig();
+      await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+      return normalizeConfig(config, configPath);
     }
 
-    const config = defaultConfig();
-    await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
-    return normalizeConfig(config, configPath);
+    return normalizeConfig(defaultConfig(), configPath);
   }
 }
 
@@ -76,11 +77,16 @@ function normalizeConfig(config, configPath) {
 }
 
 function normalizeFloatingWindow(floatingWindow = {}) {
+  const displayMode = ['full', 'mini'].includes(floatingWindow.displayMode)
+    ? floatingWindow.displayMode
+    : 'full';
+
   return {
     x: Number.isFinite(floatingWindow.x) ? floatingWindow.x : null,
     y: Number.isFinite(floatingWindow.y) ? floatingWindow.y : null,
     alwaysOnTop: typeof floatingWindow.alwaysOnTop === 'boolean' ? floatingWindow.alwaysOnTop : true,
-    collapsed: typeof floatingWindow.collapsed === 'boolean' ? floatingWindow.collapsed : false
+    collapsed: displayMode === 'mini',
+    displayMode
   };
 }
 

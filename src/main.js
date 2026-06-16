@@ -10,7 +10,7 @@ const { defaultConfigDir } = require('./utils/path-utils');
 const { debounce } = require('./utils/debounce');
 const { log, warn } = require('./utils/logger');
 
-const expandedSize = { width: 360, height: 260 };
+const expandedSize = { width: 360, height: 380 };
 const collapsedSize = { width: 300, height: 72 };
 
 let floatingWindow = null;
@@ -23,6 +23,7 @@ let pollTimer = null;
 let tray = null;
 let isAlwaysOnTop = true;
 let isCollapsed = false;
+let displayMode = 'full';
 let isQuitting = false;
 let saveFloatingBounds = null;
 const scheduleRefreshAllProjects = debounce(refreshAllProjects, 1000);
@@ -56,7 +57,8 @@ hideMacDock();
 
 async function createFloatingWindow() {
   isAlwaysOnTop = config.floatingWindow.alwaysOnTop;
-  isCollapsed = config.floatingWindow.collapsed;
+  displayMode = normalizeDisplayMode(config.floatingWindow.displayMode);
+  isCollapsed = displayMode === 'mini';
   const size = isCollapsed ? collapsedSize : expandedSize;
 
   floatingWindow = new BrowserWindow({
@@ -275,8 +277,12 @@ function registerFloatingIpc() {
     return isAlwaysOnTop;
   });
   ipcMain.handle('floating:toggle-collapse', () => {
-    setCollapsed(!isCollapsed);
+    setDisplayMode(isCollapsed ? 'full' : 'mini');
     return isCollapsed;
+  });
+  ipcMain.handle('floating:set-display-mode', (_event, nextMode) => {
+    setDisplayMode(nextMode);
+    return displayMode;
   });
   ipcMain.handle('floating:hide', () => {
     floatingWindow?.hide();
@@ -291,7 +297,8 @@ function registerFloatingIpc() {
 function getFloatingState() {
   return {
     isAlwaysOnTop,
-    isCollapsed
+    isCollapsed,
+    displayMode
   };
 }
 
@@ -303,14 +310,19 @@ function setFloatingAlwaysOnTop(enabled) {
   floatingWindow?.webContents.send('floating:state-changed', getFloatingState());
 }
 
-function setCollapsed(next) {
-  isCollapsed = next;
-  const size = next ? collapsedSize : expandedSize;
+function setDisplayMode(nextMode) {
+  displayMode = normalizeDisplayMode(nextMode);
+  isCollapsed = displayMode === 'mini';
+  const size = isCollapsed ? collapsedSize : expandedSize;
   floatingWindow?.setSize(size.width, size.height, true);
   persistFloatingBounds();
   updateTrayMenu();
-  floatingWindow?.webContents.send('floating:collapsed-changed', next);
+  floatingWindow?.webContents.send('floating:collapsed-changed', isCollapsed);
   floatingWindow?.webContents.send('floating:state-changed', getFloatingState());
+}
+
+function normalizeDisplayMode(nextMode) {
+  return nextMode === 'mini' ? 'mini' : 'full';
 }
 
 function restoreFloatingBounds() {
@@ -343,7 +355,8 @@ function persistFloatingBounds() {
       x: bounds.x,
       y: bounds.y,
       alwaysOnTop: isAlwaysOnTop,
-      collapsed: isCollapsed
+      collapsed: isCollapsed,
+      displayMode
     }
   };
 
@@ -383,10 +396,10 @@ function updateTrayMenu() {
       click: (item) => setFloatingAlwaysOnTop(item.checked)
     },
     {
-      label: '折叠悬浮窗',
+      label: '迷你模式',
       type: 'checkbox',
-      checked: isCollapsed,
-      click: (item) => setCollapsed(item.checked)
+      checked: displayMode === 'mini',
+      click: (item) => setDisplayMode(item.checked ? 'mini' : 'full')
     },
     { type: 'separator' },
     {
