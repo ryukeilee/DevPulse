@@ -2,10 +2,17 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('devPulse', {
   getState: () => ipcRenderer.invoke('devpulse:get-state'),
+  getConfig: () => ipcRenderer.invoke('devpulse:get-config'),
+  updateSettings: (settings) => ipcRenderer.invoke('devpulse:update-settings', settings),
   onStateChanged: (callback) => {
     const listener = (_event, state) => callback(state);
     ipcRenderer.on('devpulse:state-changed', listener);
     return () => ipcRenderer.removeListener('devpulse:state-changed', listener);
+  },
+  onConfigChanged: (callback) => {
+    const listener = (_event, config) => callback(config);
+    ipcRenderer.on('devpulse:config-changed', listener);
+    return () => ipcRenderer.removeListener('devpulse:config-changed', listener);
   }
 });
 

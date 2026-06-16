@@ -10,8 +10,8 @@ const { defaultConfigDir } = require('./utils/path-utils');
 const { debounce } = require('./utils/debounce');
 const { log, warn } = require('./utils/logger');
 
-const expandedSize = { width: 360, height: 380 };
-const collapsedSize = { width: 300, height: 72 };
+const expandedSize = { width: 390, height: 640 };
+const collapsedSize = { width: 320, height: 210 };
 
 let floatingWindow = null;
 let config = null;
@@ -122,8 +122,11 @@ async function bootstrap() {
   const configDir = defaultConfigDir();
   config = await loadConfig(configDir);
   state = await loadState(configDir);
+  syncOpenAtLogin(config.openAtLogin);
 
   ipcMain.handle('devpulse:get-state', () => state);
+  ipcMain.handle('devpulse:get-config', () => publicConfig(config));
+  ipcMain.handle('devpulse:update-settings', async (_event, settings) => updateSettings(settings));
   ipcMain.handle('app:quit', () => {
     isQuitting = true;
     app.quit();
@@ -185,6 +188,82 @@ async function reloadConfigAndRefresh() {
   } catch (error) {
     warn('Config reload failed', error.message);
   }
+}
+
+async function updateSettings(settings = {}) {
+  const nextPollFallbackMs = normalizePollFallbackMs(settings.pollFallbackMs, config.pollFallbackMs);
+  const nextDisplayMode = normalizeDisplayMode(settings.displayMode || config.floatingWindow.displayMode);
+  const nextConfig = {
+    ...config,
+    pollFallbackMs: nextPollFallbackMs,
+    notificationsEnabled: typeof settings.notificationsEnabled === 'boolean'
+      ? settings.notificationsEnabled
+      : config.notificationsEnabled,
+    openAtLogin: typeof settings.openAtLogin === 'boolean'
+      ? settings.openAtLogin
+      : config.openAtLogin,
+    dataRetentionDays: normalizeDataRetentionDays(settings.dataRetentionDays, config.dataRetentionDays),
+    floatingWindow: {
+      ...config.floatingWindow,
+      displayMode: nextDisplayMode,
+      collapsed: nextDisplayMode === 'mini'
+    }
+  };
+
+  await saveConfig(nextConfig, defaultConfigDir());
+  config = await loadConfig(defaultConfigDir());
+
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = setInterval(refreshAllProjects, config.pollFallbackMs);
+  }
+
+  syncOpenAtLogin(config.openAtLogin);
+  setDisplayMode(config.floatingWindow.displayMode);
+  updateTrayMenu();
+  floatingWindow?.webContents.send('devpulse:config-changed', publicConfig(config));
+  return publicConfig(config);
+}
+
+function publicConfig(nextConfig) {
+  return {
+    pollFallbackMs: nextConfig.pollFallbackMs,
+    notificationsEnabled: nextConfig.notificationsEnabled,
+    openAtLogin: nextConfig.openAtLogin,
+    dataRetentionDays: nextConfig.dataRetentionDays,
+    floatingWindow: {
+      displayMode: normalizeDisplayMode(nextConfig.floatingWindow?.displayMode)
+    }
+  };
+}
+
+function syncOpenAtLogin(enabled) {
+  if (process.platform !== 'darwin') {
+    return;
+  }
+
+  app.setLoginItemSettings({
+    openAtLogin: Boolean(enabled),
+    openAsHidden: true
+  });
+}
+
+function normalizePollFallbackMs(value, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+
+  return Math.min(30 * 60 * 1000, Math.max(5000, Math.round(numeric)));
+}
+
+function normalizeDataRetentionDays(value, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+
+  return Math.min(90, Math.max(1, Math.round(numeric)));
 }
 
 function discoverySignature(nextConfig) {

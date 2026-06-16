@@ -26,6 +26,9 @@ function defaultConfig() {
     maxRecentFiles: 3,
     refreshDebounceMs: 1000,
     pollFallbackMs: 30000,
+    notificationsEnabled: false,
+    openAtLogin: false,
+    dataRetentionDays: 14,
     floatingWindow: {
       x: null,
       y: null,
@@ -72,8 +75,19 @@ function normalizeConfig(config, configPath) {
     maxRecentFiles: Number.isInteger(config.maxRecentFiles) ? config.maxRecentFiles : 3,
     refreshDebounceMs: Number.isInteger(config.refreshDebounceMs) ? config.refreshDebounceMs : 1000,
     pollFallbackMs: Number.isInteger(config.pollFallbackMs) ? config.pollFallbackMs : 30000,
+    notificationsEnabled: typeof config.notificationsEnabled === 'boolean' ? config.notificationsEnabled : false,
+    openAtLogin: typeof config.openAtLogin === 'boolean' ? config.openAtLogin : false,
+    dataRetentionDays: normalizeDataRetentionDays(config.dataRetentionDays),
     floatingWindow: normalizeFloatingWindow(config.floatingWindow)
   };
+}
+
+function normalizeDataRetentionDays(days) {
+  if (!Number.isInteger(days)) {
+    return 14;
+  }
+
+  return Math.min(90, Math.max(1, days));
 }
 
 function normalizeFloatingWindow(floatingWindow = {}) {
