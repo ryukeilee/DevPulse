@@ -14,6 +14,8 @@
   --attention: #ffd166;
   --risk: #ff8a80;
   --blue: #8ab4ff;
+  --action-height: 30px;
+  --action-gap: 8px;
 }
 
 * {
@@ -37,8 +39,11 @@ select {
 
 .widget {
   position: relative;
+  display: flex;
+  flex-direction: column;
   width: 100%;
   height: 100%;
+  min-height: 0;
   overflow: hidden;
   padding: 14px;
   border: 1px solid rgba(255, 255, 255, 0.11);
@@ -64,12 +69,53 @@ select {
 }
 
 .widget__header {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
   min-height: 24px;
-  padding-right: 112px;
+  padding-right: 92px;
   margin-bottom: 10px;
+}
+
+.widget__body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.widget__scroll {
+  display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 10px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+}
+
+.action-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--action-gap);
+  flex: 0 0 auto;
+}
+
+.pin-control,
+.mode-control,
+.close-control,
+.settings-close-button,
+.expand-control {
+  width: 100%;
+}
+
+.close-control:hover {
+  background: rgba(255, 95, 86, 0.88);
+  border-color: rgba(255, 95, 86, 0.52);
+  color: #ffffff;
 }
 
 .brand {
@@ -108,52 +154,47 @@ select {
   top: 8px;
   right: 8px;
   display: flex;
-  gap: 6px;
+  gap: var(--action-gap);
   z-index: 5;
 }
 
-.icon-button,
-.widget-close-button {
+.action-button {
   display: inline-flex;
-  width: var(--control-size);
-  height: var(--control-size);
   align-items: center;
   justify-content: center;
+  min-width: 0;
+  height: var(--action-height);
+  padding: 0 12px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(255, 255, 255, 0.08);
   color: rgba(255, 255, 255, 0.82);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 740;
   line-height: 1;
-  padding: 0;
+  text-align: center;
   appearance: none;
   -webkit-appearance: none;
-}
-
-.icon-button {
-  border-radius: var(--control-radius);
-}
-
-.mode-control,
-.expand-control {
-  width: 38px;
-}
-
-.widget-close-button {
-  border-radius: 50%;
-  font-size: 15px;
+  border-radius: 9px;
   cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 
-.icon-button:hover,
-.widget-close-button:hover {
+.action-button:hover {
   background: rgba(255, 255, 255, 0.14);
   color: rgba(255, 255, 255, 0.96);
 }
 
-.widget-close-button:hover {
-  background: rgba(255, 95, 86, 0.9);
-  color: #ffffff;
+.action-button:focus-visible {
+  outline: 1px solid rgba(138, 180, 255, 0.85);
+  outline-offset: 1px;
+}
+
+.icon-button {
+  min-width: 80px;
+}
+
+.settings-control {
+  min-width: 80px;
 }
 
 .panel {
@@ -184,9 +225,8 @@ select {
   font-size: 18px;
   font-weight: 780;
   line-height: 1.15;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .project-meta,
@@ -204,9 +244,8 @@ select {
 
 .project-meta {
   margin-top: 5px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .overall-status--good {
@@ -264,7 +303,6 @@ select {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
-  margin-top: 10px;
 }
 
 .timeline-panel {
@@ -351,9 +389,8 @@ select {
   font-size: 12px;
   font-weight: 610;
   line-height: 1.2;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .risk-list {
@@ -431,16 +468,58 @@ select {
   line-height: 1.35;
 }
 
-.settings-panel {
-  padding: 11px;
-  margin-top: 10px;
-}
-
 .settings-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
   margin-top: 10px;
+}
+
+.settings-overlay {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+  z-index: 12;
+}
+
+.widget.is-settings-open .settings-overlay {
+  display: flex;
+}
+
+.settings-backdrop {
+  position: absolute;
+  inset: 0;
+  border-radius: 18px;
+  background: rgba(10, 10, 12, 0.52);
+  backdrop-filter: blur(12px);
+}
+
+.settings-dialog {
+  position: relative;
+  width: min(100%, 342px);
+  max-height: 100%;
+  padding: 12px;
+  overflow-y: auto;
+  background:
+    linear-gradient(180deg, rgba(36, 38, 42, 0.94), rgba(24, 25, 28, 0.9)),
+    rgba(28, 28, 30, 0.88);
+  box-shadow: 0 20px 42px rgba(0, 0, 0, 0.34);
+}
+
+.settings-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-header-actions {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
 }
 
 .setting-field {
@@ -490,20 +569,12 @@ select {
   padding: 12px 14px;
 }
 
+.widget.is-collapsed .widget__body,
 .widget.is-collapsed .project-header,
 .widget.is-collapsed .pulse-summary,
 .widget.is-collapsed .content-grid,
-.widget.is-collapsed .settings-panel,
+.widget.is-collapsed .settings-overlay,
 .widget.is-collapsed .refresh-badge {
-  display: none;
-}
-
-.widget.is-collapsed .mode-control,
-.widget.is-collapsed .pin-control {
-  display: none;
-}
-
-.widget:not(.is-collapsed) .expand-control {
   display: none;
 }
 
@@ -512,9 +583,19 @@ select {
   min-height: 0;
 }
 
+.widget.is-collapsed .window-controls {
+  display: none;
+}
+
+.mini-action-row {
+  margin-top: 4px;
+}
+
 .mini-copy {
   display: grid;
+  flex: 1 1 auto;
   gap: 8px;
+  min-height: 0;
   min-width: 0;
 }
 
@@ -542,6 +623,7 @@ select {
 }
 
 .mini-activity-list {
+  overflow: hidden;
   gap: 4px;
   margin-top: 0;
 }
@@ -555,4 +637,19 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@media (max-height: 680px) {
+  .content-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .risk-panel,
+  .readiness-panel {
+    min-height: 0;
+  }
+
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
 }

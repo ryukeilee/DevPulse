@@ -10,8 +10,9 @@ const { defaultConfigDir } = require('./utils/path-utils');
 const { debounce } = require('./utils/debounce');
 const { log, warn } = require('./utils/logger');
 
-const expandedSize = { width: 390, height: 640 };
+const expandedSize = { width: 390, height: 720, minHeight: 620 };
 const collapsedSize = { width: 320, height: 210 };
+const floatingWindowMargin = 48;
 
 let floatingWindow = null;
 let config = null;
@@ -63,12 +64,14 @@ async function createFloatingWindow() {
 
   floatingWindow = new BrowserWindow({
     width: size.width,
-    height: size.height,
+    height: isCollapsed ? size.height : resolveExpandedHeight(size.height),
     minWidth: collapsedSize.width,
     minHeight: collapsedSize.height,
+    maxWidth: expandedSize.width,
     frame: false,
     transparent: true,
-    resizable: false,
+    resizable: true,
+    useContentSize: true,
     movable: true,
     alwaysOnTop: isAlwaysOnTop,
     skipTaskbar: true,
@@ -90,6 +93,7 @@ async function createFloatingWindow() {
   });
   floatingWindow.setSkipTaskbar(true);
   floatingWindow.setMenuBarVisibility(false);
+  applyWindowSizing();
 
   restoreFloatingBounds();
   saveFloatingBounds = debounce(persistFloatingBounds, 250);
@@ -397,8 +401,7 @@ function setFloatingAlwaysOnTop(enabled) {
 function setDisplayMode(nextMode) {
   displayMode = normalizeDisplayMode(nextMode);
   isCollapsed = displayMode === 'mini';
-  const size = isCollapsed ? collapsedSize : expandedSize;
-  floatingWindow?.setSize(size.width, size.height, true);
+  applyWindowSizing(true);
   persistFloatingBounds();
   updateTrayMenu();
   floatingWindow?.webContents.send('floating:collapsed-changed', isCollapsed);
@@ -414,7 +417,9 @@ function restoreFloatingBounds() {
     return;
   }
 
-  const size = isCollapsed ? collapsedSize : expandedSize;
+  const size = isCollapsed
+    ? collapsedSize
+    : { width: expandedSize.width, height: resolveExpandedHeight(expandedSize.height) };
   floatingWindow.setBounds({
     x: config.floatingWindow.x,
     y: config.floatingWindow.y,
@@ -502,4 +507,51 @@ function setPositionToDesktopCorner(window) {
     Math.round(bounds.y + margin)
   );
   persistFloatingBounds();
+}
+
+function applyWindowSizing(shouldResize = false) {
+  if (!floatingWindow || floatingWindow.isDestroyed()) {
+    return;
+  }
+
+  if (isCollapsed) {
+    floatingWindow.setResizable(false);
+    floatingWindow.setMinimumSize(collapsedSize.width, collapsedSize.height);
+    floatingWindow.setMaximumSize(collapsedSize.width, collapsedSize.height);
+    if (shouldResize) {
+      floatingWindow.setSize(collapsedSize.width, collapsedSize.height, true);
+    }
+    return;
+  }
+
+  const maxHeight = maxExpandedHeight();
+  const currentBounds = floatingWindow.getBounds();
+  const nextHeight = clampExpandedHeight(currentBounds.height || expandedSize.height, maxHeight);
+
+  floatingWindow.setResizable(true);
+  floatingWindow.setMinimumSize(expandedSize.width, expandedSize.minHeight);
+  floatingWindow.setMaximumSize(expandedSize.width, maxHeight);
+
+  if (shouldResize || currentBounds.width !== expandedSize.width || currentBounds.height !== nextHeight) {
+    floatingWindow.setSize(expandedSize.width, nextHeight, true);
+  }
+}
+
+function maxExpandedHeight() {
+  const display = floatingWindow
+    ? screen.getDisplayMatching(floatingWindow.getBounds())
+    : screen.getPrimaryDisplay();
+
+  return Math.max(
+    expandedSize.minHeight,
+    Math.min(display.workArea.height - floatingWindowMargin, expandedSize.height)
+  );
+}
+
+function resolveExpandedHeight(height) {
+  return clampExpandedHeight(height, maxExpandedHeight());
+}
+
+function clampExpandedHeight(height, maxHeight = maxExpandedHeight()) {
+  return Math.max(expandedSize.minHeight, Math.min(maxHeight, Math.round(height || expandedSize.height)));
 }

@@ -29,11 +29,17 @@ const miniNextAction = document.getElementById('mini-next-action');
 const collapseButton = document.getElementById('collapse-button');
 const pinButton = document.getElementById('pin-button');
 const miniExpandButton = document.getElementById('mini-expand-button');
+const miniCloseButton = document.getElementById('mini-close-button');
 const closeButton = document.getElementById('widget-close-button');
+const settingsButton = document.getElementById('settings-button');
+const settingsOverlay = document.getElementById('settings-overlay');
+const settingsBackdrop = document.getElementById('settings-backdrop');
+const settingsCloseButton = document.getElementById('settings-close-button');
 
 let latestState = null;
 let latestConfig = null;
 let settingsSaveTimer = null;
+let settingsOpen = false;
 let floatingState = {
   isAlwaysOnTop: true,
   isCollapsed: false,
@@ -128,12 +134,17 @@ function renderFloating(nextState) {
   floatingState.displayMode = displayMode;
   floatingState.isCollapsed = isMini;
   widget.classList.toggle('is-collapsed', isMini);
+  if (isMini) {
+    setSettingsOpen(false);
+  }
   collapseButton.textContent = 'Mini';
   collapseButton.title = '切换为迷你模式';
   pinButton.textContent = floatingState.isAlwaysOnTop ? 'Pin' : 'Free';
   pinButton.title = floatingState.isAlwaysOnTop ? '关闭置顶' : '开启置顶';
   miniExpandButton.textContent = 'Full';
   miniExpandButton.title = '切换为完整模式';
+  settingsButton.textContent = 'Settings';
+  settingsButton.title = '打开设置';
 
   if (latestConfig) {
     renderConfig({
@@ -504,6 +515,12 @@ function scheduleSettingsSave() {
   settingsSaveTimer = setTimeout(saveSettings, 250);
 }
 
+function setSettingsOpen(nextOpen) {
+  settingsOpen = Boolean(nextOpen) && !floatingState.isCollapsed;
+  widget.classList.toggle('is-settings-open', settingsOpen);
+  settingsOverlay.setAttribute('aria-hidden', settingsOpen ? 'false' : 'true');
+}
+
 async function saveSettings() {
   const displayMode = miniModeSetting.checked ? 'mini' : 'full';
   const nextConfig = await window.devPulse.updateSettings({
@@ -535,7 +552,29 @@ closeButton.addEventListener('click', () => {
   window.desktopWidget?.quitApp();
 });
 
+miniCloseButton.addEventListener('click', () => {
+  window.desktopWidget?.quitApp();
+});
+
+settingsButton.addEventListener('click', () => {
+  setSettingsOpen(!settingsOpen);
+});
+
+settingsCloseButton.addEventListener('click', () => {
+  setSettingsOpen(false);
+});
+
+settingsBackdrop.addEventListener('click', () => {
+  setSettingsOpen(false);
+});
+
 settingsForm.addEventListener('change', scheduleSettingsSave);
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && settingsOpen) {
+    setSettingsOpen(false);
+  }
+});
 
 window.devPulse.getState().then(render);
 window.devPulse.getConfig().then(renderConfig);
