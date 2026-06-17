@@ -87,10 +87,9 @@ async function createFloatingWindow() {
   });
 
   floatingWindow.setAlwaysOnTop(isAlwaysOnTop, isAlwaysOnTop ? 'floating' : 'normal');
-  floatingWindow.setVisibleOnAllWorkspaces(true, {
-    visibleOnFullScreen: false,
-    skipTransformProcessType: true
-  });
+  if (process.platform === 'darwin') {
+    floatingWindow.setVisibleOnAllWorkspaces(false);
+  }
   floatingWindow.setSkipTaskbar(true);
   floatingWindow.setMenuBarVisibility(false);
   applyWindowSizing();
