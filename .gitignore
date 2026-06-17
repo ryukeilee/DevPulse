@@ -46,6 +46,14 @@ pnpm-debug.log*
 .turbo/
 .parcel-cache/
 
+# Xcode / Swift
+DerivedData/
+*.app
+*.dmg
+*.pkg
+*.ipa
+*.appex
+
 # OS and editor files
 .DS_Store
 Thumbs.db

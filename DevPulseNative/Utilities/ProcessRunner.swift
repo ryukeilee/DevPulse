@@ -1,0 +1,61 @@
+import Foundation
+
+enum ProcessRunner {
+    /// Maximum time a single git command may run.
+    static let gitTimeout: TimeInterval = 5.0
+
+    /// Execute a process and return its stdout trimmed, or nil on failure.
+    static func run(executable: String = "/usr/bin/git",
+                    arguments: [String],
+                    workingDirectory: String,
+                    timeout: TimeInterval = gitTimeout) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory)
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+
+        // Wait with timeout
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning {
+            if Date() > deadline {
+                process.terminate()
+                return nil
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+
+        guard process.terminationStatus == 0 else { return nil }
+
+        let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return output
+    }
+
+    /// Check whether git is available on this system.
+    static func isGitAvailable() -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["--version"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+}

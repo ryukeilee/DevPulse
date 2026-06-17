@@ -1,0 +1,97 @@
+name: DevPulseNative
+options:
+  bundleIdPrefix: local.devpulse
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "16.0"
+  generateEmptyDirectories: true
+  developmentLanguage: en
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+
+targets:
+  DevPulse:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+      - path: Core
+      - path: Utilities
+      - path: Assets.xcassets
+    settings:
+      base:
+        INFOPLIST_FILE: App/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: local.devpulse.app
+        PRODUCT_NAME: DevPulse
+        GENERATE_INFOPLIST_FILE: "NO"
+        MARKETING_VERSION: "0.2.0"
+        CURRENT_PROJECT_VERSION: "1"
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_ENTITLEMENTS: App/DevPulse.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_OBJC_BRIDGING_HEADER: ""
+      configs:
+        Debug:
+          CODE_SIGN_IDENTITY: "-"
+          CODE_SIGN_STYLE: Manual
+        Release:
+          CODE_SIGN_IDENTITY: "-"
+          CODE_SIGN_STYLE: Manual
+    entitlements:
+      path: App/DevPulse.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.files.user-selected.read-only: true
+        com.apple.security.application-groups:
+          - local.devpulse.group
+    dependencies:
+      - target: DevPulseWidgetExtension
+      - sdk: IOKit.framework
+    preBuildScripts:
+      - name: "SwiftLint (optional)"
+        script: |
+          if which swiftlint >/dev/null; then
+            swiftlint --quiet || true
+          fi
+        basedOnDependencyAnalysis: false
+        inputFiles: []
+        outputFiles: []
+
+  DevPulseWidgetExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Widget
+      - path: Core/Models.swift
+      - path: Core/AppGroupStore.swift
+      - path: Utilities/DateFormatting.swift
+    settings:
+      base:
+        INFOPLIST_FILE: Widget/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: local.devpulse.app.widget
+        PRODUCT_NAME: DevPulseWidgetExtension
+        GENERATE_INFOPLIST_FILE: "NO"
+        MARKETING_VERSION: "0.2.0"
+        CURRENT_PROJECT_VERSION: "1"
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_ENTITLEMENTS: Widget/DevPulseWidgetExtension.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+      configs:
+        Debug:
+          CODE_SIGN_IDENTITY: "-"
+          CODE_SIGN_STYLE: Manual
+        Release:
+          CODE_SIGN_IDENTITY: "-"
+          CODE_SIGN_STYLE: Manual
+    entitlements:
+      path: Widget/DevPulseWidgetExtension.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - local.devpulse.group
