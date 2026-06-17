@@ -1,6 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildState } = require('../src/core/state-store');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { buildState, loadState } = require('../src/core/state-store');
 
 test('full refresh preserves stale dirty activity when changed files are unchanged', () => {
   const previousState = {
@@ -77,10 +80,24 @@ test('buildState includes recent activity records', () => {
     updatedAt: '2026-06-12T11:00:00.000Z'
   }, new Date('2026-06-12T12:00:00.000Z'));
 
+  assert.equal(next.activityTimeline.length, 1);
   assert.equal(next.activities.length, 1);
   assert.equal(next.activities[0].projectName, 'devpulse');
   assert.equal(next.activities[0].changedFileCount, 1);
-  assert.equal(next.activities[0].changeTypeSummary, '本地存储调整');
+  assert.equal(next.activities[0].summary, '本地改动');
+  assert.deepEqual(next.activities, next.activityTimeline);
+});
+
+test('loadState safely degrades to empty timeline when state file is corrupted', async () => {
+  const configDir = await fs.mkdtemp(path.join(os.tmpdir(), 'devpulse-state-'));
+  await fs.writeFile(path.join(configDir, 'state.json'), '{not-json');
+
+  const state = await loadState(configDir);
+
+  assert.deepEqual(state.projects, []);
+  assert.deepEqual(state.activityTimeline, []);
+  assert.deepEqual(state.activities, []);
+  assert.equal(state.activeProjectPath, null);
 });
 
 test('buildState includes risk hints from changed files', () => {

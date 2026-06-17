@@ -71,7 +71,7 @@ function renderPulseSummary(viewModel) {
 
 function renderActivityTimeline(viewModel) {
   changeSummary.textContent = viewModel.changeSummary;
-  changedCount.textContent = `${viewModel.changedEntries.length} ${viewModel.changedEntries.length === 1 ? 'file' : 'files'}`;
+  changedCount.textContent = viewModel.changeMeta;
 
   if (viewModel.timelineItems.length === 0) {
     activityList.replaceChildren(emptyListItem('暂无最近活动'));
@@ -156,11 +156,13 @@ function buildViewModel(state) {
     statusLabel: '暂无待提交改动',
     message: ''
   };
-  const timelineItems = buildTimelineItems(state.activities || [], active, changedEntries, updatedAt);
+  const activityTimeline = state.activityTimeline || state.activities || [];
+  const timelineItems = buildTimelineItems(activityTimeline, updatedAt);
   const riskCards = buildRiskCards(riskHint);
   const readinessTone = normalizeReadinessTone(readiness.status);
   const overall = resolveOverallStatus(riskHint.level, readiness.status);
   const readinessAction = nextReadinessAction(readiness.status);
+  const currentChangedCount = changedEntries.length;
 
   return {
     projectName: active?.name || '暂无活跃项目',
@@ -169,7 +171,7 @@ function buildViewModel(state) {
     refreshLabel: active ? 'Live' : 'Fallback',
     refreshTone: active ? 'live' : 'fallback',
     overallStatus: overall,
-    activityCount: timelineItems.length,
+    activityCount: activityTimeline.length,
     riskCount: riskCards.filter((hint) => hint.level !== 'low').length,
     readinessLabel: readiness.statusLabel || '暂无待提交改动',
     readinessDisplay: readinessDisplay(readiness.status),
@@ -177,29 +179,22 @@ function buildViewModel(state) {
     readinessReason: readiness.message || readiness.statusLabel || '暂无待提交改动',
     readinessAction,
     nextAction: active ? resolveNextAction(riskHint, readiness, changedEntries) : '选择或修改一个本地 Git 项目后开始观察。',
-    changeSummary: active?.summary || '等待本地 Git 变化',
+    changeSummary: timelineItems.length > 0 ? '最近活动' : (active?.summary || '等待本地 Git 变化'),
+    changeMeta: currentChangedCount > 0 ? `当前 ${currentChangedCount} 个文件` : `最近 ${timelineItems.length} 条`,
     changedEntries,
     timelineItems,
-    miniItems: timelineItems.slice(0, 3).map((item) => `${statusLabel(item.status)} ${basename(item.path)}`),
+    miniItems: timelineItems.slice(0, 3).map((item) => `${item.timeLabel} · ${item.summary}`),
     riskCards
   };
 }
 
-function buildTimelineItems(activities, active, changedEntries, updatedAt) {
-  if (changedEntries.length > 0) {
-    return changedEntries.slice(0, 8).map((entry) => ({
-      status: normalizeGitStatus(entry.status),
-      path: entry.path,
-      meta: active?.lastActivityAt ? formatRelativeTime(active.lastActivityAt, updatedAt) : '当前工作区',
-      summary: statusSummary(entry.status)
-    }));
-  }
-
-  return activities.slice(0, 6).map((activity) => ({
-    status: 'M',
-    path: activity.changeTypeSummary || activity.projectName || 'Git 工作区改动',
-    meta: formatRelativeTime(activity.createdAt, updatedAt),
-    summary: `${activity.changedFileCount || 0} files`
+function buildTimelineItems(activities, updatedAt) {
+  return (activities || []).slice(0, 3).map((activity) => ({
+    projectName: activity.projectName || '未知项目',
+    summary: activity.summary || activity.changeTypeSummary || '本地改动',
+    timeLabel: formatRelativeTime(activity.updatedAt || activity.createdAt, updatedAt),
+    countLabel: formatFileCount(activity.changedFileCount),
+    files: activity.files || activity.changedFiles || []
   }));
 }
 
@@ -254,19 +249,19 @@ function activityItem(item) {
   row.className = 'timeline-item';
 
   const badge = document.createElement('span');
-  badge.className = `change-badge change-badge--${item.status}`;
-  badge.textContent = statusLabel(item.status);
+  badge.className = 'change-badge change-badge--modified';
+  badge.textContent = item.timeLabel;
 
   const copy = document.createElement('span');
   copy.className = 'timeline-copy';
 
   const path = document.createElement('span');
   path.className = 'timeline-path';
-  path.textContent = item.path || '未命名改动';
+  path.textContent = item.summary || '未命名改动';
 
   const meta = document.createElement('span');
   meta.className = 'timeline-meta';
-  meta.textContent = `${item.meta} · ${item.summary}`;
+  meta.textContent = `${item.countLabel} · ${item.projectName}`;
 
   copy.append(path, meta);
   row.append(badge, copy);
@@ -467,6 +462,11 @@ function formatRelativeTime(value, nowValue) {
   return `${Math.floor(hours / 24)} 天前`;
 }
 
+function formatFileCount(count) {
+  const numeric = Number(count) || 0;
+  return `${numeric} 个文件`;
+}
+
 function nearestRefreshOption(value) {
   const allowed = ['15000', '30000', '60000', '300000'];
   const stringValue = String(value || 30000);
@@ -488,6 +488,7 @@ function defaultUiConfig() {
 function emptyUiState() {
   return {
     projects: [],
+    activityTimeline: [],
     activities: [],
     activeProjectPath: null,
     updatedAt: new Date().toISOString()

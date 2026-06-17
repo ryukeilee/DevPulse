@@ -1,33 +1,30 @@
 const crypto = require('node:crypto');
+const path = require('node:path');
 
-const MAX_ACTIVITY_RECORDS = 30;
-const DEDUPE_WINDOW_MS = 2 * 60 * 1000;
+const MAX_ACTIVITY_RECORDS = 10;
+const DEDUPE_WINDOW_MS = 90 * 1000;
 
 const SUMMARY_RULES = [
   {
-    title: '菜单与界面调整',
-    terms: ['ui', 'renderer', 'component']
+    title: '配置调整',
+    terms: ['package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'config', '.json', '.yaml', '.yml', '.toml']
   },
   {
-    title: 'Git 监听与扫描调整',
+    title: '界面优化',
+    terms: ['ui', 'renderer', 'component', 'view', 'widget', 'css']
+  },
+  {
+    title: '监听与扫描优化',
     terms: ['git', 'watcher', 'scanner']
   },
   {
-    title: '本地存储调整',
-    terms: ['storage', 'store', 'config']
-  },
-  {
-    title: '日志与诊断调整',
-    terms: ['log', 'debug', 'diagnostic']
-  },
-  {
-    title: '项目配置或主进程调整',
-    terms: ['package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'main', 'preload', 'electron']
+    title: '测试更新',
+    terms: ['test', 'spec']
   }
 ];
 
 function updateActivityTimeline(projects, previousState, now = new Date()) {
-  const previousActivities = previousState.activities || [];
+  const previousActivities = normalizeActivities(previousState.activityTimeline || previousState.activities || []);
   const previousByPath = new Map((previousState.projects || []).map((project) => [project.path, project]));
 
   return projects.reduce((activities, project) => {
@@ -51,35 +48,49 @@ function maybeRecordActivity(activities, project, previousProject, now = new Dat
     return activities;
   }
 
-  const createdAt = project.activityObservedAt || now.toISOString();
+  const observedAt = project.activityObservedAt || now.toISOString();
   const duplicateIndex = activities.findIndex((activity) => {
-    return isDuplicateWithinWindow(activity, project.path, currentSignature, createdAt);
+    return isDuplicateWithinWindow(activity, project.path, observedAt);
   });
   if (duplicateIndex !== -1) {
     const duplicate = activities[duplicateIndex];
     const rest = activities.filter((_, index) => index !== duplicateIndex);
+    const mergedFiles = normalizeChangedFiles([
+      ...(duplicate.files || duplicate.changedFiles || []),
+      ...changedFiles
+    ]);
+    const summary = summarizeActivityChange(mergedFiles);
     return [
       {
         ...duplicate,
         projectName: project.name,
-        changedFileCount: changedFiles.length,
-        changedFiles,
-        changeTypeSummary: summarizeActivityChange(changedFiles),
-        createdAt
+        projectPath: project.path,
+        repoPath: project.path,
+        files: mergedFiles,
+        changedFiles: mergedFiles,
+        changedFileCount: mergedFiles.length,
+        summary,
+        changeTypeSummary: summary,
+        updatedAt: observedAt
       },
       ...rest
     ].slice(0, MAX_ACTIVITY_RECORDS);
   }
 
+  const summary = summarizeActivityChange(changedFiles);
   return [
     {
-      id: activityId(project.path, currentSignature, createdAt),
+      id: activityId(project.path, currentSignature, observedAt),
       projectName: project.name,
+      projectPath: project.path,
       repoPath: project.path,
+      summary,
+      files: changedFiles,
       changedFileCount: changedFiles.length,
       changedFiles,
-      changeTypeSummary: summarizeActivityChange(changedFiles),
-      createdAt
+      changeTypeSummary: summary,
+      createdAt: observedAt,
+      updatedAt: observedAt
     },
     ...activities
   ].slice(0, MAX_ACTIVITY_RECORDS);
@@ -94,19 +105,15 @@ function summarizeActivityChange(changedFiles = []) {
     }
   }
 
-  return 'Git 工作区改动';
+  return '本地改动';
 }
 
-function isDuplicateWithinWindow(activity, repoPath, signature, createdAt) {
-  if (!activity || activity.repoPath !== repoPath) {
+function isDuplicateWithinWindow(activity, repoPath, createdAt) {
+  if (!activity || (activity.projectPath || activity.repoPath) !== repoPath) {
     return false;
   }
 
-  if (changedFilesSignature(activity.changedFiles) !== signature) {
-    return false;
-  }
-
-  const previousTime = new Date(activity.createdAt).getTime();
+  const previousTime = new Date(activity.updatedAt || activity.createdAt).getTime();
   const nextTime = new Date(createdAt).getTime();
   if (Number.isNaN(previousTime) || Number.isNaN(nextTime)) {
     return false;
@@ -124,11 +131,44 @@ function activityId(repoPath, signature, createdAt) {
 }
 
 function normalizeChangedFiles(changedFiles = []) {
-  return [...new Set((changedFiles || []).filter(Boolean))].sort();
+  return [...new Set((changedFiles || []).filter(Boolean))]
+    .map((filePath) => filePath.replace(/\\/g, '/'))
+    .sort();
 }
 
 function changedFilesSignature(changedFiles = []) {
   return normalizeChangedFiles(changedFiles).join('|');
+}
+
+function normalizeActivities(activities = []) {
+  return (activities || [])
+    .filter(Boolean)
+    .map((activity) => {
+      const files = normalizeChangedFiles(activity.files || activity.changedFiles || []);
+      const summary = activity.summary || activity.changeTypeSummary || summarizeActivityChange(files);
+      const projectPath = activity.projectPath || activity.repoPath || '';
+      const projectName = activity.projectName || path.basename(projectPath) || 'unknown';
+      const createdAt = activity.createdAt || activity.updatedAt || new Date(0).toISOString();
+      const updatedAt = activity.updatedAt || activity.createdAt || createdAt;
+
+      return {
+        id: activity.id || activityId(projectPath, changedFilesSignature(files), createdAt),
+        projectName,
+        projectPath,
+        repoPath: projectPath,
+        summary,
+        files,
+        changedFiles: files,
+        changedFileCount: Number.isFinite(activity.changedFileCount) ? activity.changedFileCount : files.length,
+        changeTypeSummary: summary,
+        createdAt,
+        updatedAt
+      };
+    })
+    .sort((left, right) => {
+      return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    })
+    .slice(0, MAX_ACTIVITY_RECORDS);
 }
 
 module.exports = {
@@ -136,6 +176,7 @@ module.exports = {
   MAX_ACTIVITY_RECORDS,
   changedFilesSignature,
   maybeRecordActivity,
+  normalizeActivities,
   summarizeActivityChange,
   updateActivityTimeline
 };

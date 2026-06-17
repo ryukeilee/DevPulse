@@ -305,7 +305,7 @@ select {
 
 .timeline-item {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
+  grid-template-columns: 58px minmax(0, 1fr);
   gap: 8px;
   align-items: start;
   min-width: 0;
@@ -313,15 +313,18 @@ select {
 
 .change-badge {
   display: inline-flex;
-  width: 22px;
+  min-width: 52px;
   height: 20px;
   align-items: center;
   justify-content: center;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.08);
   color: var(--soft);
-  font-size: 10px;
-  font-weight: 780;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  padding: 0 6px;
+  white-space: nowrap;
 }
 
 .change-badge--added {

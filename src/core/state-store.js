@@ -3,13 +3,14 @@ const path = require('node:path');
 const { defaultConfigDir } = require('../utils/path-utils');
 const { classifyChanges } = require('./change-classifier');
 const { pickActiveProject, rankProjects } = require('./activity-ranker');
-const { updateActivityTimeline } = require('./activity-timeline');
+const { normalizeActivities, updateActivityTimeline } = require('./activity-timeline');
 const { assessRiskHint } = require('./risk-hint');
 const { assessCommitReadiness } = require('./commit-readiness');
 
 function emptyState() {
   return {
     projects: [],
+    activityTimeline: [],
     activities: [],
     activeProjectPath: null,
     updatedAt: new Date().toISOString()
@@ -20,9 +21,9 @@ async function loadState(configDir = defaultConfigDir()) {
   const statePath = path.join(configDir, 'state.json');
   try {
     const raw = await fs.readFile(statePath, 'utf8');
-    return JSON.parse(raw);
+    return normalizeState(JSON.parse(raw));
   } catch (error) {
-    if (error.code === 'ENOENT') {
+    if (error.code === 'ENOENT' || error instanceof SyntaxError) {
       return emptyState();
     }
     throw error;
@@ -64,12 +65,27 @@ function buildState(projects, previousState = emptyState(), now = new Date()) {
 
   const rankedProjects = rankProjects(enriched, now);
   const activeProject = pickActiveProject(rankedProjects, now);
+  const activityTimeline = updateActivityTimeline(rankedProjects, previousState, now);
 
   return {
     projects: rankedProjects,
-    activities: updateActivityTimeline(rankedProjects, previousState, now),
+    activityTimeline,
+    activities: activityTimeline,
     activeProjectPath: activeProject?.path || null,
     updatedAt: now.toISOString()
+  };
+}
+
+function normalizeState(state = {}) {
+  const base = emptyState();
+  const activityTimeline = normalizeActivities(state.activityTimeline || state.activities || []);
+
+  return {
+    projects: Array.isArray(state.projects) ? state.projects : base.projects,
+    activityTimeline,
+    activities: activityTimeline,
+    activeProjectPath: typeof state.activeProjectPath === 'string' ? state.activeProjectPath : null,
+    updatedAt: typeof state.updatedAt === 'string' ? state.updatedAt : base.updatedAt
   };
 }
 
@@ -104,5 +120,6 @@ module.exports = {
   buildState,
   emptyState,
   loadState,
+  normalizeState,
   saveState
 };

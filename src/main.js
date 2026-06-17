@@ -318,7 +318,12 @@ function startRootDiscoveryWatcher() {
 }
 
 async function publishState() {
-  await saveState(state, defaultConfigDir());
+  try {
+    await saveState(state, defaultConfigDir());
+  } catch (error) {
+    warn('Failed to persist state', error.message);
+  }
+
   if (floatingWindow && !floatingWindow.isDestroyed() && floatingWindow.isVisible()) {
     floatingWindow.webContents.send('devpulse:state-changed', state);
   }
