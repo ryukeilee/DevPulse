@@ -13,8 +13,6 @@ enum ScanLocationProvider {
         "~/Documents"
     ]
 
-    private static let containerPathFragments = ["/Library/Containers/", "/Library/Group Containers/"]
-
     /// Expand a tilde-prefixed path to an absolute path.
     static func expandTilde(_ path: String) -> String {
         let home = resolvedUserHomeDirectory()
@@ -29,20 +27,16 @@ enum ScanLocationProvider {
 
     /// Resolve the real user home directory, avoiding the sandbox container home.
     static func resolvedUserHomeDirectory() -> String {
-        let candidates: [String?] = [
-            FileManager.default.homeDirectoryForCurrentUser.path,
-            NSHomeDirectory(),
-            passwdHomeDirectory()
-        ]
-
-        for candidate in candidates.compactMap({ $0 }) {
-            guard !candidate.isEmpty else { continue }
-            if !isAppContainerHome(candidate) {
-                return candidate
-            }
+        if let passwdHome = passwdHomeDirectory(), !passwdHome.isEmpty {
+            return passwdHome
         }
 
-        return passwdHomeDirectory() ?? FileManager.default.homeDirectoryForCurrentUser.path
+        if let envHome = ProcessInfo.processInfo.environment["HOME"], !envHome.isEmpty {
+            return envHome
+        }
+
+        let fallback = NSHomeDirectory()
+        return fallback.isEmpty ? "/" : fallback
     }
 
     /// Normalize persisted scan paths from older sandboxed builds.
@@ -50,13 +44,9 @@ enum ScanLocationProvider {
         let expanded = expandTilde(path)
         let containerHome = NSHomeDirectory()
         let userHome = resolvedUserHomeDirectory()
-
         guard !containerHome.isEmpty,
               containerHome != userHome,
-              expanded.hasPrefix(containerHome) else {
-            return expanded
-        }
-
+              expanded.hasPrefix(containerHome) else { return expanded }
         return userHome + String(expanded.dropFirst(containerHome.count))
     }
 
@@ -83,12 +73,6 @@ enum ScanLocationProvider {
             )
         }
     }
-
-    private static func isAppContainerHome(_ path: String) -> Bool {
-        let normalized = (path as NSString).standardizingPath
-        return containerPathFragments.contains { normalized.contains($0) }
-    }
-
     private static func passwdHomeDirectory() -> String? {
         let uid = getuid()
         guard let entry = getpwuid(uid), let home = entry.pointee.pw_dir else {

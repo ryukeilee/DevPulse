@@ -236,14 +236,14 @@ struct ScanLocationToggle: Identifiable, Codable {
 
 // MARK: - Custom scan directory
 
-struct CustomScanDirectory: Identifiable, Codable {
+struct CustomScanDirectory: Identifiable, Codable, Equatable {
     let id: String
     let path: String
-    var isAccessible: Bool
+    let bookmarkData: Data?
 
-    init(id: String = UUID().uuidString, path: String, isAccessible: Bool = false) {
+    init(id: String = UUID().uuidString, path: String, bookmarkData: Data? = nil) {
         self.id = id
         self.path = path
-        self.isAccessible = isAccessible
+        self.bookmarkData = bookmarkData
     }
 }

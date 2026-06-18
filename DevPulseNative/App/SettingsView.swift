@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct SettingsView: View {
@@ -37,6 +38,10 @@ struct SettingsView: View {
                 diagnosticsSection
             }
             .padding(20)
+            .onAppear(perform: refreshBuiltInToggles)
+            .onChange(of: scheduler.scanDirectories) { _, _ in
+                refreshBuiltInToggles()
+            }
         }
     }
 
@@ -145,27 +150,27 @@ struct SettingsView: View {
             Label("Custom Scan Directories", systemImage: "folder.badge.plus")
                 .font(.headline)
 
-            if scheduler.config.customPaths.isEmpty {
+            if scheduler.scanDirectories.isEmpty {
                 Text("No custom directories added.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else {
-                ForEach(scheduler.config.customPaths, id: \.self) { path in
+                ForEach(scheduler.scanDirectories) { directory in
                     HStack {
                         Image(systemName: "folder")
                             .font(.caption)
-                        Text(path)
+                        Text(directory.path)
                             .font(.caption)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                        if !directoryExists(path) {
+                        if !directoryExists(directory.path) {
                             Image(systemName: "exclamationmark.triangle")
                                 .font(.caption2)
                                 .foregroundColor(.yellow)
                         }
                         Spacer()
                         Button(role: .destructive) {
-                            scheduler.removeCustomPath(path)
+                            scheduler.removeCustomPath(directory.path)
                         } label: {
                             Image(systemName: "trash")
                                 .font(.caption)
@@ -188,6 +193,12 @@ struct SettingsView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(newCustomPath.trimmingCharacters(in: .whitespaces).isEmpty)
+
+                Button("Choose…") {
+                    chooseDirectory()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
         }
     }
@@ -257,6 +268,19 @@ struct SettingsView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(scheduler.isScanning)
+            }
+
+            if let accessWarning = scheduler.scanRootAccessWarning {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.red)
+                    Text(accessWarning)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+                .padding(10)
+                .background(Color.red.opacity(0.08))
+                .cornerRadius(8)
             }
 
             diagnosticsStatusGrid
@@ -515,6 +539,25 @@ struct SettingsView: View {
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
+        }
+    }
+
+    private func refreshBuiltInToggles() {
+        let enabledPaths = Set(scheduler.scanDirectories.map(\.path))
+        builtInToggles = ScanLocationProvider.builtInToggles(enabledPaths)
+    }
+
+    private func chooseDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.prompt = "Choose"
+
+        if panel.runModal() == .OK, let url = panel.url {
+            scheduler.addCustomPath(url.path)
+            newCustomPath = ""
         }
     }
 

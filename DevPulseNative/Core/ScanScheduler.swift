@@ -30,6 +30,8 @@ final class ScanScheduler: ObservableObject {
     @Published var gitAvailable: Bool = true
     @Published var appGroupAvailable: Bool = true
     @Published var warnings: [String] = []
+    @Published var scanRootAccessWarning: String?
+    @Published var scanDirectories: [CustomScanDirectory] = []
     @Published var diagnostics = DiagnosticsSnapshot()
     @Published var diagnosticEvents: [DiagnosticEvent] = []
     @Published var scanIntervalSeconds: TimeInterval = 300
@@ -40,6 +42,7 @@ final class ScanScheduler: ObservableObject {
 
     // Config persistence
     private let configKey = "scan_config_json"
+    private let scanDirectoriesKey = "scan_directories_json"
     private let pinnedKey = "pinned_repo_ids"
     private let lastScanIntervalKey = "last_scan_interval"
 
@@ -54,7 +57,7 @@ final class ScanScheduler: ObservableObject {
     private static let noChangeThreshold2 = 8  // scans w/o change → 20 min
     private static let noChangeThreshold3 = 15 // scans w/o change → 30 min
 
-    var config: ScanConfig = .default {
+    @Published var config: ScanConfig = .default {
         didSet { persistConfig() }
     }
 
@@ -72,6 +75,7 @@ final class ScanScheduler: ObservableObject {
 
     init() {
         loadConfig()
+        loadScanDirectories()
         appGroupAvailable = AppGroupStore.isAvailable
         gitAvailable = ProcessRunner.isGitAvailable()
         diagnostics.appGroupAvailable = appGroupAvailable
@@ -92,22 +96,29 @@ final class ScanScheduler: ObservableObject {
         diagnostics.sharedDataReadError = nil
         diagnostics.widgetSnapshotReadError = nil
         let currentConfig = config
+        let currentScanRoots = scanRoots()
         recordEvent(.scanStarted, "Scan started")
 
         Task.detached(priority: .userInitiated) {
-            let result = await GitRepositoryScanner.scan(config: currentConfig)
+            let result = await GitRepositoryScanner.scan(config: currentConfig, scanRoots: currentScanRoots.roots)
 
             await MainActor.run {
                 let pinned = self.applyPins(result.data)
                 let hadChanges = self.hadChanges(before: self.lastResult, after: pinned)
+                var combinedWarnings = result.warnings
+                if let warning = currentScanRoots.warning, !combinedWarnings.contains(warning) {
+                    combinedWarnings.append(warning)
+                }
 
                 self.lastResult = pinned
                 self.lastScanAt = Date()
                 self.diagnostics.lastScanAt = self.lastScanAt
-                self.warnings = result.warnings
+                self.warnings = combinedWarnings
                 self.isScanning = false
+                self.scanRootAccessWarning = currentScanRoots.warning
+                self.diagnostics.validationIssues = combinedWarnings.isEmpty ? [] : combinedWarnings
 
-                if result.warnings.isEmpty {
+                if combinedWarnings.isEmpty {
                     self.recordEvent(
                         .scanSucceeded,
                         "Scan success: \(pinned.scanSummary.totalRepositories) repos, \(pinned.scanSummary.changedRepositories) changed, \(pinned.scanSummary.totalChangedFiles) files"
@@ -115,7 +126,7 @@ final class ScanScheduler: ObservableObject {
                 } else {
                     self.recordEvent(
                         .scanSucceeded,
-                        "Scan success with \(result.warnings.count) warning(s): \(pinned.scanSummary.totalRepositories) repos"
+                        "Scan success with \(combinedWarnings.count) warning(s): \(pinned.scanSummary.totalRepositories) repos"
                     )
                 }
 
@@ -208,6 +219,47 @@ final class ScanScheduler: ObservableObject {
             || before.scanSummary.totalRepositories != after.scanSummary.totalRepositories
     }
 
+    private func scanRoots() -> (roots: [String], warning: String?) {
+        let configuredDirectories = scanDirectories.isEmpty
+            ? config.customPaths.map { CustomScanDirectory(path: ScanLocationProvider.normalizePersistedPath($0), bookmarkData: nil) }
+            : scanDirectories
+
+        var accessibleRoots: [String] = []
+        var inaccessibleCount = 0
+
+        for directory in configuredDirectories {
+            if let url = resolvedURL(for: directory) {
+                let path = ScanLocationProvider.normalizePersistedPath(url.path)
+                guard isAccessibleScanRoot(path) else {
+                    inaccessibleCount += 1
+                    continue
+                }
+                accessibleRoots.append(path)
+                continue
+            }
+
+            let normalizedPath = ScanLocationProvider.normalizePersistedPath(directory.path)
+            guard isAccessibleScanRoot(normalizedPath) else {
+                inaccessibleCount += 1
+                continue
+            }
+
+            accessibleRoots.append(normalizedPath)
+        }
+
+        let deduped = Array(Set(accessibleRoots)).sorted()
+        let warning: String?
+        if deduped.isEmpty && configuredDirectories.isEmpty {
+            warning = "No scan roots configured. Add a directory in Settings."
+        } else if inaccessibleCount > 0 {
+            warning = "部分目录权限失效，请在 Settings 重新授权。"
+        } else {
+            warning = nil
+        }
+
+        return (deduped, warning)
+    }
+
     // MARK: - Shared snapshot sync
 
     private func restorePersistedSnapshot() {
@@ -229,6 +281,7 @@ final class ScanScheduler: ObservableObject {
                 lastScanAt = generatedAt
                 diagnostics.lastScanAt = generatedAt
             }
+            warnings = []
             validateConsistency(expected: pinned, shared: snapshot, reason: "startup")
         case .failure(let error):
             diagnostics.sharedDataReadError = error.localizedDescription
@@ -415,6 +468,12 @@ final class ScanScheduler: ObservableObject {
             .set(data, forKey: configKey)
     }
 
+    private func persistScanDirectories() {
+        guard let data = try? JSONEncoder().encode(scanDirectories) else { return }
+        UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+            .set(data, forKey: scanDirectoriesKey)
+    }
+
     private func loadConfig() {
         guard let data = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
             .data(forKey: configKey),
@@ -431,32 +490,154 @@ final class ScanScheduler: ObservableObject {
         }
     }
 
+    private func loadScanDirectories() {
+            if let data = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+            .data(forKey: scanDirectoriesKey),
+           let decoded = try? JSONDecoder().decode([CustomScanDirectory].self, from: data) {
+            scanDirectories = sanitizeScanDirectories(decoded)
+        } else {
+            scanDirectories = sanitizeScanDirectories(
+                config.customPaths.map { CustomScanDirectory(path: $0, bookmarkData: nil) }
+            )
+        }
+
+        syncConfigFromScanDirectories()
+        scanRootAccessWarning = scanRoots().warning
+        persistScanDirectories()
+    }
+
     // MARK: - Enabled toggles
 
     func toggleBuiltIn(path: String, enabled: Bool) {
         if enabled {
-            config.enabledBuiltInPaths.insert(path)
+            addCustomPath(path)
         } else {
-            config.enabledBuiltInPaths.remove(path)
+            removeCustomPath(path)
         }
     }
 
     func addCustomPath(_ path: String) {
         let expanded = ScanLocationProvider.normalizePersistedPath(path)
-        guard !config.customPaths.contains(expanded) else { return }
-        config.customPaths.append(expanded)
+        guard !expanded.isEmpty else { return }
+        guard isAccessibleScanRoot(expanded) else {
+            scanRootAccessWarning = "部分目录权限失效，请在 Settings 重新授权。"
+            return
+        }
+        if let existingIndex = scanDirectories.firstIndex(where: { $0.path == expanded }) {
+            if scanDirectories[existingIndex].bookmarkData == nil,
+               let refreshed = bookmarkData(for: URL(fileURLWithPath: expanded)) {
+                scanDirectories[existingIndex] = CustomScanDirectory(
+                    id: scanDirectories[existingIndex].id,
+                    path: expanded,
+                    bookmarkData: refreshed
+                )
+                syncConfigFromScanDirectories()
+                persistScanDirectories()
+            }
+            scanRootAccessWarning = nil
+            return
+        }
+
+        let bookmarkData = bookmarkData(for: URL(fileURLWithPath: expanded))
+        let entry = CustomScanDirectory(path: expanded, bookmarkData: bookmarkData)
+        scanDirectories.append(entry)
+        syncConfigFromScanDirectories()
+        scanRootAccessWarning = nil
+        persistScanDirectories()
     }
 
     func removeCustomPath(_ path: String) {
-        config.customPaths.removeAll { $0 == path }
+        let normalized = ScanLocationProvider.normalizePersistedPath(path)
+        scanDirectories.removeAll { $0.path == normalized }
+        syncConfigFromScanDirectories()
+        persistScanDirectories()
     }
 
     private func normalizeConfig(_ config: ScanConfig) -> ScanConfig {
         var normalized = config
-        normalized.enabledBuiltInPaths = Set(
-            config.enabledBuiltInPaths.map(ScanLocationProvider.normalizePersistedPath)
-        )
-        normalized.customPaths = config.customPaths.map(ScanLocationProvider.normalizePersistedPath)
+        let migratedRoots = config.enabledBuiltInPaths
+            .map(ScanLocationProvider.normalizePersistedPath)
+            .filter { isAccessibleScanRoot($0) }
+        let existingRoots = config.customPaths
+            .map(ScanLocationProvider.normalizePersistedPath)
+            .filter { isAccessibleScanRoot($0) }
+        normalized.enabledBuiltInPaths = []
+        normalized.customPaths = Array(Set(migratedRoots + existingRoots)).sorted()
         return normalized
+    }
+
+    private func syncConfigFromScanDirectories() {
+        config.enabledBuiltInPaths = []
+        config.customPaths = scanDirectories.map(\.path).sorted()
+    }
+
+    private func sanitizeScanDirectories(_ directories: [CustomScanDirectory]) -> [CustomScanDirectory] {
+        var sanitized: [CustomScanDirectory] = []
+        var inaccessibleCount = 0
+
+        for directory in directories {
+            let normalizedPath = ScanLocationProvider.normalizePersistedPath(directory.path)
+            if isAccessibleScanRoot(normalizedPath) {
+                let bookmarkData = directory.bookmarkData ?? bookmarkData(for: URL(fileURLWithPath: normalizedPath))
+                sanitized.append(CustomScanDirectory(id: directory.id, path: normalizedPath, bookmarkData: bookmarkData))
+            } else {
+                inaccessibleCount += 1
+            }
+        }
+
+        if inaccessibleCount > 0 {
+            scanRootAccessWarning = "部分目录权限失效，请在 Settings 重新授权。"
+        }
+
+        return Array(Dictionary(grouping: sanitized, by: \.path).values.compactMap { $0.first })
+            .sorted { $0.path < $1.path }
+    }
+
+    private func resolvedURL(for directory: CustomScanDirectory) -> URL? {
+        if let bookmarkData = directory.bookmarkData {
+            var stale = false
+            guard let url = try? URL(
+                resolvingBookmarkData: bookmarkData,
+                options: [.withSecurityScope],
+                relativeTo: nil,
+                bookmarkDataIsStale: &stale
+            ) else {
+                return nil
+            }
+            if stale, let refreshed = self.bookmarkData(for: url) {
+                updateBookmark(for: directory.path, with: refreshed)
+            }
+            return url
+        }
+
+        return FileManager.default.fileExists(atPath: directory.path) ? URL(fileURLWithPath: directory.path) : nil
+    }
+
+    private func isAccessibleScanRoot(_ path: String) -> Bool {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
+              isDir.boolValue else {
+            return false
+        }
+        return (try? FileManager.default.contentsOfDirectory(atPath: path)) != nil
+    }
+
+    private func bookmarkData(for url: URL) -> Data? {
+        try? url.bookmarkData(
+            options: [.withSecurityScope],
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+    }
+
+    private func updateBookmark(for path: String, with data: Data) {
+        let normalized = ScanLocationProvider.normalizePersistedPath(path)
+        guard let index = scanDirectories.firstIndex(where: { $0.path == normalized }) else { return }
+        scanDirectories[index] = CustomScanDirectory(
+            id: scanDirectories[index].id,
+            path: normalized,
+            bookmarkData: data
+        )
+        persistScanDirectories()
     }
 }

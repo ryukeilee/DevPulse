@@ -19,7 +19,7 @@ struct ScanConfig: Codable {
     let activeRepoThreshold: Int
 
     static let `default` = ScanConfig(
-        enabledBuiltInPaths: Set(ScanLocationProvider.builtInAbsolute),
+        enabledBuiltInPaths: [],
         customPaths: [],
         maxDepth: 4,
         changedPreviewLimit: 5,
@@ -72,12 +72,13 @@ enum GitRepositoryScanner {
 
     /// Run a full scan with all low-power safeguards.
     /// Returns the scan result and an array of warning strings.
-    static func scan(config: ScanConfig = .default) async -> (data: AppGroupData, warnings: [String]) {
+    static func scan(config: ScanConfig = .default,
+                     scanRoots: [String]? = nil) async -> (data: AppGroupData, warnings: [String]) {
         let startTime = Date()
         var warnings: [String] = []
 
         // Phase 1: discover all git repositories
-        let discoveredPaths = discoverRepositories(config: config, warnings: &warnings)
+        let discoveredPaths = discoverRepositories(config: config, scanRoots: scanRoots, warnings: &warnings)
         var pathsToScan = discoveredPaths
 
         // Throttle: if >30 repos, only scan changed/active ones
@@ -141,10 +142,11 @@ enum GitRepositoryScanner {
     // MARK: - Repository discovery
 
     private static func discoverRepositories(config: ScanConfig,
+                                             scanRoots: [String]?,
                                              warnings: inout [String]) -> [String] {
         var discovered = Set<String>()
 
-        let allPaths = Array(config.enabledBuiltInPaths) + config.customPaths
+        let allPaths = scanRoots ?? Array(config.enabledBuiltInPaths) + config.customPaths
         for rawPath in allPaths {
             let root = ScanLocationProvider.expandTilde(rawPath)
 
@@ -159,7 +161,11 @@ enum GitRepositoryScanner {
         }
 
         if discovered.isEmpty {
-            warnings.append("No Git repositories discovered in the configured scan roots.")
+            if allPaths.isEmpty && scanRoots == nil {
+                warnings.append("No scan roots configured. Add a directory in Settings.")
+            } else if !allPaths.isEmpty {
+                warnings.append("No Git repositories discovered in the configured scan roots.")
+            }
         }
 
         return Array(discovered).sorted()
