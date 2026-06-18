@@ -220,9 +220,7 @@ final class ScanScheduler: ObservableObject {
     }
 
     private func scanRoots() -> (roots: [String], warning: String?) {
-        let configuredDirectories = scanDirectories.isEmpty
-            ? config.customPaths.map { CustomScanDirectory(path: ScanLocationProvider.normalizePersistedPath($0), bookmarkData: nil) }
-            : scanDirectories
+        let configuredDirectories = scanDirectories
 
         var accessibleRoots: [String] = []
         var inaccessibleCount = 0
@@ -555,14 +553,11 @@ final class ScanScheduler: ObservableObject {
 
     private func normalizeConfig(_ config: ScanConfig) -> ScanConfig {
         var normalized = config
-        let migratedRoots = config.enabledBuiltInPaths
-            .map(ScanLocationProvider.normalizePersistedPath)
-            .filter { isAccessibleScanRoot($0) }
         let existingRoots = config.customPaths
             .map(ScanLocationProvider.normalizePersistedPath)
-            .filter { isAccessibleScanRoot($0) }
+            .filter { isAccessibleScanRoot($0) && !isAppContainerPath($0) }
         normalized.enabledBuiltInPaths = []
-        normalized.customPaths = Array(Set(migratedRoots + existingRoots)).sorted()
+        normalized.customPaths = Array(Set(existingRoots)).sorted()
         return normalized
     }
 
@@ -577,7 +572,7 @@ final class ScanScheduler: ObservableObject {
 
         for directory in directories {
             let normalizedPath = ScanLocationProvider.normalizePersistedPath(directory.path)
-            if isAccessibleScanRoot(normalizedPath) {
+            if isAccessibleScanRoot(normalizedPath) && !isAppContainerPath(normalizedPath) {
                 let bookmarkData = directory.bookmarkData ?? bookmarkData(for: URL(fileURLWithPath: normalizedPath))
                 sanitized.append(CustomScanDirectory(id: directory.id, path: normalizedPath, bookmarkData: bookmarkData))
             } else {
@@ -639,5 +634,9 @@ final class ScanScheduler: ObservableObject {
             bookmarkData: data
         )
         persistScanDirectories()
+    }
+
+    private func isAppContainerPath(_ path: String) -> Bool {
+        path.contains("/Library/Containers/")
     }
 }

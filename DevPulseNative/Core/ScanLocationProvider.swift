@@ -27,16 +27,24 @@ enum ScanLocationProvider {
 
     /// Resolve the real user home directory, avoiding the sandbox container home.
     static func resolvedUserHomeDirectory() -> String {
-        if let passwdHome = passwdHomeDirectory(), !passwdHome.isEmpty {
-            return passwdHome
+        let candidates = [
+            passwdHomeDirectory(),
+            ProcessInfo.processInfo.environment["HOME"],
+            NSHomeDirectory()
+        ]
+
+        for candidate in candidates.compactMap({ $0 }).map(normalizeHomeCandidate) where !candidate.isEmpty {
+            if !isContainerHome(candidate) {
+                return candidate
+            }
         }
 
-        if let envHome = ProcessInfo.processInfo.environment["HOME"], !envHome.isEmpty {
-            return envHome
+        let username = NSUserName()
+        if !username.isEmpty {
+            return "/Users/\(username)"
         }
 
-        let fallback = NSHomeDirectory()
-        return fallback.isEmpty ? "/" : fallback
+        return "/Users"
     }
 
     /// Normalize persisted scan paths from older sandboxed builds.
@@ -79,5 +87,13 @@ enum ScanLocationProvider {
             return nil
         }
         return String(cString: home)
+    }
+
+    private static func normalizeHomeCandidate(_ path: String) -> String {
+        path.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func isContainerHome(_ path: String) -> Bool {
+        path.contains("/Library/Containers/")
     }
 }
