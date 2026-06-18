@@ -30,6 +30,11 @@ struct SettingsView: View {
 
                 // Section: Widget Instructions
                 widgetInstructionsSection
+
+                Divider()
+
+                // Section: Diagnostics
+                diagnosticsSection
             }
             .padding(20)
         }
@@ -234,6 +239,293 @@ struct SettingsView: View {
                 .foregroundColor(.secondary)
                 .padding(.top, 4)
         }
+    }
+
+    // MARK: - Diagnostics
+
+    private var diagnosticsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("Diagnostics", systemImage: "stethoscope")
+                    .font(.headline)
+                Spacer()
+                Button(action: { scheduler.rescan() }) {
+                    Label(
+                        scheduler.isScanning ? "Refreshing..." : "Refresh Data",
+                        systemImage: "arrow.triangle.2.circlepath"
+                    )
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(scheduler.isScanning)
+            }
+
+            diagnosticsStatusGrid
+
+            if let widgetSnapshot = scheduler.diagnostics.widgetSnapshot {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Widget snapshot preview")
+                        .font(.caption.weight(.semibold))
+                    Text("generated \(snapshotTimeLabel(DateFormatting.date(from: widgetSnapshot.generatedAt))) · written \(snapshotTimeLabel(widgetSnapshot.writtenAt))")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    Text("repos \(widgetSnapshot.repositories.count) · changed \(widgetSnapshot.scanSummary.changedRepositories) · files \(widgetSnapshot.scanSummary.totalChangedFiles)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    if let firstRepo = widgetSnapshot.repositories.first {
+                        Text("\(firstRepo.name) · \(firstRepo.branch) · total \(firstRepo.changedFileCount)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                .padding(10)
+                .background(Color.secondary.opacity(0.06))
+                .cornerRadius(8)
+            }
+
+            if !scheduler.diagnostics.validationIssues.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Consistency issues")
+                        .font(.caption.weight(.semibold))
+                    ForEach(scheduler.diagnostics.validationIssues, id: \.self) { issue in
+                        Label(issue, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+                }
+                .padding(10)
+                .background(Color.red.opacity(0.08))
+                .cornerRadius(8)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Current repositories")
+                    .font(.caption.weight(.semibold))
+
+                if scheduler.lastResult.repositories.isEmpty {
+                    Text("No repositories in the latest snapshot.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(scheduler.lastResult.repositories) { repo in
+                            diagnosticsRepositoryRow(repo)
+                        }
+                    }
+                }
+            }
+            .padding(10)
+            .background(Color.secondary.opacity(0.06))
+            .cornerRadius(8)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Recent events")
+                    .font(.caption.weight(.semibold))
+
+                if scheduler.diagnosticEvents.isEmpty {
+                    Text("No diagnostic events yet.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(scheduler.diagnosticEvents.reversed())) { event in
+                                diagnosticsEventRow(event)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 220)
+                }
+            }
+            .padding(10)
+            .background(Color.secondary.opacity(0.06))
+            .cornerRadius(8)
+        }
+    }
+
+    private var diagnosticsStatusGrid: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            diagnosticsRow(
+                title: "App Group",
+                value: scheduler.appGroupAvailable ? "Available" : "Unavailable",
+                detail: scheduler.appGroupAvailable ? AppGroupStore.appGroupIdentifier : "Check entitlements",
+                isError: !scheduler.appGroupAvailable
+            )
+            diagnosticsRow(
+                title: "Shared read",
+                value: sharedReadStatus,
+                detail: sharedReadDetail,
+                isError: sharedReadStatus == "Failed"
+            )
+            diagnosticsRow(
+                title: "Shared write",
+                value: sharedWriteStatus,
+                detail: sharedWriteDetail,
+                isError: sharedWriteStatus == "Failed"
+            )
+            diagnosticsRow(
+                title: "Widget snapshot",
+                value: widgetSnapshotStatus,
+                detail: widgetSnapshotDetail,
+                isError: widgetSnapshotStatus == "Failed"
+            )
+            diagnosticsRow(
+                title: "Validation",
+                value: scheduler.diagnostics.validationIssues.isEmpty ? "Pass" : "Mismatch",
+                detail: scheduler.diagnostics.validationIssues.isEmpty ? "Main app, shared data, and widget snapshot match." : scheduler.diagnostics.validationIssues.joined(separator: " "),
+                isError: !scheduler.diagnostics.validationIssues.isEmpty
+            )
+        }
+    }
+
+    private var sharedReadStatus: String {
+        if scheduler.diagnostics.sharedDataReadError != nil {
+            return "Failed"
+        }
+        if scheduler.diagnostics.sharedDataSnapshot != nil {
+            return "Success"
+        }
+        return "Pending"
+    }
+
+    private var sharedReadDetail: String {
+        if scheduler.diagnostics.sharedDataReadError != nil {
+            return scheduler.diagnostics.sharedDataReadError ?? "Shared data read failed."
+        }
+        if scheduler.diagnostics.sharedDataSnapshot != nil {
+            return snapshotTimeLabel(scheduler.diagnostics.sharedDataReadAt)
+        }
+        return "No shared snapshot loaded yet."
+    }
+
+    private var sharedWriteStatus: String {
+        if scheduler.diagnostics.sharedDataWriteError != nil {
+            return "Failed"
+        }
+        if scheduler.diagnostics.lastSharedWriteAt != nil {
+            return "Success"
+        }
+        return "Pending"
+    }
+
+    private var sharedWriteDetail: String {
+        if scheduler.diagnostics.sharedDataWriteError != nil {
+            return scheduler.diagnostics.sharedDataWriteError ?? "Shared data write failed."
+        }
+        if scheduler.diagnostics.lastSharedWriteAt != nil {
+            return snapshotTimeLabel(scheduler.diagnostics.lastSharedWriteAt)
+        }
+        return "No shared write yet."
+    }
+
+    private var widgetSnapshotStatus: String {
+        if scheduler.diagnostics.widgetSnapshotReadError != nil {
+            return "Failed"
+        }
+        if scheduler.diagnostics.widgetSnapshot != nil {
+            return "Readable"
+        }
+        return "Pending"
+    }
+
+    private var widgetSnapshotDetail: String {
+        if scheduler.diagnostics.widgetSnapshotReadError != nil {
+            return scheduler.diagnostics.widgetSnapshotReadError ?? "Widget snapshot read failed."
+        }
+        if scheduler.diagnostics.widgetSnapshot != nil {
+            return snapshotTimeLabel(scheduler.diagnostics.widgetSnapshotReadAt)
+        }
+        return "No widget-readable snapshot yet."
+    }
+
+    private func diagnosticsRow(title: String, value: String, detail: String, isError: Bool) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .frame(width: 110, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(value)
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(isError ? .red : .primary)
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+            }
+        }
+    }
+
+    private func diagnosticsRepositoryRow(_ repo: RepositorySnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(repo.name)
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text(repo.branch)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            Text(repo.path)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Text("modified \(repo.modifiedFileCount) · added \(repo.addedFileCount) · deleted \(repo.deletedFileCount) · untracked \(repo.untrackedFileCount) · total \(repo.changedFileCount)")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
+            HStack(spacing: 8) {
+                Text("status \(repo.status.rawValue)")
+                if let lastChangedAt = repo.lastChangedAt {
+                    Text("changed \(snapshotTimeLabel(DateFormatting.date(from: lastChangedAt)))")
+                }
+            }
+            .font(.caption2)
+            .foregroundColor(repo.status == .error ? .red : .secondary)
+
+            Text("scan \(snapshotTimeLabel(DateFormatting.date(from: repo.lastScannedAt)))")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
+            if let errorMessage = repo.errorMessage, !errorMessage.isEmpty {
+                Text(errorMessage)
+                    .font(.caption2)
+                    .foregroundColor(.red)
+            }
+        }
+        .padding(8)
+        .background(Color.white.opacity(0.35))
+        .cornerRadius(6)
+    }
+
+    private func diagnosticsEventRow(_ event: DiagnosticEvent) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(event.kind.rawValue)
+                .font(.caption2.weight(.semibold))
+                .foregroundColor(event.kind == .validationFailed || event.kind == .sharedDataWriteFailed || event.kind == .sharedDataReadFailed ? .red : .secondary)
+                .frame(width: 120, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(event.message)
+                    .font(.caption)
+                Text(snapshotTimeLabel(DateFormatting.date(from: event.timestamp)))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private func snapshotTimeLabel(_ date: Date?) -> String {
+        guard let date else { return "unknown" }
+        return formattedDate(date)
+    }
+
+    private func snapshotTimeLabel(_ iso: String?) -> String {
+        guard let iso, let date = DateFormatting.date(from: iso) else { return "unknown" }
+        return formattedDate(date)
     }
 
     // MARK: - Helpers

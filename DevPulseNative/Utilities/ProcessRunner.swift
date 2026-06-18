@@ -3,14 +3,34 @@ import Foundation
 enum ProcessRunner {
     /// Maximum time a single git command may run.
     static let gitTimeout: TimeInterval = 5.0
+    private static let gitCandidates = [
+        "/usr/bin/git",
+        "/opt/homebrew/bin/git",
+        "/usr/local/bin/git"
+    ]
+
+    /// Resolve the first usable Git executable without relying on PATH.
+    static func gitExecutablePath() -> String? {
+        for candidate in gitCandidates where FileManager.default.isExecutableFile(atPath: candidate) {
+            return candidate
+        }
+
+        return nil
+    }
 
     /// Execute a process and return its stdout trimmed, or nil on failure.
-    static func run(executable: String = "/usr/bin/git",
+    static func run(executable: String? = nil,
                     arguments: [String],
                     workingDirectory: String,
                     timeout: TimeInterval = gitTimeout) -> String? {
+        let executablePath = executable ?? gitExecutablePath()
+        guard let executablePath,
+              FileManager.default.isExecutableFile(atPath: executablePath) else {
+            return nil
+        }
+
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
+        process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
         process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory)
 
@@ -44,18 +64,6 @@ enum ProcessRunner {
 
     /// Check whether git is available on this system.
     static func isGitAvailable() -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["--version"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus == 0
-        } catch {
-            return false
-        }
+        gitExecutablePath() != nil
     }
 }

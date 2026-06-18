@@ -30,6 +30,8 @@ final class ScanScheduler: ObservableObject {
     @Published var gitAvailable: Bool = true
     @Published var appGroupAvailable: Bool = true
     @Published var warnings: [String] = []
+    @Published var diagnostics = DiagnosticsSnapshot()
+    @Published var diagnosticEvents: [DiagnosticEvent] = []
     @Published var scanIntervalSeconds: TimeInterval = 300
     @Published var powerState: String = "normal"
 
@@ -72,6 +74,8 @@ final class ScanScheduler: ObservableObject {
         loadConfig()
         appGroupAvailable = AppGroupStore.isAvailable
         gitAvailable = ProcessRunner.isGitAvailable()
+        diagnostics.appGroupAvailable = appGroupAvailable
+        restorePersistedSnapshot()
         updatePowerState()
         startPowerMonitoring()
     }
@@ -83,7 +87,12 @@ final class ScanScheduler: ObservableObject {
 
         isScanning = true
         warnings = []
+        diagnostics.validationIssues = []
+        diagnostics.sharedDataWriteError = nil
+        diagnostics.sharedDataReadError = nil
+        diagnostics.widgetSnapshotReadError = nil
         let currentConfig = config
+        recordEvent(.scanStarted, "Scan started")
 
         Task.detached(priority: .userInitiated) {
             let result = await GitRepositoryScanner.scan(config: currentConfig)
@@ -94,8 +103,21 @@ final class ScanScheduler: ObservableObject {
 
                 self.lastResult = pinned
                 self.lastScanAt = Date()
+                self.diagnostics.lastScanAt = self.lastScanAt
                 self.warnings = result.warnings
                 self.isScanning = false
+
+                if result.warnings.isEmpty {
+                    self.recordEvent(
+                        .scanSucceeded,
+                        "Scan success: \(pinned.scanSummary.totalRepositories) repos, \(pinned.scanSummary.changedRepositories) changed, \(pinned.scanSummary.totalChangedFiles) files"
+                    )
+                } else {
+                    self.recordEvent(
+                        .scanSucceeded,
+                        "Scan success with \(result.warnings.count) warning(s): \(pinned.scanSummary.totalRepositories) repos"
+                    )
+                }
 
                 // Adaptive interval
                 if hadChanges {
@@ -104,6 +126,7 @@ final class ScanScheduler: ObservableObject {
                     self.consecutiveNoChanges += 1
                 }
                 self.updateScanInterval()
+                self.syncSharedSnapshot(from: pinned, reason: "scan")
             }
         }
     }
@@ -185,6 +208,124 @@ final class ScanScheduler: ObservableObject {
             || before.scanSummary.totalRepositories != after.scanSummary.totalRepositories
     }
 
+    // MARK: - Shared snapshot sync
+
+    private func restorePersistedSnapshot() {
+        switch AppGroupStore.read() {
+        case .success(let snapshot):
+            let pinned = applyPins(snapshot)
+            lastResult = pinned
+            diagnostics.sharedDataSnapshot = snapshot
+            diagnostics.widgetSnapshot = snapshot
+            let now = Date()
+            diagnostics.sharedDataReadAt = now
+            diagnostics.widgetSnapshotReadAt = now
+            diagnostics.sharedDataReadError = nil
+            diagnostics.widgetSnapshotReadError = nil
+            if let writtenAt = snapshot.writtenAt.flatMap(DateFormatting.date(from:)) {
+                diagnostics.lastSharedWriteAt = writtenAt
+            }
+            if let generatedAt = DateFormatting.date(from: snapshot.generatedAt) {
+                lastScanAt = generatedAt
+                diagnostics.lastScanAt = generatedAt
+            }
+            validateConsistency(expected: pinned, shared: snapshot, reason: "startup")
+        case .failure(let error):
+            diagnostics.sharedDataReadError = error.localizedDescription
+            diagnostics.widgetSnapshotReadError = error.localizedDescription
+            diagnostics.validationIssues = [error.localizedDescription]
+            recordEvent(.sharedDataReadFailed, "Shared snapshot read failed at startup: \(error.localizedDescription)")
+        }
+    }
+
+    private func syncSharedSnapshot(from snapshot: AppGroupData, reason: String) {
+        let writtenAt = DateFormatting.nowISO()
+        let snapshotToWrite = snapshot.withWrittenAt(writtenAt)
+
+        switch AppGroupStore.write(snapshotToWrite) {
+        case .success:
+            let now = Date()
+            appGroupAvailable = AppGroupStore.isAvailable
+            diagnostics.appGroupAvailable = appGroupAvailable
+            diagnostics.lastSharedWriteAt = now
+            diagnostics.sharedDataWriteError = nil
+            recordEvent(
+                .sharedDataWritten,
+                "Shared snapshot written (\(snapshotToWrite.repositories.count) repos, \(reason))"
+            )
+        case .failure(let error):
+            diagnostics.sharedDataWriteError = error.localizedDescription
+            diagnostics.validationIssues = [error.localizedDescription]
+            recordEvent(.sharedDataWriteFailed, "Shared snapshot write failed: \(error.localizedDescription)")
+            return
+        }
+
+        switch AppGroupStore.read() {
+        case .success(let readBack):
+            let now = Date()
+            diagnostics.sharedDataReadAt = now
+            diagnostics.widgetSnapshotReadAt = now
+            diagnostics.sharedDataSnapshot = readBack
+            diagnostics.widgetSnapshot = readBack
+            diagnostics.sharedDataReadError = nil
+            diagnostics.widgetSnapshotReadError = nil
+            validateConsistency(expected: snapshotToWrite, shared: readBack, reason: reason)
+            lastResult = applyPins(readBack)
+        case .failure(let error):
+            diagnostics.sharedDataReadAt = Date()
+            diagnostics.widgetSnapshotReadAt = Date()
+            diagnostics.sharedDataReadError = error.localizedDescription
+            diagnostics.widgetSnapshotReadError = error.localizedDescription
+            diagnostics.sharedDataSnapshot = nil
+            diagnostics.widgetSnapshot = nil
+            diagnostics.validationIssues = [error.localizedDescription]
+            recordEvent(.sharedDataReadFailed, "Shared snapshot read failed after write: \(error.localizedDescription)")
+        }
+
+        recordEvent(.widgetReloadRequested, "Widget reload requested (\(reason))")
+        AppGroupStore.reloadWidgets()
+    }
+
+    private func validateConsistency(expected: AppGroupData, shared: AppGroupData?, reason: String) {
+        var issues: [String] = []
+
+        if !appGroupAvailable {
+            issues.append("App Group is unavailable.")
+        }
+
+        guard let shared else {
+            issues.append("Shared snapshot is unavailable.")
+            diagnostics.validationIssues = issues
+            recordEvent(.validationFailed, "Validation failed (\(reason)): \(issues.joined(separator: " "))")
+            return
+        }
+
+        if shared != expected {
+            issues.append("Main app snapshot differs from shared snapshot.")
+        }
+
+        if issues.isEmpty {
+            diagnostics.validationIssues = []
+            recordEvent(.validationPassed, "Validation passed (\(reason))")
+        } else {
+            diagnostics.validationIssues = issues
+            recordEvent(.validationFailed, "Validation failed (\(reason)): \(issues.joined(separator: " "))")
+        }
+    }
+
+    private func recordEvent(_ kind: DiagnosticEvent.Kind, _ message: String) {
+        let event = DiagnosticEvent(
+            timestamp: DateFormatting.nowISO(),
+            kind: kind,
+            message: message
+        )
+        diagnosticEvents.append(event)
+        if diagnosticEvents.count > 20 {
+            diagnosticEvents = Array(diagnosticEvents.suffix(20))
+        }
+        print("[DevPulse][\(kind.rawValue)] \(message)")
+    }
+
     // MARK: - Power monitoring
 
     private func updatePowerState() {
@@ -247,6 +388,7 @@ final class ScanScheduler: ObservableObject {
         return AppGroupData(
             schemaVersion: data.schemaVersion,
             generatedAt: data.generatedAt,
+            writtenAt: data.writtenAt,
             scanSummary: data.scanSummary,
             repositories: repos
         )
@@ -262,7 +404,7 @@ final class ScanScheduler: ObservableObject {
         pinnedRepoIDs = current
         let updated = applyPins(lastResult)
         lastResult = updated
-        AppGroupStore.write(updated)
+        syncSharedSnapshot(from: updated, reason: "pin toggle")
     }
 
     // MARK: - Config persistence
@@ -280,7 +422,7 @@ final class ScanScheduler: ObservableObject {
             config = .default
             return
         }
-        config = decoded
+        config = normalizeConfig(decoded)
 
         // Load last interval
         if let saved = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
@@ -300,12 +442,21 @@ final class ScanScheduler: ObservableObject {
     }
 
     func addCustomPath(_ path: String) {
-        let expanded = ScanLocationProvider.expandTilde(path)
+        let expanded = ScanLocationProvider.normalizePersistedPath(path)
         guard !config.customPaths.contains(expanded) else { return }
         config.customPaths.append(expanded)
     }
 
     func removeCustomPath(_ path: String) {
         config.customPaths.removeAll { $0 == path }
+    }
+
+    private func normalizeConfig(_ config: ScanConfig) -> ScanConfig {
+        var normalized = config
+        normalized.enabledBuiltInPaths = Set(
+            config.enabledBuiltInPaths.map(ScanLocationProvider.normalizePersistedPath)
+        )
+        normalized.customPaths = config.customPaths.map(ScanLocationProvider.normalizePersistedPath)
+        return normalized
     }
 }

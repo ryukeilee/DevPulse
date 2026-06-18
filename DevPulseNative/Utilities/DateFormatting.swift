@@ -26,4 +26,12 @@ enum DateFormatting {
     static func nowISO() -> String {
         ISO8601DateFormatter().string(from: Date())
     }
+
+    /// Parse an ISO-8601 string into a Date when possible.
+    static func date(from iso8601String: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: iso8601String)
+            ?? ISO8601DateFormatter().date(from: iso8601String)
+    }
 }

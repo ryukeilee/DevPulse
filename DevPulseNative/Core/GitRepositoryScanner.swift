@@ -82,14 +82,18 @@ enum GitRepositoryScanner {
 
         // Throttle: if >30 repos, only scan changed/active ones
         if pathsToScan.count > config.activeRepoThreshold {
-            let previous = AppGroupStore.read()
-            let changedPaths = Set(previous.repositories
-                .filter { $0.status == .changed || $0.status == .error }
-                .map { $0.path })
-            let active = pathsToScan.filter { changedPaths.contains($0) }
-            if !active.isEmpty {
-                warnings.append("Throttling: scanning \(active.count) active repos out of \(pathsToScan.count) total (threshold \(config.activeRepoThreshold))")
-                pathsToScan = active
+            switch AppGroupStore.read() {
+            case .success(let previous):
+                let changedPaths = Set(previous.repositories
+                    .filter { $0.status == .changed || $0.status == .error }
+                    .map { $0.path })
+                let active = pathsToScan.filter { changedPaths.contains($0) }
+                if !active.isEmpty {
+                    warnings.append("Throttling: scanning \(active.count) active repos out of \(pathsToScan.count) total (threshold \(config.activeRepoThreshold))")
+                    pathsToScan = active
+                }
+            case .failure(let error):
+                warnings.append("Shared snapshot unavailable for throttling: \(error.localizedDescription)")
             }
         }
 
@@ -119,12 +123,10 @@ enum GitRepositoryScanner {
         let result = AppGroupData(
             schemaVersion: RepositorySnapshotSchema.version,
             generatedAt: DateFormatting.nowISO(),
+            writtenAt: nil,
             scanSummary: summary,
             repositories: sorted
         )
-
-        // Phase 5: persist to App Group
-        AppGroupStore.write(result)
 
         let elapsed = Date().timeIntervalSince(startTime)
         print("[DevPulse] Scan completed in \(String(format: "%.2f", elapsed))s: "
@@ -149,10 +151,15 @@ enum GitRepositoryScanner {
             var isDir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: root, isDirectory: &isDir),
                   isDir.boolValue else {
+                warnings.append("Scan root unavailable: \(root)")
                 continue
             }
 
             walkDirectory(root, config: config, discovered: &discovered, warnings: &warnings)
+        }
+
+        if discovered.isEmpty {
+            warnings.append("No Git repositories discovered in the configured scan roots.")
         }
 
         return Array(discovered).sorted()
@@ -242,6 +249,10 @@ enum GitRepositoryScanner {
                 path: skipped,
                 branch: "unknown",
                 status: .error,
+                modifiedFileCount: 0,
+                addedFileCount: 0,
+                deletedFileCount: 0,
+                untrackedFileCount: 0,
                 changedFileCount: 0,
                 changedFilesPreview: [],
                 risk: .low,
@@ -267,6 +278,10 @@ enum GitRepositoryScanner {
                         path: path,
                         branch: "unknown",
                         status: .error,
+                        modifiedFileCount: 0,
+                        addedFileCount: 0,
+                        deletedFileCount: 0,
+                        untrackedFileCount: 0,
                         changedFileCount: 0,
                         changedFilesPreview: [],
                         risk: .low,
@@ -337,6 +352,10 @@ enum GitRepositoryScanner {
                 path: repoPath,
                 branch: branch.isEmpty ? "detached" : branch,
                 status: .error,
+                modifiedFileCount: 0,
+                addedFileCount: 0,
+                deletedFileCount: 0,
+                untrackedFileCount: 0,
                 changedFileCount: 0,
                 changedFilesPreview: [],
                 risk: .low,
@@ -348,8 +367,9 @@ enum GitRepositoryScanner {
         }
 
         let entries = GitStatusParser.parseStatusEntries(statusOutput)
+        let summary = GitStatusParser.summarize(entries)
         let changedFiles = entries.map(\.path)
-        let changedCount = changedFiles.count
+        let changedCount = summary.total
 
         let status: RepositoryStatus = changedCount > 0 ? .changed : .clean
         let risk = RiskHintEngine.assess(changedFiles: changedFiles)
@@ -369,6 +389,10 @@ enum GitRepositoryScanner {
             path: repoPath,
             branch: branch.isEmpty ? "detached" : branch,
             status: status,
+            modifiedFileCount: summary.modified,
+            addedFileCount: summary.added,
+            deletedFileCount: summary.deleted,
+            untrackedFileCount: summary.untracked,
             changedFileCount: changedCount,
             changedFilesPreview: preview,
             risk: risk.level,

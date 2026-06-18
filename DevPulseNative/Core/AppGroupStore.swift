@@ -3,7 +3,7 @@ import WidgetKit
 
 enum AppGroupStore {
     /// The App Group identifier shared with the Widget Extension.
-    static let appGroupIdentifier = "local.devpulse.group"
+    static let appGroupIdentifier = "group.local.devpulse"
 
     /// File name for the snapshot inside the group container.
     private static let snapshotFileName = "repositories.json"
@@ -25,22 +25,34 @@ enum AppGroupStore {
     // MARK: - Read
 
     /// Read the current app group snapshot.
-    static func read() -> AppGroupData {
-        guard let url = snapshotURL,
-              let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode(AppGroupData.self, from: data) else {
-            return .empty()
+    static func read() -> Result<AppGroupData, AppGroupStoreError> {
+        guard let url = snapshotURL else {
+            return .failure(.appGroupUnavailable)
         }
-        return decoded
+
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return .failure(.snapshotMissing)
+        }
+
+        do {
+            let data = try Data(contentsOf: url)
+            do {
+                let decoded = try JSONDecoder().decode(AppGroupData.self, from: data)
+                return .success(decoded)
+            } catch {
+                return .failure(.decodeFailed(error.localizedDescription))
+            }
+        } catch {
+            return .failure(.readFailed(error.localizedDescription))
+        }
     }
 
     // MARK: - Write
 
-    /// Write a snapshot to the app group container and request a widget refresh.
-    static func write(_ data: AppGroupData) {
+    /// Write a snapshot to the app group container.
+    static func write(_ data: AppGroupData) -> Result<Void, AppGroupStoreError> {
         guard let url = snapshotURL else {
-            print("[DevPulse] App Group container URL is nil — check entitlements")
-            return
+            return .failure(.appGroupUnavailable)
         }
 
         let encoder = JSONEncoder()
@@ -51,14 +63,17 @@ enum AppGroupStore {
             try json.write(to: url, options: .atomic)
             print("[DevPulse] Wrote repositories.json (schema v\(data.schemaVersion), "
                   + "\(data.repositories.count) repos)")
-
-            // Notify WidgetKit to reload
-            #if canImport(WidgetKit)
-            WidgetCenter.shared.reloadAllTimelines()
-            #endif
+            return .success(())
         } catch {
-            print("[DevPulse] Failed to write repositories.json: \(error.localizedDescription)")
+            return .failure(.writeFailed(error.localizedDescription))
         }
+    }
+
+    /// Reload widget timelines after a successful write or manual refresh.
+    static func reloadWidgets() {
+        #if canImport(WidgetKit)
+        WidgetCenter.shared.reloadAllTimelines()
+        #endif
     }
 
     // MARK: - Utility

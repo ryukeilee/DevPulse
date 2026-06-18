@@ -24,6 +24,11 @@
 	<string>14.0</string>
 	<key>NSExtension</key>
 	<dict>
+		<key>NSExtensionAttributes</key>
+		<dict>
+			<key>WKAppBundleIdentifier</key>
+			<string>$(APP_BUNDLE_ID)</string>
+		</dict>
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.widgetkit-extension</string>
 	</dict>

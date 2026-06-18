@@ -99,7 +99,7 @@ struct StatusTab: View {
         let repos = scheduler.lastResult.repositories
         if repos.isEmpty {
             if scheduler.lastScanAt != nil {
-                return "No Git repositories found.\nAdjust scan locations in Settings."
+                return "No repositories found in configured scan roots.\nAdjust scan locations in Settings."
             }
             return "Ready to scan.\nPress Rescan Now to discover repositories."
         }

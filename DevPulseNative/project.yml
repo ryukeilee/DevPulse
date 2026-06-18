@@ -29,26 +29,18 @@ targets:
         GENERATE_INFOPLIST_FILE: "NO"
         MARKETING_VERSION: "0.2.0"
         CURRENT_PROJECT_VERSION: "1"
-        DEVELOPMENT_TEAM: ""
-        CODE_SIGN_IDENTITY: "-"
-        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: JYL9G28DP3
+        CODE_SIGN_STYLE: Automatic
         CODE_SIGN_ENTITLEMENTS: App/DevPulse.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        SWIFT_OBJC_BRIDGING_HEADER: ""
       configs:
-        Debug:
-          CODE_SIGN_IDENTITY: "-"
-          CODE_SIGN_STYLE: Manual
         Release:
-          CODE_SIGN_IDENTITY: "-"
-          CODE_SIGN_STYLE: Manual
+          ENABLE_HARDENED_RUNTIME: YES
     entitlements:
       path: App/DevPulse.entitlements
       properties:
-        com.apple.security.app-sandbox: true
-        com.apple.security.files.user-selected.read-only: true
         com.apple.security.application-groups:
-          - local.devpulse.group
+          - group.local.devpulse
     dependencies:
       - target: DevPulseWidgetExtension
       - sdk: IOKit.framework
@@ -67,9 +59,6 @@ targets:
     platform: macOS
     sources:
       - path: Widget
-      - path: Core/Models.swift
-      - path: Core/AppGroupStore.swift
-      - path: Utilities/DateFormatting.swift
     settings:
       base:
         INFOPLIST_FILE: Widget/Info.plist
@@ -78,20 +67,16 @@ targets:
         GENERATE_INFOPLIST_FILE: "NO"
         MARKETING_VERSION: "0.2.0"
         CURRENT_PROJECT_VERSION: "1"
-        DEVELOPMENT_TEAM: ""
-        CODE_SIGN_IDENTITY: "-"
-        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: JYL9G28DP3
+        CODE_SIGN_STYLE: Automatic
         CODE_SIGN_ENTITLEMENTS: Widget/DevPulseWidgetExtension.entitlements
-        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        APP_BUNDLE_ID: local.devpulse.app
       configs:
-        Debug:
-          CODE_SIGN_IDENTITY: "-"
-          CODE_SIGN_STYLE: Manual
         Release:
-          CODE_SIGN_IDENTITY: "-"
-          CODE_SIGN_STYLE: Manual
+          ENABLE_HARDENED_RUNTIME: YES
     entitlements:
       path: Widget/DevPulseWidgetExtension.entitlements
       properties:
+        com.apple.security.app-sandbox: true
         com.apple.security.application-groups:
-          - local.devpulse.group
+          - group.local.devpulse

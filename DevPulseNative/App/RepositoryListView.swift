@@ -29,7 +29,7 @@ struct RepositoryListView: View {
             Image(systemName: "tray")
                 .font(.system(size: 32))
                 .foregroundColor(.secondary)
-            Text("No repositories discovered yet")
+            Text("No repositories found in configured scan roots")
                 .font(.body)
                 .foregroundColor(.secondary)
             Text("Press Rescan Now in the Overview tab to start scanning.")
@@ -70,7 +70,7 @@ struct RepositoryRow: View {
                 HStack(spacing: 6) {
                     branchLabel
                     if repo.changedFileCount > 0 {
-                        Text("\(repo.changedFileCount) files")
+                        Text("modified \(repo.modifiedFileCount) · added \(repo.addedFileCount) · deleted \(repo.deletedFileCount) · untracked \(repo.untrackedFileCount)")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
