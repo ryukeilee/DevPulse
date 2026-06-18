@@ -50,8 +50,14 @@ enum ScanLocationProvider {
     /// Normalize persisted scan paths from older sandboxed builds.
     static func normalizePersistedPath(_ path: String) -> String {
         let expanded = expandTilde(path)
-        let containerHome = NSHomeDirectory()
         let userHome = resolvedUserHomeDirectory()
+        let legacyContainerPrefix = legacyContainerHomePrefix()
+
+        if expanded.hasPrefix(legacyContainerPrefix) {
+            return userHome + String(expanded.dropFirst(legacyContainerPrefix.count))
+        }
+
+        let containerHome = NSHomeDirectory()
         guard !containerHome.isEmpty,
               containerHome != userHome,
               expanded.hasPrefix(containerHome) else { return expanded }
@@ -95,5 +101,9 @@ enum ScanLocationProvider {
 
     private static func isContainerHome(_ path: String) -> Bool {
         path.contains("/Library/Containers/")
+    }
+
+    private static func legacyContainerHomePrefix() -> String {
+        resolvedUserHomeDirectory() + "/Library/Containers/local.devpulse.app/Data"
     }
 }

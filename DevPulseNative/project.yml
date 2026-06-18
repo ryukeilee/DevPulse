@@ -58,7 +58,7 @@ targets:
     type: app-extension
     platform: macOS
     sources:
-      - path: Widget
+      - path: Widget/DevPulseWidget.swift
     settings:
       base:
         INFOPLIST_FILE: Widget/Info.plist

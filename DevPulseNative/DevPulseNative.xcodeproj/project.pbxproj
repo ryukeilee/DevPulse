@@ -57,7 +57,6 @@
 		0A2CBE8389817E81B7EA977B /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		193D9DD3EE1AFEEAD2F6BD9B /* DevPulseWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevPulseWidget.swift; sourceTree = "<group>"; };
 		1C7D3FB592624A4168700A13 /* DateFormatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DateFormatting.swift; sourceTree = "<group>"; };
-		2867DCECCFCF17CAE4BCD354 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		317BDD24648E8023D33489F0 /* ScanStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanStatusView.swift; sourceTree = "<group>"; };
 		3F2466DCDD8419ADCB6CFFE4 /* ExcludedDirectoryRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExcludedDirectoryRules.swift; sourceTree = "<group>"; };
 		430D01D16B454ECCF1FD87B6 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -70,7 +69,6 @@
 		83FF411CD8430FFFD25CDECE /* DevPulse.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = DevPulse.entitlements; sourceTree = "<group>"; };
 		845B9939E8EF6ECDB9166F58 /* RepositorySorter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositorySorter.swift; sourceTree = "<group>"; };
 		90B89322FFA8C1A38DBAA36A /* DevPulseApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevPulseApp.swift; sourceTree = "<group>"; };
-		9254307123A705DE783196E4 /* DevPulseWidgetExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = DevPulseWidgetExtension.entitlements; sourceTree = "<group>"; };
 		94E9BC0F79AE40FCA5B9554E /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		953DF8B9FEC7C3AB05885E5F /* IOKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOKit.framework; path = System/Library/Frameworks/IOKit.framework; sourceTree = SDKROOT; };
 		9833E1AABFC26AF5C65068AE /* DevPulseWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = DevPulseWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -143,8 +141,6 @@
 			isa = PBXGroup;
 			children = (
 				193D9DD3EE1AFEEAD2F6BD9B /* DevPulseWidget.swift */,
-				9254307123A705DE783196E4 /* DevPulseWidgetExtension.entitlements */,
-				2867DCECCFCF17CAE4BCD354 /* Info.plist */,
 			);
 			path = Widget;
 			sourceTree = "<group>";

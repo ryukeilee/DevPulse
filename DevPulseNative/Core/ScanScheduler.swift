@@ -105,10 +105,10 @@ final class ScanScheduler: ObservableObject {
             await MainActor.run {
                 let pinned = self.applyPins(result.data)
                 let hadChanges = self.hadChanges(before: self.lastResult, after: pinned)
-                var combinedWarnings = result.warnings
-                if let warning = currentScanRoots.warning, !combinedWarnings.contains(warning) {
-                    combinedWarnings.append(warning)
-                }
+                var combinedWarnings = self.summarizeWarnings(
+                    result.warnings,
+                    accessWarning: currentScanRoots.warning
+                )
 
                 self.lastResult = pinned
                 self.lastScanAt = Date()
@@ -375,6 +375,25 @@ final class ScanScheduler: ObservableObject {
             diagnosticEvents = Array(diagnosticEvents.suffix(20))
         }
         print("[DevPulse][\(kind.rawValue)] \(message)")
+    }
+
+    private func summarizeWarnings(_ warnings: [String], accessWarning: String?) -> [String] {
+        var summarized: [String] = []
+        var sawRootUnavailable = false
+
+        for warning in warnings {
+            if warning.hasPrefix("Scan root unavailable:") {
+                sawRootUnavailable = true
+                continue
+            }
+            summarized.append(warning)
+        }
+
+        if sawRootUnavailable, let accessWarning, !summarized.contains(accessWarning) {
+            summarized.append(accessWarning)
+        }
+
+        return summarized
     }
 
     // MARK: - Power monitoring
