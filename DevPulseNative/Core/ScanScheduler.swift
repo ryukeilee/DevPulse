@@ -477,9 +477,11 @@ final class ScanScheduler: ObservableObject {
             .data(forKey: configKey),
               let decoded = try? JSONDecoder().decode(ScanConfig.self, from: data) else {
             config = .default
+            persistConfig()
             return
         }
         config = normalizeConfig(decoded)
+        persistConfig()
 
         // Load last interval
         if let saved = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
