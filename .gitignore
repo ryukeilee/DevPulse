@@ -32,6 +32,8 @@ build/*
 !build/icon.png
 !build/icon.icns
 **/build/
+.build/
+*.xcarchive
 out/
 coverage/
 .next/
@@ -51,6 +53,8 @@ pnpm-debug.log*
 DerivedData/
 **/xcuserdata/
 *.xcuserstate
+**/*.xcworkspace/xcuserdata/
+.swiftpm/
 *.app
 *.dmg
 *.pkg
