@@ -75,13 +75,19 @@ struct RepositoryRow: View {
                             .foregroundColor(.secondary)
                     }
                 }
+                Text(repo.commitReadiness.detail)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
 
             Spacer()
 
             // Risk badge
-            if repo.status != .error {
-                RiskBadge(level: repo.risk)
+            VStack(alignment: .trailing, spacing: 4) {
+                if repo.status != .error {
+                    RiskBadge(level: repo.risk)
+                }
+                CommitReadinessBadge(level: repo.commitReadiness.level, compact: true)
             }
         }
         .padding(.vertical, 4)

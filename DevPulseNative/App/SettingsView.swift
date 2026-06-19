@@ -371,10 +371,58 @@ struct SettingsView: View {
     private var diagnosticsStatusGrid: some View {
         VStack(alignment: .leading, spacing: 8) {
             diagnosticsRow(
+                title: "App Bundle",
+                value: scheduler.diagnostics.appBundleIdentifier,
+                detail: "Main app bundle identifier.",
+                isError: false
+            )
+            diagnosticsRow(
+                title: "Widget Bundle",
+                value: scheduler.diagnostics.widgetBundleIdentifier,
+                detail: "Widget extension bundle identifier.",
+                isError: false
+            )
+            diagnosticsRow(
                 title: "App Group",
-                value: scheduler.appGroupAvailable ? "Available" : "Unavailable",
-                detail: scheduler.appGroupAvailable ? AppGroupStore.appGroupIdentifier : "Check entitlements",
+                value: scheduler.diagnostics.appGroupIdentifier,
+                detail: scheduler.diagnostics.appGroupContainerPath ?? "App Group container unavailable.",
                 isError: !scheduler.appGroupAvailable
+            )
+            diagnosticsRow(
+                title: "Container",
+                value: scheduler.diagnostics.appGroupContainerPath ?? "Unavailable",
+                detail: scheduler.diagnostics.appGroupAvailable ? "App Group container path." : "Check entitlements and signing.",
+                isError: !scheduler.appGroupAvailable
+            )
+            diagnosticsRow(
+                title: "Snapshot file",
+                value: scheduler.diagnostics.snapshotFilePath ?? "Unavailable",
+                detail: scheduler.diagnostics.snapshotExists ? "Shared repositories.json exists." : "Shared repositories.json is missing.",
+                isError: !scheduler.diagnostics.snapshotExists
+            )
+            diagnosticsRow(
+                title: "Snapshot exists",
+                value: scheduler.diagnostics.snapshotExists ? "Yes" : "No",
+                detail: scheduler.diagnostics.snapshotFilePath ?? "No snapshot path resolved.",
+                isError: !scheduler.diagnostics.snapshotExists
+            )
+            diagnosticsRow(
+                title: "Snapshot readable",
+                value: scheduler.diagnostics.snapshotReadable ? "Yes" : "No",
+                detail: scheduler.diagnostics.snapshotReadable ? "File is readable." : "File cannot be read by the app.",
+                isError: !scheduler.diagnostics.snapshotReadable
+            )
+            diagnosticsRow(
+                title: "Snapshot writable",
+                value: scheduler.diagnostics.snapshotWritable ? "Yes" : "No",
+                detail: scheduler.diagnostics.snapshotWritable ? "File or container is writable." : "File or container cannot be written.",
+                isError: !scheduler.diagnostics.snapshotWritable
+            )
+            diagnosticsRow(
+                title: "Snapshot decodable",
+                value: scheduler.diagnostics.snapshotDecodable ? "Yes" : "No",
+                detail: scheduler.diagnostics.snapshotDecodable ? "Shared snapshot decoded successfully." : (scheduler.diagnostics.sharedDataReadError ?? "Shared snapshot has not been decoded yet."),
+                isError: !scheduler.diagnostics.snapshotDecodable
             )
             diagnosticsRow(
                 title: "Shared read",
@@ -400,6 +448,24 @@ struct SettingsView: View {
                 detail: scheduler.diagnostics.validationIssues.isEmpty ? "Main app, shared data, and widget snapshot match." : scheduler.diagnostics.validationIssues.joined(separator: " "),
                 isError: !scheduler.diagnostics.validationIssues.isEmpty
             )
+            diagnosticsRow(
+                title: "Generated at",
+                value: scheduler.diagnostics.lastGeneratedAt.map { snapshotTimeLabel($0) } ?? "Unavailable",
+                detail: scheduler.diagnostics.lastGeneratedAt ?? "No generatedAt captured yet.",
+                isError: scheduler.diagnostics.lastGeneratedAt == nil
+            )
+            diagnosticsRow(
+                title: "Written at",
+                value: scheduler.diagnostics.lastWrittenAt.map { snapshotTimeLabel($0) } ?? "Unavailable",
+                detail: scheduler.diagnostics.lastWrittenAt ?? "No writtenAt captured yet.",
+                isError: scheduler.diagnostics.lastWrittenAt == nil
+            )
+            diagnosticsRow(
+                title: "Reload requested",
+                value: scheduler.diagnostics.lastReloadRequestedAt.map { snapshotTimeLabel($0) } ?? "Unavailable",
+                detail: scheduler.diagnostics.lastReloadRequestedAt.map { formattedDate($0) } ?? "Widget reload has not been requested yet.",
+                isError: scheduler.diagnostics.lastReloadRequestedAt == nil
+            )
         }
     }
 
@@ -420,7 +486,7 @@ struct SettingsView: View {
         if scheduler.diagnostics.sharedDataSnapshot != nil {
             return snapshotTimeLabel(scheduler.diagnostics.sharedDataReadAt)
         }
-        return "No shared snapshot loaded yet."
+        return "Waiting for the first App Group read-back after launch."
     }
 
     private var sharedWriteStatus: String {
@@ -440,7 +506,7 @@ struct SettingsView: View {
         if scheduler.diagnostics.lastSharedWriteAt != nil {
             return snapshotTimeLabel(scheduler.diagnostics.lastSharedWriteAt)
         }
-        return "No shared write yet."
+        return "Waiting for the first verified snapshot write."
     }
 
     private var widgetSnapshotStatus: String {
@@ -460,7 +526,7 @@ struct SettingsView: View {
         if scheduler.diagnostics.widgetSnapshot != nil {
             return snapshotTimeLabel(scheduler.diagnostics.widgetSnapshotReadAt)
         }
-        return "No widget-readable snapshot yet."
+        return "Waiting for the widget-readable snapshot after launch."
     }
 
     private func diagnosticsRow(title: String, value: String, detail: String, isError: Bool) -> some View {

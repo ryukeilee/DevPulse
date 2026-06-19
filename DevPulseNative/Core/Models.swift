@@ -85,6 +85,181 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
             untracked: untrackedFileCount
         )
     }
+
+    var commitReadiness: CommitReadinessAssessment {
+        CommitReadinessEngine.assess(snapshot: self)
+    }
+}
+
+// MARK: - Activity timeline
+
+enum ActivityTimelineState: String, Codable, Equatable {
+    case neverScanned
+    case noRepositories
+    case allClean
+    case active
+}
+
+struct ActivityTimelineFeed: Codable, Equatable {
+    let state: ActivityTimelineState
+    let items: [ActivityTimelineItem]
+
+    var topItem: ActivityTimelineItem? {
+        items.first
+    }
+
+    var hasItems: Bool {
+        !items.isEmpty
+    }
+}
+
+struct ActivityTimelineItem: Codable, Identifiable, Equatable {
+    let id: String
+    let repoName: String
+    let repoPath: String
+    let branch: String
+    let status: RepositoryStatus
+    let risk: RiskLevel
+    let modifiedFileCount: Int
+    let addedFileCount: Int
+    let deletedFileCount: Int
+    let untrackedFileCount: Int
+    let changedFileCount: Int
+    let changedFilesPreview: [String]
+    let lastChangedAt: String?
+    let lastScannedAt: String
+
+    init(from snapshot: RepositorySnapshot) {
+        id = snapshot.id
+        repoName = snapshot.name
+        repoPath = snapshot.path
+        branch = snapshot.branch
+        status = snapshot.status
+        risk = snapshot.risk
+        modifiedFileCount = snapshot.modifiedFileCount
+        addedFileCount = snapshot.addedFileCount
+        deletedFileCount = snapshot.deletedFileCount
+        untrackedFileCount = snapshot.untrackedFileCount
+        changedFileCount = snapshot.changedFileCount
+        changedFilesPreview = ActivityTimelineItem.previewBasenames(from: snapshot.changedFilesPreview)
+        lastChangedAt = snapshot.lastChangedAt
+        lastScannedAt = snapshot.lastScannedAt
+    }
+
+    var activityDate: Date? {
+        if let lastChangedAt, let date = DateFormatting.date(from: lastChangedAt) {
+            return date
+        }
+        return DateFormatting.date(from: lastScannedAt)
+    }
+
+    var commitReadiness: CommitReadinessAssessment {
+        CommitReadinessEngine.assess(
+            status: status,
+            branch: branch,
+            risk: risk,
+            modifiedFileCount: modifiedFileCount,
+            addedFileCount: addedFileCount,
+            deletedFileCount: deletedFileCount,
+            untrackedFileCount: untrackedFileCount,
+            scanError: status == .error
+        )
+    }
+
+    private static func previewBasenames(from preview: [String]) -> [String] {
+        var seen = Set<String>()
+        var basenames: [String] = []
+
+        for path in preview {
+            let basename = (path as NSString).lastPathComponent
+            guard !basename.isEmpty else { continue }
+            if seen.insert(basename).inserted {
+                basenames.append(basename)
+            }
+            if basenames.count == 3 {
+                break
+            }
+        }
+
+        return basenames
+    }
+}
+
+enum ActivityTimelineBuilder {
+    static func build(from repositories: [RepositorySnapshot],
+                      lastScanAt: Date?) -> ActivityTimelineFeed {
+        let items = repositories
+            .map(ActivityTimelineItem.init(from:))
+            .sorted(by: sort(_:_:))
+
+        return ActivityTimelineFeed(
+            state: classify(repositories: repositories, lastScanAt: lastScanAt),
+            items: items
+        )
+    }
+
+    static func build(from snapshot: AppGroupData, lastScanAt: Date? = nil) -> ActivityTimelineFeed {
+        let fallbackLastScanAt = lastScanAt ?? DateFormatting.date(from: snapshot.writtenAt ?? snapshot.generatedAt)
+        return build(from: snapshot.repositories, lastScanAt: fallbackLastScanAt)
+    }
+
+    private static func classify(repositories: [RepositorySnapshot],
+                                 lastScanAt: Date?) -> ActivityTimelineState {
+        guard !repositories.isEmpty else {
+            return lastScanAt == nil ? .neverScanned : .noRepositories
+        }
+
+        let hasChanged = repositories.contains { $0.status == .changed }
+        let hasError = repositories.contains { $0.status == .error }
+
+        if !hasChanged && !hasError {
+            return .allClean
+        }
+
+        return .active
+    }
+
+    private static func sort(_ lhs: ActivityTimelineItem,
+                             _ rhs: ActivityTimelineItem) -> Bool {
+        let lhsPriority = statusPriority(lhs.status)
+        let rhsPriority = statusPriority(rhs.status)
+        if lhsPriority != rhsPriority {
+            return lhsPriority < rhsPriority
+        }
+
+        if let lhsDate = lhs.activityDate, let rhsDate = rhs.activityDate, lhsDate != rhsDate {
+            return lhsDate > rhsDate
+        }
+
+        if lhs.activityDate != nil {
+            return true
+        }
+
+        if rhs.activityDate != nil {
+            return false
+        }
+
+        if lhs.changedFileCount != rhs.changedFileCount {
+            return lhs.changedFileCount > rhs.changedFileCount
+        }
+
+        if lhs.risk != rhs.risk {
+            return lhs.risk > rhs.risk
+        }
+
+        return lhs.repoName.localizedStandardCompare(rhs.repoName) == .orderedAscending
+    }
+
+    private static func statusPriority(_ status: RepositoryStatus) -> Int {
+        switch status {
+        case .changed:
+            return 0
+        case .clean:
+            return 1
+        case .error:
+            return 2
+        }
+    }
 }
 
 // MARK: - Scan summary
@@ -175,9 +350,21 @@ struct DiagnosticEvent: Identifiable, Equatable {
 }
 
 struct DiagnosticsSnapshot {
+    var appBundleIdentifier: String = Bundle.main.bundleIdentifier ?? "unknown"
+    var widgetBundleIdentifier: String = "local.devpulse.app.widget"
+    var appGroupIdentifier: String = "group.local.devpulse"
+    var appGroupContainerPath: String?
+    var snapshotFilePath: String?
     var appGroupAvailable: Bool = false
+    var snapshotExists: Bool = false
+    var snapshotReadable: Bool = false
+    var snapshotWritable: Bool = false
+    var snapshotDecodable: Bool = false
     var lastScanAt: Date?
+    var lastGeneratedAt: String?
+    var lastWrittenAt: String?
     var lastSharedWriteAt: Date?
+    var lastReloadRequestedAt: Date?
     var sharedDataReadAt: Date?
     var widgetSnapshotReadAt: Date?
     var sharedDataReadError: String?
@@ -205,9 +392,11 @@ struct DiagnosticsSnapshot {
 enum AppGroupStoreError: LocalizedError, Equatable {
     case appGroupUnavailable
     case snapshotMissing
+    case schemaVersionMismatch(expected: Int, actual: Int)
     case readFailed(String)
     case decodeFailed(String)
     case writeFailed(String)
+    case verificationFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -215,12 +404,16 @@ enum AppGroupStoreError: LocalizedError, Equatable {
             return "App Group container is unavailable."
         case .snapshotMissing:
             return "Shared snapshot file is missing."
+        case .schemaVersionMismatch(let expected, let actual):
+            return "Shared snapshot schema mismatch. Expected v\(expected), found v\(actual)."
         case .readFailed(let reason):
             return "Failed to read shared snapshot: \(reason)"
         case .decodeFailed(let reason):
             return "Failed to decode shared snapshot: \(reason)"
         case .writeFailed(let reason):
             return "Failed to write shared snapshot: \(reason)"
+        case .verificationFailed(let reason):
+            return "Shared snapshot verification failed: \(reason)"
         }
     }
 }

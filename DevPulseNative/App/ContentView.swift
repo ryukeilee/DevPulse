@@ -34,78 +34,42 @@ struct StatusTab: View {
     @EnvironmentObject var scheduler: ScanScheduler
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScanStatusView()
-            Divider()
-            if !scheduler.warnings.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(scheduler.warnings, id: \.self) { warning in
-                        HStack(spacing: 6) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundColor(.yellow)
-                                .font(.caption)
-                            Text(warning)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                ScanStatusView()
+
+                if !scheduler.warnings.isEmpty {
+                    warningsPanel
                 }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 8)
-                .background(Color.yellow.opacity(0.08))
-                Divider()
+
+                ActivityTimelineView(
+                    feed: ActivityTimelineBuilder.build(
+                        from: scheduler.lastResult.repositories,
+                        lastScanAt: scheduler.lastScanAt
+                    ),
+                    onRescan: { scheduler.rescan() }
+                )
             }
-            Spacer()
-            VStack(spacing: 12) {
-                Image(systemName: iconName)
-                    .font(.system(size: 40))
-                    .foregroundColor(iconColor)
-                Text(statusMessage)
-                    .font(.body)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 40)
-            }
-            Spacer()
+            .padding(20)
         }
     }
 
-    private var iconName: String {
-        if !scheduler.gitAvailable { return "wrench.and.screwdriver" }
-        if !scheduler.appGroupAvailable { return "xmark.shield" }
-        let repos = scheduler.lastResult.repositories
-        if repos.isEmpty { return "magnifyingglass" }
-        let changed = scheduler.lastResult.scanSummary.changedRepositories
-        if changed > 0 { return "doc.badge.ellipsis" }
-        return "checkmark.circle"
-    }
-
-    private var iconColor: Color {
-        if !scheduler.gitAvailable || !scheduler.appGroupAvailable { return .red }
-        let repos = scheduler.lastResult.repositories
-        if repos.isEmpty { return .secondary }
-        let changed = scheduler.lastResult.scanSummary.changedRepositories
-        if changed > 0 { return .orange }
-        return .green
-    }
-
-    private var statusMessage: String {
-        if !scheduler.gitAvailable {
-            return "Git not found.\nInstall Xcode Command Line Tools or Git to continue."
-        }
-        if !scheduler.appGroupAvailable {
-            return "App Group not available.\nCheck entitlements and provisioning profile."
-        }
-        let repos = scheduler.lastResult.repositories
-        if repos.isEmpty {
-            if scheduler.lastScanAt != nil {
-                return "No repositories found in configured scan roots.\nAdjust scan locations in Settings."
+    private var warningsPanel: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(scheduler.warnings, id: \.self) { warning in
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.yellow)
+                        .font(.caption)
+                    Text(warning)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
-            return "Ready to scan.\nPress Rescan Now to discover repositories."
         }
-        let summary = scheduler.lastResult.scanSummary
-        return "\(summary.totalRepositories) repositories · "
-            + "\(summary.changedRepositories) changed · "
-            + "\(summary.totalChangedFiles) files"
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(Color.yellow.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }

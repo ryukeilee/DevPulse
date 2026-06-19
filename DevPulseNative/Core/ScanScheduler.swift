@@ -76,9 +76,9 @@ final class ScanScheduler: ObservableObject {
     init() {
         loadConfig()
         loadScanDirectories()
+        syncStoreInspection()
         appGroupAvailable = AppGroupStore.isAvailable
         gitAvailable = ProcessRunner.isGitAvailable()
-        diagnostics.appGroupAvailable = appGroupAvailable
         restorePersistedSnapshot()
         updatePowerState()
         startPowerMonitoring()
@@ -95,6 +95,7 @@ final class ScanScheduler: ObservableObject {
         diagnostics.sharedDataWriteError = nil
         diagnostics.sharedDataReadError = nil
         diagnostics.widgetSnapshotReadError = nil
+        diagnostics.snapshotDecodable = false
         let currentConfig = config
         let currentScanRoots = scanRoots()
         recordEvent(.scanStarted, "Scan started")
@@ -261,17 +262,21 @@ final class ScanScheduler: ObservableObject {
     // MARK: - Shared snapshot sync
 
     private func restorePersistedSnapshot() {
+        syncStoreInspection()
         switch AppGroupStore.read() {
         case .success(let snapshot):
             let pinned = applyPins(snapshot)
             lastResult = pinned
             diagnostics.sharedDataSnapshot = snapshot
             diagnostics.widgetSnapshot = snapshot
+            diagnostics.snapshotDecodable = true
             let now = Date()
             diagnostics.sharedDataReadAt = now
             diagnostics.widgetSnapshotReadAt = now
             diagnostics.sharedDataReadError = nil
             diagnostics.widgetSnapshotReadError = nil
+            diagnostics.lastGeneratedAt = snapshot.generatedAt
+            diagnostics.lastWrittenAt = snapshot.writtenAt
             if let writtenAt = snapshot.writtenAt.flatMap(DateFormatting.date(from:)) {
                 diagnostics.lastSharedWriteAt = writtenAt
             }
@@ -282,6 +287,7 @@ final class ScanScheduler: ObservableObject {
             warnings = []
             validateConsistency(expected: pinned, shared: snapshot, reason: "startup")
         case .failure(let error):
+            diagnostics.snapshotDecodable = false
             diagnostics.sharedDataReadError = error.localizedDescription
             diagnostics.widgetSnapshotReadError = error.localizedDescription
             diagnostics.validationIssues = [error.localizedDescription]
@@ -292,49 +298,64 @@ final class ScanScheduler: ObservableObject {
     private func syncSharedSnapshot(from snapshot: AppGroupData, reason: String) {
         let writtenAt = DateFormatting.nowISO()
         let snapshotToWrite = snapshot.withWrittenAt(writtenAt)
+        var verifiedSnapshot: AppGroupData?
 
         switch AppGroupStore.write(snapshotToWrite) {
-        case .success:
+        case .success(let readBack):
             let now = Date()
+            syncStoreInspection()
             appGroupAvailable = AppGroupStore.isAvailable
-            diagnostics.appGroupAvailable = appGroupAvailable
             diagnostics.lastSharedWriteAt = now
+            diagnostics.lastGeneratedAt = readBack.generatedAt
+            diagnostics.lastWrittenAt = readBack.writtenAt
             diagnostics.sharedDataWriteError = nil
+            diagnostics.snapshotDecodable = true
+            verifiedSnapshot = readBack
             recordEvent(
                 .sharedDataWritten,
                 "Shared snapshot written (\(snapshotToWrite.repositories.count) repos, \(reason))"
             )
         case .failure(let error):
+            syncStoreInspection()
             diagnostics.sharedDataWriteError = error.localizedDescription
+            diagnostics.snapshotDecodable = false
             diagnostics.validationIssues = [error.localizedDescription]
             recordEvent(.sharedDataWriteFailed, "Shared snapshot write failed: \(error.localizedDescription)")
             return
         }
 
-        switch AppGroupStore.read() {
-        case .success(let readBack):
-            let now = Date()
-            diagnostics.sharedDataReadAt = now
-            diagnostics.widgetSnapshotReadAt = now
-            diagnostics.sharedDataSnapshot = readBack
-            diagnostics.widgetSnapshot = readBack
-            diagnostics.sharedDataReadError = nil
-            diagnostics.widgetSnapshotReadError = nil
-            validateConsistency(expected: snapshotToWrite, shared: readBack, reason: reason)
-            lastResult = applyPins(readBack)
-        case .failure(let error):
-            diagnostics.sharedDataReadAt = Date()
-            diagnostics.widgetSnapshotReadAt = Date()
-            diagnostics.sharedDataReadError = error.localizedDescription
-            diagnostics.widgetSnapshotReadError = error.localizedDescription
-            diagnostics.sharedDataSnapshot = nil
-            diagnostics.widgetSnapshot = nil
-            diagnostics.validationIssues = [error.localizedDescription]
-            recordEvent(.sharedDataReadFailed, "Shared snapshot read failed after write: \(error.localizedDescription)")
+        guard let verifiedSnapshot else {
+            diagnostics.sharedDataWriteError = "Shared snapshot verification failed without a decoded payload."
+            diagnostics.validationIssues = [diagnostics.sharedDataWriteError ?? "Verification failed."]
+            recordEvent(.sharedDataWriteFailed, "Shared snapshot verification failed unexpectedly.")
+            return
         }
 
+        diagnostics.sharedDataReadAt = Date()
+        diagnostics.widgetSnapshotReadAt = Date()
+        diagnostics.sharedDataSnapshot = verifiedSnapshot
+        diagnostics.widgetSnapshot = verifiedSnapshot
+        diagnostics.sharedDataReadError = nil
+        diagnostics.widgetSnapshotReadError = nil
+        validateConsistency(expected: snapshotToWrite, shared: verifiedSnapshot, reason: reason)
+        lastResult = applyPins(verifiedSnapshot)
+        diagnostics.lastReloadRequestedAt = Date()
         recordEvent(.widgetReloadRequested, "Widget reload requested (\(reason))")
         AppGroupStore.reloadWidgets()
+    }
+
+    private func syncStoreInspection() {
+        let inspection = AppGroupStore.inspect()
+        appGroupAvailable = inspection.containerURL != nil
+        diagnostics.appBundleIdentifier = inspection.appBundleIdentifier
+        diagnostics.widgetBundleIdentifier = inspection.widgetBundleIdentifier
+        diagnostics.appGroupIdentifier = inspection.appGroupIdentifier
+        diagnostics.appGroupContainerPath = inspection.containerPath
+        diagnostics.snapshotFilePath = inspection.snapshotPath
+        diagnostics.appGroupAvailable = appGroupAvailable
+        diagnostics.snapshotExists = inspection.snapshotExists
+        diagnostics.snapshotReadable = inspection.snapshotReadable
+        diagnostics.snapshotWritable = inspection.snapshotWritable
     }
 
     private func validateConsistency(expected: AppGroupData, shared: AppGroupData?, reason: String) {

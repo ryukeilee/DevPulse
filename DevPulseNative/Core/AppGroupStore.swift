@@ -1,9 +1,24 @@
 import Foundation
 import WidgetKit
 
+struct AppGroupStoreInspection {
+    let appGroupIdentifier: String
+    let appBundleIdentifier: String
+    let widgetBundleIdentifier: String
+    let containerURL: URL?
+    let snapshotURL: URL?
+    let snapshotExists: Bool
+    let snapshotReadable: Bool
+    let snapshotWritable: Bool
+    let containerPath: String?
+    let snapshotPath: String?
+}
+
 enum AppGroupStore {
     /// The App Group identifier shared with the Widget Extension.
     static let appGroupIdentifier = "group.local.devpulse"
+    static let appBundleIdentifier = "local.devpulse.app"
+    static let widgetBundleIdentifier = "local.devpulse.app.widget"
 
     /// File name for the snapshot inside the group container.
     private static let snapshotFileName = "repositories.json"
@@ -22,6 +37,47 @@ enum AppGroupStore {
         containerURL?.appendingPathComponent(snapshotFileName)
     }
 
+    static var snapshotPath: String? {
+        snapshotURL?.path
+    }
+
+    static var containerPath: String? {
+        containerURL?.path
+    }
+
+    static var snapshotExists: Bool {
+        guard let path = snapshotPath else { return false }
+        return FileManager.default.fileExists(atPath: path)
+    }
+
+    static var snapshotReadable: Bool {
+        guard let path = snapshotPath else { return false }
+        return FileManager.default.isReadableFile(atPath: path)
+    }
+
+    static var snapshotWritable: Bool {
+        if let path = snapshotPath {
+            return FileManager.default.isWritableFile(atPath: path)
+        }
+        guard let containerPath else { return false }
+        return FileManager.default.isWritableFile(atPath: containerPath)
+    }
+
+    static func inspect() -> AppGroupStoreInspection {
+        AppGroupStoreInspection(
+            appGroupIdentifier: appGroupIdentifier,
+            appBundleIdentifier: appBundleIdentifier,
+            widgetBundleIdentifier: widgetBundleIdentifier,
+            containerURL: containerURL,
+            snapshotURL: snapshotURL,
+            snapshotExists: snapshotExists,
+            snapshotReadable: snapshotReadable,
+            snapshotWritable: snapshotWritable,
+            containerPath: containerPath,
+            snapshotPath: snapshotPath
+        )
+    }
+
     // MARK: - Read
 
     /// Read the current app group snapshot.
@@ -38,6 +94,12 @@ enum AppGroupStore {
             let data = try Data(contentsOf: url)
             do {
                 let decoded = try JSONDecoder().decode(AppGroupData.self, from: data)
+                guard decoded.schemaVersion == RepositorySnapshotSchema.version else {
+                    return .failure(.schemaVersionMismatch(
+                        expected: RepositorySnapshotSchema.version,
+                        actual: decoded.schemaVersion
+                    ))
+                }
                 return .success(decoded)
             } catch {
                 return .failure(.decodeFailed(error.localizedDescription))
@@ -49,8 +111,8 @@ enum AppGroupStore {
 
     // MARK: - Write
 
-    /// Write a snapshot to the app group container.
-    static func write(_ data: AppGroupData) -> Result<Void, AppGroupStoreError> {
+    /// Write a snapshot to the app group container and verify the round trip.
+    static func write(_ data: AppGroupData) -> Result<AppGroupData, AppGroupStoreError> {
         guard let url = snapshotURL else {
             return .failure(.appGroupUnavailable)
         }
@@ -61,11 +123,20 @@ enum AppGroupStore {
         do {
             let json = try encoder.encode(data)
             try json.write(to: url, options: .atomic)
-            print("[DevPulse] Wrote repositories.json (schema v\(data.schemaVersion), "
-                  + "\(data.repositories.count) repos)")
-            return .success(())
         } catch {
             return .failure(.writeFailed(error.localizedDescription))
+        }
+
+        switch read() {
+        case .success(let verified):
+            if verified == data {
+                print("[DevPulse] Wrote repositories.json (schema v\(data.schemaVersion), "
+                      + "\(data.repositories.count) repos)")
+                return .success(verified)
+            }
+            return .failure(.verificationFailed("Read-back snapshot does not match the written payload."))
+        case .failure(let error):
+            return .failure(.verificationFailed(error.localizedDescription))
         }
     }
 
