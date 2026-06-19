@@ -1,0 +1,119 @@
+# WidgetKit, Signing, and App Group Troubleshooting
+
+This guide covers the most common local-debug problems for the native macOS app and its WidgetKit extension.
+
+## What `scripts/verify-widgetkit.sh` checks
+
+Run this script from the repository root:
+
+```sh
+./scripts/verify-widgetkit.sh
+```
+
+It verifies the project wiring, not your Apple account state. The script checks that:
+
+- the Debug build succeeds
+- the widget bundle is produced
+- the widget is embedded inside the app bundle
+- the app and widget bundle identifiers match the project settings
+- the widget Info.plist uses `com.apple.widgetkit-extension`
+- the widget points back to the host app with `WKAppBundleIdentifier`
+- both targets use the same App Group: `group.local.devpulse`
+- the Xcode project embeds the widget target correctly
+
+## If the widget does not appear in Widget Gallery
+
+Check these items first:
+
+1. Open `DevPulseNative/DevPulseNative.xcodeproj` in Xcode.
+2. Select both `DevPulse` and `DevPulseWidgetExtension`.
+3. In Signing & Capabilities, make sure both targets use the same Team.
+4. Confirm both targets share the same App Group ID: `group.local.devpulse`.
+5. Confirm the widget extension Info.plist still has the WidgetKit extension point.
+6. Rebuild the app, then open `Edit Widgets...` and search for DevPulse again.
+
+If the gallery still shows an old or missing entry:
+
+- delete the previously installed app build
+- remove the existing widget from the desktop
+- clean the Xcode build folder
+- rebuild and try the gallery again
+- if needed, log out and back in, or restart the Mac to refresh WidgetKit caches
+
+## If App Group is unavailable
+
+The app and the widget must see the same App Group container.
+
+Common causes:
+
+- the app target and widget target are signed by different Teams
+- one target lost the App Group entitlement
+- the App Group ID changed in one place but not the other
+- the widget was built from stale derived data
+
+What to check:
+
+- `App/DevPulse.entitlements`
+- `Widget/DevPulseWidgetExtension.entitlements`
+- `DevPulseNative/project.yml`
+- the diagnostics panel in the app Settings tab
+
+If the app still reports App Group unavailable:
+
+1. Verify both entitlements contain `group.local.devpulse`.
+2. Reopen the Xcode project and reselect your Team for both targets.
+3. Clean build.
+4. Delete the old app copy and rebuild from scratch.
+
+## If the widget shows "snapshot missing" or "decode failed"
+
+This usually means the shared `repositories.json` file is missing, stale, or incompatible with the current schema.
+
+Useful checks:
+
+- open the app
+- click `Rescan Now`
+- open the Settings tab
+- inspect the Diagnostics section
+- confirm `Snapshot exists`, `Snapshot readable`, and `Snapshot decodable`
+
+If decoding fails:
+
+- the app and widget may be built from different code revisions
+- derived data may be stale
+- the shared snapshot may have been created before a schema change
+
+Recovery steps:
+
+1. Quit DevPulse.
+2. Delete the existing app build.
+3. Clean the Xcode build folder.
+4. Rebuild and run the app.
+5. Trigger `Rescan Now` so the app rewrites the shared snapshot.
+
+## About free Apple ID and ad-hoc signing
+
+This project is intended for local development.
+
+Free Apple ID and ad-hoc signing can work for local testing, but they may be fragile when the account state, entitlements, or derived data change. If the widget or App Group stops working after a signing change:
+
+- switch back to Automatic signing
+- select the same Team on both targets
+- clean build
+- reinstall the app
+
+## What the app diagnostics should look like
+
+In the Settings tab, the Diagnostics section should eventually show:
+
+- a valid App Bundle identifier
+- a valid Widget Bundle identifier
+- an App Group container path
+- a snapshot file path
+- `Snapshot exists: Yes`
+- `Snapshot readable: Yes`
+- `Snapshot writable: Yes`
+- `Snapshot decodable: Yes`
+- matching shared read/write/widget snapshot state
+
+If those fields disagree, the app, shared snapshot, and widget are not all looking at the same state yet.

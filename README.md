@@ -1,70 +1,228 @@
 # DevPulse
 
-DevPulse is a local-first macOS app and widget for seeing recent Git activity at a glance.
+DevPulse is a local-first macOS Git activity glance widget.
 
-This repository contains two implementations:
+It automatically scans Git repositories on your Mac, reads only local Git metadata, and gives you a quick view of recent activity, repository health, and commit readiness. The current main line is the native Swift app in `DevPulseNative/`.
 
-- `DevPulseNative/` for the Swift macOS app and Widget extension.
-- `src/` for the Electron/macOS widget app.
+A legacy Electron prototype still exists in `src/`, but it is not the current path for development or release.
 
-## What It Shows
+## Why DevPulse Exists
 
-DevPulse is designed for a quick desktop glance:
+Git status is useful, but it is not great for a fast desktop glance. DevPulse is meant to answer a small set of questions quickly:
 
-- which local repositories changed most recently
-- which files changed, shown by filename only
+- which local repositories changed recently
+- what files changed, shown by filename only
 - whether a repository is dirty
-- how long ago the last activity happened
+- how many files changed
+- whether the repo looks ready to commit
 
-DevPulse is not a todo app, task tracker, AI summarizer, or cloud dashboard.
+## Current State
 
-## Privacy
+DevPulse is currently a native macOS + WidgetKit MVP.
 
-DevPulse only reads local Git metadata.
+It includes:
+
+- a SwiftUI macOS app
+- a WidgetKit extension
+- local repository discovery
+- read-only Git metadata scanning
+- an App Group snapshot shared between the app and widget
+- WidgetKit diagnostics in the app
+- activity timeline views
+- rules-based commit readiness hints
+
+## What DevPulse Is Not
+
+DevPulse is not:
+
+- a Git GUI
+- a todo app
+- an AI commit generator
+- an automatic commit tool
+- a remote sync service
+- a cloud dashboard
+
+It does not create commits, push code, or write to Git history.
+
+## Privacy Boundary
+
+DevPulse is designed to stay local.
+
+It reads:
+
+- repository path
+- repository name
+- branch name
+- Git status
+- file basenames
+- change counts
+- recent scan time
+
+It does not read:
+
+- file contents
+- `.env` files
+- secrets or credentials
+- chat history
+- browser data
+- private keys
 
 It does not:
 
-- read file contents
-- read prompts or chat history
-- read `.env` files, credentials, browser data, cookies, or private keys
-- connect to AI, LLM, Notion, GitHub API, or other cloud services
+- call GitHub, Notion, AI, LLM, or cloud APIs
 - upload or sync data
+- run `git` write commands
+- generate commit messages
 
-Changed files are displayed as basenames, not full file contents.
+Changed files are shown as basenames only.
 
-## Native App
+## Install And Run
 
-The Swift app keeps its data local to the machine and shares snapshots with the widget through the App Group container.
+### Prerequisites
 
-Open `DevPulseNative/DevPulseNative.xcodeproj` in Xcode to work on the native app.
+- macOS 14 or later
+- Xcode 16 or later
+- a local Apple development Team selected in Xcode for both targets
 
-Useful native commands:
+### Open The Project
+
+Open the native project:
+
+```sh
+open DevPulseNative/DevPulseNative.xcodeproj
+```
+
+### Choose Signing Team
+
+In Xcode:
+
+1. Select the `DevPulse` target.
+2. Open `Signing & Capabilities`.
+3. Pick your own Team.
+4. Repeat the same step for `DevPulseWidgetExtension`.
+5. Keep both targets on the same Team.
+6. Make sure both targets keep the same App Group: `group.local.devpulse`.
+
+### Run A Debug Build
+
+Use Xcode's Run button, or run the Debug build from the command line:
 
 ```sh
 xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug -destination platform=macOS build
 ```
 
-## Electron App
+### Verify The Widget Wiring
 
-The Electron prototype remains in `src/`.
-
-Useful commands:
+Run the widget verification script from the repository root:
 
 ```sh
-npm install
-npm test
-npm start
-npm run build:app
+./scripts/verify-widgetkit.sh
 ```
 
-## Configuration
+This checks the project wiring, the widget extension point, the App Group entitlement, and the host/widget bundle relationship.
 
-The native app stores shared snapshot data in the App Group container and keeps scan configuration in shared defaults. Missing scan roots are treated as warnings, not fatal errors.
+## How To Use The Widget
 
-## Secret Safety
+1. Launch DevPulse and run a scan.
+2. Right-click the desktop and choose `Edit Widgets...`.
+3. Search for `DevPulse`.
+4. Add the widget in the size you want.
+5. Keep the app open when you want to rescan or inspect diagnostics.
 
-- Keep real credentials in local `.env` files only.
-- Commit `.env.example` with placeholder values when configuration needs to be documented.
-- Do not commit private keys, certificates, production dumps, or generated secrets.
-- Do not commit Xcode user state, derived data, or build outputs.
-- Run the repository secret scan before publishing a public release.
+Widget refresh cadence is managed by macOS. DevPulse can request updates after a scan, but it does not control the system refresh clock.
+
+## How To Rescan
+
+Use the `Rescan Now` button in the app's Overview or Settings tabs.
+
+The Settings tab also exposes `Refresh Data`, which is useful when you want to force a fresh snapshot after changing signing, App Group, or scan directories.
+
+## How To Check Diagnostics
+
+Open the app and go to `Settings`.
+
+The Diagnostics section shows:
+
+- App and widget bundle identifiers
+- App Group status
+- shared snapshot path
+- whether the shared snapshot exists
+- whether the shared snapshot is readable and writable
+- whether the snapshot decoded successfully
+- recent scan and validation state
+
+If the widget is not behaving correctly, this is the first place to look.
+
+## WidgetKit And Signing Troubleshooting
+
+For detailed troubleshooting, see [docs/widgetkit-troubleshooting.md](docs/widgetkit-troubleshooting.md).
+
+Common checks:
+
+- the app and widget use the same App Group ID
+- the widget Info.plist uses the WidgetKit extension point
+- the widget is embedded in the host app
+- the app and widget share the same Team
+- stale derived data is cleared after signing changes
+- old app installs are removed before retrying
+
+## Common Questions
+
+### Does DevPulse read file contents?
+
+No. It only reads local Git metadata and file basenames.
+
+### Does DevPulse connect to GitHub or the cloud?
+
+No. There is no GitHub API, Notion API, AI, LLM, or other cloud integration in the native app.
+
+### Does DevPulse auto-commit code?
+
+No. It never writes Git history or commits on your behalf.
+
+### Why does the widget refresh slowly?
+
+WidgetKit controls refresh cadence. DevPulse can request updates, but macOS decides when the widget actually redraws.
+
+### Why can commit readiness say "review" instead of "ready"?
+
+The readiness rule set is intentionally conservative. Large diffs, deleted files, untracked files, high-risk changes, or scan errors can push a repo into review.
+
+## Known Limitations
+
+- Best suited for the local developer who is running it on the same Mac
+- Free Apple ID and non-notarized local signing have practical limits
+- WidgetKit refresh cadence is system-managed
+- Only read-only Git metadata is supported
+- Very large or complex monorepos may need manual scan-root tuning
+- Remote repository state is not tracked
+- Commit message generation is not part of the product
+
+## Roadmap
+
+This roadmap stays intentionally narrow:
+
+- Improve WidgetKit reliability
+- Better repository discovery controls
+- More precise readiness rules
+- Lightweight release packaging
+- Optional signed release path
+
+## Contributing
+
+Contributions are welcome if they stay within the current scope.
+
+Please:
+
+- keep changes small and reviewable
+- avoid adding network, cloud, AI, or sync dependencies
+- avoid reading file contents
+- keep the docs accurate to the code
+- run the WidgetKit verification script before opening a PR
+
+## Repository Layout
+
+- `DevPulseNative/` - native Swift macOS app and WidgetKit extension
+- `src/` - legacy Electron prototype
+- `scripts/` - verification and maintenance scripts
+- `docs/` - troubleshooting and support docs
