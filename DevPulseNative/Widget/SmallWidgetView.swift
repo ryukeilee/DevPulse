@@ -36,7 +36,7 @@ struct SmallWidgetView: View {
 
             // Footer: last updated
             if let generatedAt = entry.generatedAt {
-                Text("Updated \(DateFormatting.relativeTime(from: generatedAt, relativeTo: entry.date))")
+                Text("更新于 \(DateFormatting.relativeTime(from: generatedAt, relativeTo: entry.date))")
                     .font(.system(size: 8))
                     .foregroundColor(.secondary)
             }
@@ -48,10 +48,10 @@ struct SmallWidgetView: View {
 
     private var placeholderContent: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("3 repos changed")
+            Text("3 个仓库有改动")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Text("12 files")
+            Text("12 处改动")
                 .font(.body)
                 .fontWeight(.bold)
                 .redacted(reason: .placeholder)
@@ -81,11 +81,11 @@ struct SmallWidgetView: View {
                     Text("\(summary.changedRepositories)")
                         .font(.title)
                         .fontWeight(.bold)
-                    Text("repos\nchanged")
+                    Text("仓库\n有改动")
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
                 }
-                Text("\(summary.totalChangedFiles) files")
+                Text("\(summary.totalChangedFiles) 处改动")
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else if summary.totalRepositories > 0 {
@@ -93,11 +93,11 @@ struct SmallWidgetView: View {
                     Text("\(summary.totalRepositories)")
                         .font(.title)
                         .fontWeight(.bold)
-                    Text("repos")
+                    Text("仓库")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
                 }
-                Text("All clean")
+                Text("全部干净")
                     .font(.caption)
                     .foregroundColor(.green)
             }

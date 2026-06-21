@@ -48,7 +48,7 @@ struct DevPulseWidgetEntry: TimelineEntry {
             repositories: [],
             generatedAt: nil,
             isPlaceholder: false,
-            errorMessage: "Open DevPulse to grant folder access"
+            errorMessage: "打开 DevPulse 以授予文件夹访问权限"
         )
     }
 
@@ -65,7 +65,7 @@ struct DevPulseWidgetEntry: TimelineEntry {
             repositories: [],
             generatedAt: nil,
             isPlaceholder: false,
-            errorMessage: "No Git repositories found"
+            errorMessage: "没有找到 Git 仓库"
         )
     }
 }

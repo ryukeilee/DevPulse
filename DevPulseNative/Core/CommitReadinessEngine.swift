@@ -2,36 +2,42 @@ import Foundation
 
 enum CommitReadinessLevel: String, Codable, CaseIterable {
     case clean
-    case ready
-    case review
-    case notReady
+    case inProgress
+    case commitReady
+    case needsReview
+    case pushSuggested
+    case attention
 
     var shortLabel: String {
         switch self {
         case .clean:
-            return "Clean"
-        case .ready:
-            return "Ready"
-        case .review:
-            return "Review"
-        case .notReady:
-            return "Not Ready"
+            return "干净"
+        case .inProgress:
+            return "开发中"
+        case .commitReady:
+            return "可提交"
+        case .needsReview:
+            return "待检查"
+        case .pushSuggested:
+            return "建议 Push"
+        case .attention:
+            return "需处理"
         }
     }
 }
 
 enum CommitReadinessReason: String, Codable, CaseIterable {
-    case lowRiskSmallChange
-    case mediumRisk
-    case highRisk
-    case manyChangedFiles
-    case deletedFiles
-    case manyDeletedFiles
-    case untrackedFiles
-    case manyUntrackedFiles
-    case scanError
     case cleanRepository
-    case unknown
+    case smallWorkingChange
+    case stagedChanges
+    case moderateChangeSet
+    case deletedFiles
+    case untrackedFiles
+    case highRiskChanges
+    case localAhead
+    case conflictedFiles
+    case scanError
+    case branchNeedsConfirmation
 }
 
 struct CommitReadinessAssessment: Equatable {
@@ -43,11 +49,8 @@ struct CommitReadinessAssessment: Equatable {
 
 enum CommitReadinessEngine {
     enum Thresholds {
-        static let smallChangedFiles = 5
-        static let manyChangedFiles = 20
-        static let manyUntrackedFiles = 5
-        static let manyDeletedFiles = 3
-        static let smallUntrackedFiles = 2
+        static let inProgressMaxChangedFiles = 3
+        static let commitReadyMinChangedFiles = 4
     }
 
     static func assess(snapshot: RepositorySnapshot) -> CommitReadinessAssessment {
@@ -59,6 +62,9 @@ enum CommitReadinessEngine {
             addedFileCount: snapshot.addedFileCount,
             deletedFileCount: snapshot.deletedFileCount,
             untrackedFileCount: snapshot.untrackedFileCount,
+            stagedFileCount: snapshot.stagedFileCount ?? 0,
+            conflictedFileCount: snapshot.conflictedFileCount ?? 0,
+            aheadCount: snapshot.aheadCount ?? 0,
             scanError: snapshot.errorMessage != nil
         )
     }
@@ -70,90 +76,98 @@ enum CommitReadinessEngine {
                        addedFileCount: Int,
                        deletedFileCount: Int,
                        untrackedFileCount: Int,
+                       stagedFileCount: Int,
+                       conflictedFileCount: Int,
+                       aheadCount: Int,
                        scanError: Bool) -> CommitReadinessAssessment {
         let changedFileCount = modifiedFileCount + addedFileCount + deletedFileCount + untrackedFileCount
         let branchNeedsConfirmation = branchNeedsConfirmation(branch)
 
         if scanError || status == .error {
             return assessment(
-                level: .notReady,
+                level: .attention,
                 reasons: [.scanError],
-                detail: "Scan error"
+                detail: "Git 状态读取失败"
+            )
+        }
+
+        if conflictedFileCount > 0 {
+            return assessment(
+                level: .attention,
+                reasons: [.conflictedFiles],
+                detail: "请先处理 Git 冲突"
+            )
+        }
+
+        if branchNeedsConfirmation {
+            return assessment(
+                level: .attention,
+                reasons: [.branchNeedsConfirmation],
+                detail: "请先确认当前分支状态"
             )
         }
 
         if status == .clean || changedFileCount == 0 {
+            if aheadCount > 0 {
+                return assessment(
+                    level: .pushSuggested,
+                    reasons: [.localAhead],
+                    detail: aheadCount == 1 ? "有 1 个本地提交可 Push" : "有 \(aheadCount) 个本地提交可 Push"
+                )
+            }
+
             return assessment(
                 level: .clean,
                 reasons: [.cleanRepository],
-                detail: "No local changes"
+                detail: "没有本地改动"
             )
         }
 
-        if risk == .high
-            || changedFileCount > Thresholds.manyChangedFiles
-            || deletedFileCount > Thresholds.manyDeletedFiles
-            || untrackedFileCount > Thresholds.manyUntrackedFiles {
-            var reasons: [CommitReadinessReason] = []
-            if risk == .high {
-                reasons.append(.highRisk)
-            }
-            if changedFileCount > Thresholds.manyChangedFiles {
-                reasons.append(.manyChangedFiles)
-            }
-            if deletedFileCount > Thresholds.manyDeletedFiles {
-                reasons.append(.manyDeletedFiles)
-            }
-            if untrackedFileCount > Thresholds.manyUntrackedFiles {
-                reasons.append(.manyUntrackedFiles)
-            }
-
+        if untrackedFileCount > 0 {
             return assessment(
-                level: .notReady,
-                reasons: reasons.isEmpty ? [.highRisk] : reasons,
-                detail: "High-risk or large change set"
+                level: .needsReview,
+                reasons: [.untrackedFiles],
+                detail: "请先确认新增文件"
             )
         }
 
-        var reviewReasons: [CommitReadinessReason] = []
-        if risk == .medium {
-            reviewReasons.append(.mediumRisk)
-        }
-        if changedFileCount > Thresholds.smallChangedFiles {
-            reviewReasons.append(.manyChangedFiles)
-        }
         if deletedFileCount > 0 {
-            reviewReasons.append(.deletedFiles)
-        }
-        if untrackedFileCount > Thresholds.smallUntrackedFiles {
-            reviewReasons.append(.untrackedFiles)
-        }
-        if branchNeedsConfirmation {
-            reviewReasons.append(.unknown)
-        }
-
-        let qualifiesAsReady = risk == .low
-            && changedFileCount <= Thresholds.smallChangedFiles
-            && deletedFileCount == 0
-            && untrackedFileCount <= Thresholds.smallUntrackedFiles
-            && !branchNeedsConfirmation
-
-        if qualifiesAsReady {
             return assessment(
-                level: .ready,
-                reasons: [.lowRiskSmallChange],
-                detail: "Low-risk small change"
+                level: .needsReview,
+                reasons: [.deletedFiles],
+                detail: "提交前请先检查删除项"
             )
         }
 
-        if reviewReasons.isEmpty {
-            reviewReasons = [.unknown]
+        if stagedFileCount > 0 {
+            return assessment(
+                level: .commitReady,
+                reasons: [.stagedChanges],
+                detail: stagedFileCount == 1 ? "有 1 个已暂存改动可提交" : "有 \(stagedFileCount) 个已暂存改动可提交"
+            )
+        }
+
+        if changedFileCount >= Thresholds.commitReadyMinChangedFiles || risk != .low {
+            let reasons: [CommitReadinessReason] = risk == .high ? [.highRiskChanges, .moderateChangeSet] : [.moderateChangeSet]
+            return assessment(
+                level: .commitReady,
+                reasons: reasons,
+                detail: "这组改动已经适合提交"
+            )
+        }
+
+        if changedFileCount <= Thresholds.inProgressMaxChangedFiles {
+            return assessment(
+                level: .inProgress,
+                reasons: [.smallWorkingChange],
+                detail: "少量本地改动，仍在开发中"
+            )
         }
 
         return assessment(
-            level: .review,
-            reasons: reviewReasons,
-            detail: reviewDetail(for: reviewReasons)
+            level: .needsReview,
+            reasons: [.highRiskChanges],
+            detail: "请先检查当前改动集合"
         )
     }
 
@@ -171,21 +185,5 @@ enum CommitReadinessEngine {
     private static func branchNeedsConfirmation(_ branch: String) -> Bool {
         let normalized = branch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return normalized.isEmpty || normalized == "detached" || normalized == "unknown"
-    }
-
-    private static func reviewDetail(for reasons: [CommitReadinessReason]) -> String {
-        if reasons.contains(.manyChangedFiles) {
-            return "Review larger change set"
-        }
-        if reasons.contains(.deletedFiles) || reasons.contains(.untrackedFiles) {
-            return "Review deleted or untracked files"
-        }
-        if reasons.contains(.mediumRisk) {
-            return "Medium-risk changes need review"
-        }
-        if reasons.contains(.unknown) {
-            return "Review branch or status"
-        }
-        return "Review before committing"
     }
 }

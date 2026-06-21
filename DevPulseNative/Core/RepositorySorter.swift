@@ -17,11 +17,10 @@ enum RepositorySorter {
                 return a.isPinned
             }
 
-            // Non-error before error
-            let aError = a.status == .error
-            let bError = b.status == .error
-            if aError != bError {
-                return !aError
+            let aReadinessPriority = readinessPriority(a.commitReadiness.level)
+            let bReadinessPriority = readinessPriority(b.commitReadiness.level)
+            if aReadinessPriority != bReadinessPriority {
+                return aReadinessPriority < bReadinessPriority
             }
 
             // Changed before clean
@@ -57,5 +56,22 @@ enum RepositorySorter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter.date(from: string) ?? ISO8601DateFormatter().date(from: string)
+    }
+
+    private static func readinessPriority(_ level: CommitReadinessLevel) -> Int {
+        switch level {
+        case .attention:
+            return 0
+        case .needsReview:
+            return 1
+        case .commitReady:
+            return 2
+        case .inProgress:
+            return 3
+        case .pushSuggested:
+            return 4
+        case .clean:
+            return 5
+        }
     }
 }

@@ -1,6 +1,43 @@
 import Foundation
 
 enum GitStatusParser {
+    struct BranchMetadata: Equatable {
+        let branch: String
+        let aheadCount: Int
+        let behindCount: Int
+        let isDetached: Bool
+    }
+
+    /// Parse `git status --short --branch` output into branch metadata.
+    static func parseBranchMetadata(_ output: String) -> BranchMetadata {
+        guard let firstLine = output.split(separator: "\n", omittingEmptySubsequences: false).first else {
+            return BranchMetadata(branch: "unknown", aheadCount: 0, behindCount: 0, isDetached: false)
+        }
+
+        let line = String(firstLine)
+        guard line.hasPrefix("## ") else {
+            return BranchMetadata(branch: "unknown", aheadCount: 0, behindCount: 0, isDetached: false)
+        }
+
+        let descriptor = String(line.dropFirst(3))
+        let branchSegment = descriptor
+            .components(separatedBy: "...")
+            .first?
+            .components(separatedBy: " [")
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
+
+        let isDetached = branchSegment.hasPrefix("HEAD (") || branchSegment == "HEAD"
+        let branch = isDetached ? "detached" : (branchSegment.isEmpty ? "unknown" : branchSegment)
+
+        return BranchMetadata(
+            branch: branch,
+            aheadCount: extractCount(label: "ahead", from: descriptor),
+            behindCount: extractCount(label: "behind", from: descriptor),
+            isDetached: isDetached
+        )
+    }
+
     /// Parse `git status --short` output into an array of file paths.
     static func parseStatusShort(_ output: String) -> [String] {
         parseStatusEntries(output).map(\.path)
@@ -12,6 +49,7 @@ enum GitStatusParser {
             .split(separator: "\n", omittingEmptySubsequences: true)
             .map { String($0) }
             .compactMap { line -> StatusEntry? in
+                guard !line.hasPrefix("## ") else { return nil }
                 guard line.count >= 3 else { return nil }
                 let status = String(line.prefix(2))
                 let rawPath = String(line.dropFirst(3))
@@ -39,8 +77,17 @@ enum GitStatusParser {
         var added = 0
         var deleted = 0
         var untracked = 0
+        var staged = 0
+        var conflicted = 0
 
         for entry in entries {
+            if entry.isStaged {
+                staged += 1
+            }
+            if entry.isConflicted {
+                conflicted += 1
+            }
+
             switch entry.category {
             case .untracked:
                 untracked += 1
@@ -59,7 +106,9 @@ enum GitStatusParser {
             modified: modified,
             added: added,
             deleted: deleted,
-            untracked: untracked
+            untracked: untracked,
+            staged: staged,
+            conflicted: conflicted
         )
     }
 
@@ -67,6 +116,17 @@ enum GitStatusParser {
     struct StatusEntry {
         let statusCode: String
         let path: String
+
+        var isStaged: Bool {
+            let characters = Array(statusCode)
+            guard characters.indices.contains(0) else { return false }
+            let indexStatus = characters[0]
+            return indexStatus != " " && indexStatus != "?"
+        }
+
+        var isConflicted: Bool {
+            statusCode.contains("U") || statusCode == "AA" || statusCode == "DD"
+        }
 
         var category: StatusCategory {
             if statusCode == "??" {
@@ -95,6 +155,8 @@ enum GitStatusParser {
         let added: Int
         let deleted: Int
         let untracked: Int
+        let staged: Int
+        let conflicted: Int
 
         var total: Int {
             modified + added + deleted + untracked
@@ -107,5 +169,15 @@ enum GitStatusParser {
         case deleted
         case untracked
         case other
+    }
+
+    private static func extractCount(label: String, from descriptor: String) -> Int {
+        guard let range = descriptor.range(of: "\(label) ") else {
+            return 0
+        }
+
+        let suffix = descriptor[range.upperBound...]
+        let digits = suffix.prefix { $0.isNumber }
+        return Int(digits) ?? 0
     }
 }

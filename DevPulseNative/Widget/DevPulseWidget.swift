@@ -9,7 +9,6 @@ private enum WidgetSnapshotSchema {
 private enum WidgetSnapshotStore {
     static let appGroupIdentifier = "group.local.devpulse"
     private static let snapshotFileName = "repositories.json"
-    static let staleThreshold: TimeInterval = 24 * 60 * 60
 
     static func load() -> Result<AppGroupData, WidgetSnapshotLoadError> {
         guard let containerURL = FileManager.default.containerURL(
@@ -66,6 +65,13 @@ private enum WidgetSnapshotLoadError: LocalizedError {
     }
 }
 
+enum WidgetLoadState: Equatable {
+    case placeholder
+    case noSnapshot
+    case unavailable
+    case ready
+}
+
 struct Provider: TimelineProvider {
     func placeholder(in context: Context) -> WidgetEntry {
         .placeholder
@@ -83,68 +89,25 @@ struct Provider: TimelineProvider {
     func getTimeline(in context: Context,
                      completion: @escaping (Timeline<WidgetEntry>) -> Void) {
         let entry = loadEntry()
-
-        let nextRefresh = Date().addingTimeInterval(entry.isError ? 300 : 900)
-        let timeline = Timeline(entries: [entry], policy: .after(nextRefresh))
-        completion(timeline)
+        let nextRefresh = Date().addingTimeInterval(entry.loadState == .unavailable ? 300 : 900)
+        completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
     }
 
     private func loadEntry() -> WidgetEntry {
         switch WidgetSnapshotStore.load() {
         case .success(let snapshot):
-            let feed = ActivityTimelineBuilder.build(from: snapshot)
-            if let staleDetail = staleDetail(for: snapshot) {
-                return .errorState(
-                    title: "Snapshot stale",
-                    subtitle: "Open DevPulse and run a fresh scan.",
-                    detail: staleDetail
-                )
-            }
-            return .content(snapshot: snapshot, feed: feed)
+            return .content(
+                snapshot: snapshot,
+                feed: ActivityTimelineBuilder.build(from: snapshot)
+            )
         case .failure(let error):
             switch error {
-            case .appGroupUnavailable:
-                return .errorState(
-                    title: "App Group unavailable",
-                    subtitle: "Open DevPulse and verify entitlements.",
-                    detail: error.localizedDescription
-                )
             case .snapshotMissing:
-                return .errorState(
-                    title: "Snapshot missing",
-                    subtitle: "Open DevPulse and run a scan to create repositories.json.",
-                    detail: error.localizedDescription
-                )
-            case .readFailed, .decodeFailed, .schemaMismatch:
-                return .errorState(
-                    title: "Shared data invalid",
-                    subtitle: "Open DevPulse and rescan to refresh the widget snapshot.",
-                    detail: error.localizedDescription
-                )
+                return .noSnapshot()
+            case .appGroupUnavailable, .readFailed, .decodeFailed, .schemaMismatch:
+                return .unavailable()
             }
         }
-    }
-
-    private func staleDetail(for snapshot: AppGroupData) -> String? {
-        let latestTimestamp = [snapshot.writtenAt, snapshot.generatedAt]
-            .compactMap { $0 }
-            .compactMap { DateFormatting.date(from: $0) }
-            .max()
-
-        guard let latestTimestamp else { return nil }
-
-        let age = Date().timeIntervalSince(latestTimestamp)
-        guard age >= WidgetSnapshotStore.staleThreshold else { return nil }
-
-        return "Latest shared snapshot is \(conciseTimeLabel(from: latestTimestamp)) old."
-    }
-
-    private func conciseTimeLabel(from date: Date) -> String {
-        let interval = Date().timeIntervalSince(date)
-        if interval < 60 { return "<1m ago" }
-        if interval < 3600 { return "\(Int(interval / 60))m ago" }
-        if interval < 86400 { return "\(Int(interval / 3600))h ago" }
-        return "\(Int(interval / 86400))d ago"
     }
 }
 
@@ -152,69 +115,67 @@ struct WidgetEntry: TimelineEntry {
     let date: Date
     let snapshot: AppGroupData?
     let feed: ActivityTimelineFeed
-    let generatedAt: String?
-    let isPlaceholder: Bool
-    let isError: Bool
-    let errorMessage: String?
+    let loadState: WidgetLoadState
 
     static var placeholder: WidgetEntry {
         WidgetEntry(
             date: Date(),
             snapshot: nil,
-            feed: ActivityTimelineFeed(state: .active, items: []),
-            generatedAt: nil,
-            isPlaceholder: true,
-            isError: false,
-            errorMessage: nil
+            feed: ActivityTimelineFeed(state: .neverScanned, items: []),
+            loadState: .placeholder
         )
     }
 
-    static func content(snapshot: AppGroupData, feed: ActivityTimelineFeed) -> WidgetEntry {
+    static func content(snapshot: AppGroupData,
+                        feed: ActivityTimelineFeed) -> WidgetEntry {
         WidgetEntry(
             date: Date(),
             snapshot: snapshot,
             feed: feed,
-            generatedAt: snapshot.generatedAt,
-            isPlaceholder: false,
-            isError: false,
-            errorMessage: nil
+            loadState: .ready
         )
     }
 
-    static func errorState(title: String, subtitle: String, detail: String) -> WidgetEntry {
+    static func noSnapshot() -> WidgetEntry {
         WidgetEntry(
             date: Date(),
             snapshot: nil,
-            feed: ActivityTimelineFeed(state: .active, items: []),
-            generatedAt: nil,
-            isPlaceholder: false,
-            isError: true,
-            errorMessage: "\(title): \(subtitle) \(detail)"
+            feed: ActivityTimelineFeed(state: .neverScanned, items: []),
+            loadState: .noSnapshot
+        )
+    }
+
+    static func unavailable() -> WidgetEntry {
+        WidgetEntry(
+            date: Date(),
+            snapshot: nil,
+            feed: ActivityTimelineFeed(state: .neverScanned, items: []),
+            loadState: .unavailable
         )
     }
 }
 
 struct DevPulseWidgetEntryView: View {
     @Environment(\.widgetFamily) private var widgetFamily
-    var entry: WidgetEntry
+    let entry: WidgetEntry
 
     var body: some View {
         Group {
             switch widgetFamily {
             case .systemSmall:
-                SmallActivityWidgetView(entry: entry)
+                SmallGlanceWidgetView(entry: entry)
             case .systemMedium:
-                MediumActivityWidgetView(entry: entry)
+                MediumGlanceWidgetView(entry: entry)
             default:
-                SmallActivityWidgetView(entry: entry)
+                SmallGlanceWidgetView(entry: entry)
             }
         }
         .containerBackground(.fill.tertiary, for: .widget)
     }
 }
 
-private struct WidgetHeader: View {
-    let subtitle: String
+private struct WidgetChromeHeader: View {
+    let trailingText: String?
 
     var body: some View {
         HStack(spacing: 6) {
@@ -223,290 +184,240 @@ private struct WidgetHeader: View {
             Text("DevPulse")
                 .font(.caption.weight(.semibold))
             Spacer(minLength: 0)
-            Text(subtitle)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            if let trailingText {
+                Text(trailingText)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
         }
+        .foregroundStyle(.secondary)
     }
 }
 
-private struct SmallActivityWidgetView: View {
+private struct SmallGlanceWidgetView: View {
     let entry: WidgetEntry
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            WidgetHeader(subtitle: headerSubtitle)
+            WidgetChromeHeader(trailingText: nil)
 
-            if entry.isPlaceholder {
-                placeholderContent
-            } else if let error = entry.errorMessage {
-                errorContent(error)
-            } else {
-                smallContent
-            }
+            content
 
             Spacer(minLength: 0)
 
-            footerView
+            footer
         }
         .padding(10)
     }
 
-    private var headerSubtitle: String {
-        switch entry.feed.state {
-        case .neverScanned:
-            return "Waiting"
-        case .noRepositories:
-            return "No repos"
-        case .allClean:
-            return "All clean"
-        case .active:
-            return "Timeline"
-        }
-    }
-
     @ViewBuilder
-    private var smallContent: some View {
-        switch entry.feed.state {
-        case .neverScanned:
-            emptyState(
-                title: "No scan yet",
-                detail: "Open DevPulse and press Rescan Now."
+    private var content: some View {
+        switch entry.loadState {
+        case .placeholder:
+            placeholderContent
+        case .noSnapshot:
+            shortState(
+                title: "打开 DevPulse",
+                detail: nil,
+                icon: "arrow.triangle.2.circlepath"
             )
-        case .noRepositories:
-            emptyState(
-                title: "No repositories found",
-                detail: "Check scan roots in Settings."
+        case .unavailable:
+            shortState(
+                title: "数据不可用",
+                detail: "打开 DevPulse 以刷新",
+                icon: "exclamationmark.triangle.fill"
             )
-        case .allClean:
-            if let topItem = entry.feed.topItem {
-                topItemCard(item: topItem, emphasizeClean: true)
-                summaryLine
-            } else {
-                emptyState(title: "All clean", detail: "No repository activity right now.")
-            }
-        case .active:
-            if let topItem = entry.feed.topItem {
-                topItemCard(item: topItem, emphasizeClean: false)
-                summaryLine
-            } else {
-                emptyState(title: "Timeline unavailable", detail: "Open DevPulse to refresh the snapshot.")
-            }
-        }
-    }
-
-    private var summaryLine: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            if let summary = entry.snapshot?.scanSummary {
-                Text("\(summary.totalRepositories) repos · \(summary.changedRepositories) changed · \(summary.totalChangedFiles) files")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-
-            if let topItem = entry.feed.topItem {
-                Text(topItem.changedFilesPreview.prefix(3).joined(separator: " · "))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .truncationMode(.tail)
-            }
+        case .ready:
+            readyContent
         }
     }
 
     @ViewBuilder
-    private func topItemCard(item: ActivityTimelineItem, emphasizeClean: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(item.repoName)
-                    .font(.headline)
-                    .lineLimit(1)
+    private var readyContent: some View {
+        if entry.feed.state == .noRepositories {
+            shortState(
+                title: "没有仓库",
+                detail: nil,
+                icon: "tray"
+            )
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                if entry.feed.state == .allClean {
+                    Text("全部干净")
+                        .font(.system(size: 16, weight: .semibold))
+                        .lineLimit(1)
+                }
 
-                Spacer(minLength: 6)
+                if let item = entry.feed.topItem {
+                    HStack(alignment: .top, spacing: 8) {
+                        WidgetReadinessBadge(level: item.commitReadiness.level, size: .large)
 
-                Text(relativeTime(for: item))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text(item.repoName)
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .lineLimit(1)
+
+                                Spacer(minLength: 0)
+
+                                Text(item.fileCountLabel)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+
+                            HStack(alignment: .center, spacing: 6) {
+                                WidgetBranchPill(text: item.branch)
+                                Text(item.changeBreakdownLabel)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                            }
+                        }
+                    }
+                } else {
+                    shortState(
+                        title: "打开 DevPulse",
+                        detail: nil,
+                        icon: "arrow.triangle.2.circlepath"
+                    )
+                }
             }
-
-            HStack(spacing: 6) {
-                pill(text: item.branch, tint: .secondary)
-                statusPill(item.status, emphasizeClean: emphasizeClean)
-                RiskDot(level: item.risk)
-                CommitReadinessBadge(level: item.commitReadiness.level, compact: true)
-            }
-
-            Text(item.commitReadiness.detail)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-
-            Text(changeSummary(for: item))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-        }
-        .padding(.vertical, 4)
-    }
-
-    private func changeSummary(for item: ActivityTimelineItem) -> String {
-        "modified \(item.modifiedFileCount) · added \(item.addedFileCount) · deleted \(item.deletedFileCount) · untracked \(item.untrackedFileCount)"
-    }
-
-    private func relativeTime(for item: ActivityTimelineItem) -> String {
-        if let changedAt = item.lastChangedAt {
-            return DateFormatting.relativeTime(from: changedAt, relativeTo: entry.date)
-        }
-        return DateFormatting.relativeTime(from: item.lastScannedAt, relativeTo: entry.date)
-    }
-
-    @ViewBuilder
-    private func emptyState(title: String, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-            Text(detail)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(3)
         }
     }
 
     @ViewBuilder
     private var placeholderContent: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 7) {
             RoundedRectangle(cornerRadius: 6)
-                .fill(Color.secondary.opacity(0.2))
-                .frame(width: 90, height: 12)
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color.secondary.opacity(0.15))
-                .frame(width: 132, height: 16)
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color.secondary.opacity(0.15))
-                .frame(height: 10)
+                .fill(Color.secondary.opacity(0.18))
+                .frame(width: 84, height: 10)
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.secondary.opacity(0.14))
+                .frame(width: 104, height: 20)
             RoundedRectangle(cornerRadius: 6)
                 .fill(Color.secondary.opacity(0.12))
-                .frame(width: 110, height: 10)
+                .frame(width: 132, height: 14)
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.12))
+                .frame(height: 10)
         }
+        .redacted(reason: .placeholder)
     }
 
     @ViewBuilder
-    private func errorContent(_ message: String) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.caption2)
-                .foregroundStyle(.orange)
-            Text(message)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(4)
-        }
-    }
+    private func shortState(title: String, detail: String?, icon: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.caption.weight(.semibold))
+                Text(title)
+                    .font(.system(size: 16, weight: .semibold))
+                    .lineLimit(1)
+            }
 
-    private var footerView: some View {
-        HStack {
-            Spacer(minLength: 0)
-            if let generatedAt = entry.generatedAt {
-                Text("Updated \(DateFormatting.relativeTime(from: generatedAt, relativeTo: entry.date))")
-                    .font(.caption2)
+            if let detail {
+                Text(detail)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
         }
     }
 
-    private func pill(text: String, tint: Color) -> some View {
-        Text(text.isEmpty ? "detached" : text)
-            .font(.caption2)
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(
-                Capsule().fill(tint.opacity(0.12))
-            )
-            .foregroundStyle(tint)
-    }
-
-    private func statusPill(_ status: RepositoryStatus, emphasizeClean: Bool) -> some View {
-        let title: String
-        let tint: Color
-
-        switch status {
-        case .changed:
-            title = "dirty"
-            tint = .orange
-        case .clean:
-            title = emphasizeClean ? "all clean" : "clean"
-            tint = .green
-        case .error:
-            title = "error"
-            tint = .red
+    @ViewBuilder
+    private var footer: some View {
+        if let updatedText = entry.updatedText {
+            Text("更新于 \(updatedText)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
-
-        return pill(text: title, tint: tint)
     }
 }
 
-private struct MediumActivityWidgetView: View {
+private struct MediumGlanceWidgetView: View {
     let entry: WidgetEntry
 
     private let maxItems = 3
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            WidgetHeader(subtitle: headerSubtitle)
+            WidgetChromeHeader(trailingText: headerTrailingText)
 
-            if entry.isPlaceholder {
-                placeholderRows
-            } else if let error = entry.errorMessage {
-                errorContent(error)
-            } else {
-                mediumContent
-            }
+            content
 
             Spacer(minLength: 0)
 
-            footerView
+            footer
         }
         .padding(10)
     }
 
-    private var headerSubtitle: String {
-        switch entry.feed.state {
-        case .neverScanned:
-            return "Waiting"
-        case .noRepositories:
-            return "No repos"
-        case .allClean:
-            return "All clean"
-        case .active:
-            return "Timeline"
+    private var headerTrailingText: String? {
+        guard case .ready = entry.loadState, let summary = entry.snapshot?.scanSummary else {
+            return nil
+        }
+
+        if summary.totalRepositories == 0 {
+            return "没有仓库"
+        }
+
+        let activeRepos = summary.changedRepositories + summary.errorRepositories
+        if activeRepos == 0 {
+            return "全部干净"
+        }
+
+        if summary.totalChangedFiles > 0 {
+            return "\(activeRepos) 个活跃仓库 · \(summary.totalChangedFiles) 个文件"
+        }
+
+        return "\(activeRepos) 个活跃仓库"
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch entry.loadState {
+        case .placeholder:
+            placeholderRows
+        case .noSnapshot:
+            shortState(
+                title: "打开 DevPulse",
+                detail: nil,
+                icon: "arrow.triangle.2.circlepath"
+            )
+        case .unavailable:
+            shortState(
+                title: "数据不可用",
+                detail: "打开 DevPulse 以刷新",
+                icon: "exclamationmark.triangle.fill"
+            )
+        case .ready:
+            readyContent
         }
     }
 
     @ViewBuilder
-    private var mediumContent: some View {
-        switch entry.feed.state {
-        case .neverScanned:
-            emptyState(
-                title: "No scan yet",
-                detail: "Open DevPulse and press Rescan Now."
+    private var readyContent: some View {
+        if entry.feed.state == .noRepositories {
+            shortState(
+                title: "没有仓库",
+                detail: nil,
+                icon: "tray"
             )
-        case .noRepositories:
-            emptyState(
-                title: "No repositories found",
-                detail: "Check scan roots in Settings."
-            )
-        case .allClean, .active:
-            VStack(alignment: .leading, spacing: 6) {
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
                 if entry.feed.state == .allClean {
-                    Text("All clean")
-                        .font(.subheadline.weight(.semibold))
+                    Text("全部干净")
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.green)
                 }
 
                 ForEach(entry.feed.items.prefix(maxItems), id: \.id) { item in
-                    timelineRow(item)
+                    WidgetRepoRow(item: item)
 
                     if item.id != entry.feed.items.prefix(maxItems).last?.id {
                         Divider().opacity(0.25)
@@ -517,167 +428,242 @@ private struct MediumActivityWidgetView: View {
     }
 
     @ViewBuilder
-    private func timelineRow(_ item: ActivityTimelineItem) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(item.repoName)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-
-                Spacer(minLength: 6)
-
-                Text(relativeTime(for: item))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-
-            HStack(spacing: 6) {
-                pill(text: item.branch, tint: .secondary)
-                statusPill(item.status)
-                RiskDot(level: item.risk)
-                CommitReadinessBadge(level: item.commitReadiness.level, compact: true)
-                Text(changeSummary(for: item))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            if !item.changedFilesPreview.isEmpty {
-                Text(item.changedFilesPreview.prefix(3).joined(separator: " · "))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-        }
-    }
-
-    private func relativeTime(for item: ActivityTimelineItem) -> String {
-        if let changedAt = item.lastChangedAt {
-            return DateFormatting.relativeTime(from: changedAt, relativeTo: entry.date)
-        }
-        return DateFormatting.relativeTime(from: item.lastScannedAt, relativeTo: entry.date)
-    }
-
-    private func changeSummary(for item: ActivityTimelineItem) -> String {
-        "m \(item.modifiedFileCount) · a \(item.addedFileCount) · d \(item.deletedFileCount) · u \(item.untrackedFileCount)"
-    }
-
-    @ViewBuilder
-    private func emptyState(title: String, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-            Text(detail)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(3)
-        }
-    }
-
-    @ViewBuilder
     private var placeholderRows: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             ForEach(0..<3, id: \.self) { _ in
-                VStack(alignment: .leading, spacing: 4) {
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(Color.secondary.opacity(0.2))
-                        .frame(width: 92, height: 11)
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(Color.secondary.opacity(0.15))
-                        .frame(width: 148, height: 9)
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(Color.secondary.opacity(0.12))
-                        .frame(height: 9)
-                }
+                WidgetRepoRow(item: nil)
             }
         }
         .redacted(reason: .placeholder)
     }
 
     @ViewBuilder
-    private func errorContent(_ message: String) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.caption2)
-                .foregroundStyle(.orange)
-            Text(message)
+    private func shortState(title: String, detail: String?, icon: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.caption.weight(.semibold))
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .lineLimit(1)
+            }
+
+            if let detail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var footer: some View {
+        if let updatedText = entry.updatedText {
+            Text("更新于 \(updatedText)")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-                .lineLimit(4)
+                .lineLimit(1)
         }
     }
+}
 
-    private var footerView: some View {
-        HStack {
-            if let summary = entry.snapshot?.scanSummary {
-                Text("\(summary.totalRepositories) repos · \(summary.changedRepositories) changed · \(summary.totalChangedFiles) files")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
+private struct WidgetRepoRow: View {
+    let item: ActivityTimelineItem?
 
-            Spacer(minLength: 0)
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            if let item {
+                WidgetReadinessBadge(level: item.commitReadiness.level, size: .compact)
 
-            if let generatedAt = entry.generatedAt {
-                Text("Updated \(DateFormatting.relativeTime(from: generatedAt, relativeTo: entry.date))")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(item.repoName)
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .lineLimit(1)
+
+                        Spacer(minLength: 0)
+
+                        Text(item.fileCountLabel)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    HStack(spacing: 6) {
+                        WidgetBranchPill(text: item.branch)
+                        Text(item.changeBreakdownLabel)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+            } else {
+                WidgetReadinessBadge(level: .needsReview, size: .compact)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.secondary.opacity(0.18))
+                        .frame(width: 92, height: 10)
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.secondary.opacity(0.14))
+                        .frame(width: 128, height: 9)
+                }
             }
         }
     }
+}
 
-    private func pill(text: String, tint: Color) -> some View {
+private struct WidgetBranchPill: View {
+    let text: String
+
+    var body: some View {
         Text(text.isEmpty ? "detached" : text)
+            .textCase(nil)
             .font(.caption2)
             .lineLimit(1)
             .truncationMode(.tail)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(
-                Capsule().fill(tint.opacity(0.12))
+                Capsule().fill(Color.secondary.opacity(0.12))
             )
-            .foregroundStyle(tint)
-    }
-
-    private func statusPill(_ status: RepositoryStatus) -> some View {
-        let title: String
-        let tint: Color
-
-        switch status {
-        case .changed:
-            title = "dirty"
-            tint = .orange
-        case .clean:
-            title = "clean"
-            tint = .green
-        case .error:
-            title = "error"
-            tint = .red
-        }
-
-        return pill(text: title, tint: tint)
+            .foregroundStyle(.secondary)
     }
 }
 
-private struct RiskDot: View {
-    let level: RiskLevel
-
-    var body: some View {
-        Circle()
-            .fill(color)
-            .frame(width: 6, height: 6)
-            .help("Risk: \(level.rawValue)")
+private struct WidgetReadinessBadge: View {
+    enum Size {
+        case compact
+        case large
     }
 
-    private var color: Color {
+    let level: CommitReadinessLevel
+    var size: Size = .compact
+
+    var body: some View {
+        HStack(spacing: size == .large ? 5 : 4) {
+            Image(systemName: symbolName)
+                .font(size == .large ? .caption.weight(.semibold) : .caption2.weight(.semibold))
+            Text(level.shortLabel)
+                .font(badgeFont)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+        }
+        .padding(.horizontal, horizontalPadding)
+        .padding(.vertical, verticalPadding)
+        .background(
+            Capsule().fill(tint.opacity(0.14))
+        )
+        .foregroundStyle(tint)
+    }
+
+    private var badgeFont: Font {
+        switch size {
+        case .compact:
+            return .caption2.weight(.semibold)
+        case .large:
+            return .system(size: 13, weight: .semibold)
+        }
+    }
+
+    private var horizontalPadding: CGFloat {
+        switch size {
+        case .compact:
+            return 6
+        case .large:
+            return 8
+        }
+    }
+
+    private var verticalPadding: CGFloat {
+        switch size {
+        case .compact:
+            return 2
+        case .large:
+            return 4
+        }
+    }
+
+    private var tint: Color {
         switch level {
-        case .low:
-            return .green
-        case .medium:
+        case .clean:
+            return .secondary
+        case .inProgress:
             return .orange
-        case .high:
+        case .commitReady:
+            return .blue
+        case .needsReview:
+            return .orange
+        case .pushSuggested:
+            return .green
+        case .attention:
             return .red
         }
+    }
+
+    private var symbolName: String {
+        switch level {
+        case .clean:
+            return "checkmark.circle.fill"
+        case .inProgress:
+            return "pencil.circle.fill"
+        case .commitReady:
+            return "checkmark.seal.fill"
+        case .needsReview:
+            return "questionmark.circle.fill"
+        case .pushSuggested:
+            return "arrow.up.circle.fill"
+        case .attention:
+            return "exclamationmark.triangle.fill"
+        }
+    }
+}
+
+private extension WidgetEntry {
+    var updatedText: String? {
+        guard let snapshot else { return nil }
+
+        var timestamps: [(timestamp: String, date: Date)] = []
+        if let writtenAt = snapshot.writtenAt, let writtenDate = DateFormatting.date(from: writtenAt) {
+            timestamps.append((timestamp: writtenAt, date: writtenDate))
+        }
+
+        if let generatedDate = DateFormatting.date(from: snapshot.generatedAt) {
+            timestamps.append((timestamp: snapshot.generatedAt, date: generatedDate))
+        }
+
+        guard let latest = timestamps.max(by: { $0.date < $1.date }) else {
+            return nil
+        }
+
+        return DateFormatting.relativeTime(from: latest.timestamp, relativeTo: date)
+    }
+}
+
+private extension ActivityTimelineItem {
+    var fileCountLabel: String {
+        changedFileCount == 1 ? "1 处改动" : "\(changedFileCount) 处改动"
+    }
+
+    var changeBreakdownLabel: String {
+        let parts = [
+            modifiedFileCount > 0 ? "已修改 \(modifiedFileCount)" : nil,
+            addedFileCount > 0 ? "已新增 \(addedFileCount)" : nil,
+            deletedFileCount > 0 ? "已删除 \(deletedFileCount)" : nil,
+            untrackedFileCount > 0 ? "未跟踪 \(untrackedFileCount)" : nil
+        ].compactMap { $0 }
+
+        guard !parts.isEmpty else {
+            return "没有本地改动"
+        }
+
+        if parts.count <= 2 {
+            return parts.joined(separator: " · ")
+        }
+
+        return changedFileCount == 1 ? "1 处改动" : "\(changedFileCount) 处改动"
     }
 }
 
@@ -690,7 +676,7 @@ struct DevPulseWidget: Widget {
             DevPulseWidgetEntryView(entry: entry)
         }
         .configurationDisplayName("DevPulse")
-        .description("See your local Git repository status at a glance.")
+        .description("一眼查看本地 Git 仓库状态。")
         .supportedFamilies([.systemSmall, .systemMedium])
     }
 }

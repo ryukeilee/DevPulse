@@ -8,23 +8,23 @@ struct ScanStatusView: View {
             // Summary stats
             HStack(spacing: 24) {
                 StatBadge(
-                    label: "Repos",
+                    label: "仓库",
                     value: "\(scheduler.lastResult.scanSummary.totalRepositories)",
                     systemImage: "folder"
                 )
                 StatBadge(
-                    label: "Changed",
+                    label: "活跃",
                     value: "\(scheduler.lastResult.scanSummary.changedRepositories)",
                     systemImage: "doc.badge.ellipsis"
                 )
                 StatBadge(
-                    label: "Files",
+                    label: "改动",
                     value: "\(scheduler.lastResult.scanSummary.totalChangedFiles)",
                     systemImage: "text.document"
                 )
                 if scheduler.lastResult.scanSummary.errorRepositories > 0 {
                     StatBadge(
-                        label: "Errors",
+                        label: "异常",
                         value: "\(scheduler.lastResult.scanSummary.errorRepositories)",
                         systemImage: "exclamationmark.triangle"
                     )
@@ -34,40 +34,56 @@ struct ScanStatusView: View {
             Spacer()
 
             // Right side: last scan time + rescan button
-            HStack(spacing: 12) {
-                if let lastScan = scheduler.lastScanAt {
-                    Text("Updated \(relativeTime(from: lastScan))")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+            VStack(alignment: .trailing, spacing: 4) {
+                HStack(spacing: 12) {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(scheduler.refreshStatusText)
+                            .font(.caption)
+                            .foregroundColor(statusTint)
 
-                Button(action: { scheduler.rescan() }) {
-                    HStack(spacing: 4) {
-                        if scheduler.isScanning {
-                            ProgressView()
-                                .scaleEffect(0.7)
-                                .frame(width: 14, height: 14)
-                        } else {
-                            Image(systemName: "arrow.triangle.2.circlepath")
+                        if let detail = scheduler.refreshDetailText {
+                            Text(detail)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
                         }
-                        Text(scheduler.isScanning ? "Scanning..." : "Rescan Now")
                     }
+
+                    Button(action: { scheduler.rescan() }) {
+                        HStack(spacing: 4) {
+                            if scheduler.isScanning {
+                                ProgressView()
+                                    .scaleEffect(0.7)
+                                    .frame(width: 14, height: 14)
+                            } else {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                            }
+                            Text(scheduler.isScanning ? "刷新中…" : "立即刷新")
+                        }
+                    }
+                    .disabled(scheduler.isScanning)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
                 }
-                .disabled(scheduler.isScanning)
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
             }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
     }
 
-    private func relativeTime(from date: Date) -> String {
-        let interval = Date().timeIntervalSince(date)
-        if interval < 60 { return "<1m ago" }
-        if interval < 3600 { return "\(Int(interval / 60))m ago" }
-        if interval < 86400 { return "\(Int(interval / 3600))h ago" }
-        return "\(Int(interval / 86400))d ago"
+    private var statusTint: Color {
+        switch scheduler.refreshPhase {
+        case .failure:
+            return .orange
+        case .refreshing:
+            return .secondary
+        case .idle, .success:
+            switch scheduler.snapshotFreshness {
+            case .stale:
+                return .orange
+            case .aging, .fresh, .none:
+                return .secondary
+            }
+        }
     }
 }
 

@@ -44,7 +44,7 @@ struct MediumWidgetView: View {
                 .fontWeight(.semibold)
             Spacer()
             if let summary = entry.scanSummary, summary.changedRepositories > 0 {
-                Text("\(summary.changedRepositories) changed")
+                Text("\(summary.changedRepositories) 个有改动")
                     .font(.system(size: 8))
                     .foregroundColor(.orange)
             }
@@ -67,7 +67,7 @@ struct MediumWidgetView: View {
     }
 
     private var emptyContent: some View {
-        Text("No repositories found")
+        Text("没有仓库")
             .font(.caption)
             .foregroundColor(.secondary)
     }
@@ -97,7 +97,7 @@ struct MediumWidgetView: View {
         HStack {
             Spacer()
             if let generatedAt = entry.generatedAt {
-                Text("Updated \(DateFormatting.relativeTime(from: generatedAt, relativeTo: entry.date))")
+                Text("更新于 \(DateFormatting.relativeTime(from: generatedAt, relativeTo: entry.date))")
                     .font(.system(size: 8))
                     .foregroundColor(.secondary)
             }
@@ -124,11 +124,11 @@ struct MediumRepoRow: View {
                     .lineLimit(1)
 
                 if repo.changedFileCount > 0 {
-                    Text("\(repo.changedFileCount) files")
+                    Text("\(repo.changedFileCount) 处改动")
                         .font(.system(size: 9))
                         .foregroundColor(.secondary)
                 } else {
-                    Text("clean")
+                    Text("干净")
                         .font(.system(size: 9))
                         .foregroundColor(.green)
                 }
@@ -149,8 +149,8 @@ struct MediumRepoRow: View {
             } else {
                 // Placeholder skeleton
                 Circle().fill(.secondary).frame(width: 6, height: 6)
-                Text("Repo Name").font(.system(size: 11))
-                Text("4 files").font(.system(size: 9))
+                Text("项目名称").font(.system(size: 11))
+                Text("4 处改动").font(.system(size: 9))
                 Spacer()
                 Text("main").font(.system(size: 8))
             }

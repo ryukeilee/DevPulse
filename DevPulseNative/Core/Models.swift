@@ -34,6 +34,8 @@ struct RepositoryChangeCounts: Codable, Equatable {
     let added: Int
     let deleted: Int
     let untracked: Int
+    let staged: Int
+    let conflicted: Int
 
     var total: Int {
         modified + added + deleted + untracked
@@ -50,6 +52,9 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
     let addedFileCount: Int
     let deletedFileCount: Int
     let untrackedFileCount: Int
+    let stagedFileCount: Int?
+    let conflictedFileCount: Int?
+    let aheadCount: Int?
     let changedFileCount: Int
     let changedFilesPreview: [String]
     let risk: RiskLevel
@@ -68,6 +73,9 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
             && lhs.addedFileCount == rhs.addedFileCount
             && lhs.deletedFileCount == rhs.deletedFileCount
             && lhs.untrackedFileCount == rhs.untrackedFileCount
+            && lhs.stagedFileCount == rhs.stagedFileCount
+            && lhs.conflictedFileCount == rhs.conflictedFileCount
+            && lhs.aheadCount == rhs.aheadCount
             && lhs.changedFileCount == rhs.changedFileCount
             && lhs.changedFilesPreview == rhs.changedFilesPreview
             && lhs.risk == rhs.risk
@@ -82,7 +90,9 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
             modified: modifiedFileCount,
             added: addedFileCount,
             deleted: deletedFileCount,
-            untracked: untrackedFileCount
+            untracked: untrackedFileCount,
+            staged: stagedFileCount ?? 0,
+            conflicted: conflictedFileCount ?? 0
         )
     }
 
@@ -124,6 +134,9 @@ struct ActivityTimelineItem: Codable, Identifiable, Equatable {
     let addedFileCount: Int
     let deletedFileCount: Int
     let untrackedFileCount: Int
+    let stagedFileCount: Int
+    let conflictedFileCount: Int
+    let aheadCount: Int
     let changedFileCount: Int
     let changedFilesPreview: [String]
     let lastChangedAt: String?
@@ -140,6 +153,9 @@ struct ActivityTimelineItem: Codable, Identifiable, Equatable {
         addedFileCount = snapshot.addedFileCount
         deletedFileCount = snapshot.deletedFileCount
         untrackedFileCount = snapshot.untrackedFileCount
+        stagedFileCount = snapshot.stagedFileCount ?? 0
+        conflictedFileCount = snapshot.conflictedFileCount ?? 0
+        aheadCount = snapshot.aheadCount ?? 0
         changedFileCount = snapshot.changedFileCount
         changedFilesPreview = ActivityTimelineItem.previewBasenames(from: snapshot.changedFilesPreview)
         lastChangedAt = snapshot.lastChangedAt
@@ -162,6 +178,9 @@ struct ActivityTimelineItem: Codable, Identifiable, Equatable {
             addedFileCount: addedFileCount,
             deletedFileCount: deletedFileCount,
             untrackedFileCount: untrackedFileCount,
+            stagedFileCount: stagedFileCount,
+            conflictedFileCount: conflictedFileCount,
+            aheadCount: aheadCount,
             scanError: status == .error
         )
     }
@@ -303,6 +322,58 @@ struct AppGroupData: Codable, Equatable {
             scanSummary: scanSummary,
             repositories: repositories
         )
+    }
+}
+
+// MARK: - Refresh status
+
+enum RefreshPhase: Equatable {
+    case idle
+    case refreshing
+    case success
+    case failure
+}
+
+enum SnapshotFreshness: Equatable {
+    case fresh
+    case aging
+    case stale
+}
+
+enum RefreshStatusFormatter {
+    static let agingThreshold: TimeInterval = 5 * 60
+    static let staleThreshold: TimeInterval = 15 * 60
+
+    static func freshness(for lastUpdatedAt: Date, now: Date = Date()) -> SnapshotFreshness {
+        let age = max(0, now.timeIntervalSince(lastUpdatedAt))
+
+        if age > staleThreshold {
+            return .stale
+        }
+
+        if age >= agingThreshold {
+            return .aging
+        }
+
+        return .fresh
+    }
+
+    static func updateLabel(for lastUpdatedAt: Date, now: Date = Date()) -> String {
+        let age = max(0, now.timeIntervalSince(lastUpdatedAt))
+
+        if age < 60 {
+            return "刚刚更新"
+        }
+
+        if age < 3600 {
+            return "\(Int(age / 60)) 分钟前更新"
+        }
+
+        if age < 86400 {
+            return "\(Int(age / 3600)) 小时前更新"
+        }
+
+        return "\(Int(age / 86400)) 天前更新"
     }
 }
 

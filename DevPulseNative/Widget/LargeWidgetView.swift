@@ -45,14 +45,14 @@ struct LargeWidgetView: View {
 
             if let summary = entry.scanSummary {
                 HStack(spacing: 8) {
-                    Text("\(summary.totalRepositories) repos")
+                    Text("\(summary.totalRepositories) 个仓库")
                         .font(.system(size: 9))
                     if summary.changedRepositories > 0 {
-                        Text("\(summary.changedRepositories) changed")
+                        Text("\(summary.changedRepositories) 个有改动")
                             .font(.system(size: 9))
                             .foregroundColor(.orange)
                     }
-                    Text("\(summary.totalChangedFiles) files")
+                    Text("\(summary.totalChangedFiles) 处改动")
                         .font(.system(size: 9))
                 }
                 .foregroundColor(.secondary)
@@ -76,7 +76,7 @@ struct LargeWidgetView: View {
     }
 
     private var emptyContent: some View {
-        Text("No Git repositories found.\nOpen DevPulse to scan your development folders.")
+        Text("没有找到 Git 仓库。\n打开 DevPulse 后扫描你的开发目录。")
             .font(.caption)
             .foregroundColor(.secondary)
             .multilineTextAlignment(.center)
@@ -111,7 +111,7 @@ struct LargeWidgetView: View {
         HStack {
             Spacer()
             if let generatedAt = entry.generatedAt {
-                Text("Updated \(DateFormatting.relativeTime(from: generatedAt, relativeTo: entry.date))")
+                Text("更新于 \(DateFormatting.relativeTime(from: generatedAt, relativeTo: entry.date))")
                     .font(.system(size: 8))
                     .foregroundColor(.secondary)
             }
@@ -143,11 +143,11 @@ struct LargeRepoRow: View {
 
                 // Changed file count or status
                 if repo.changedFileCount > 0 {
-                    Text("\(repo.changedFileCount) files")
+                    Text("\(repo.changedFileCount) 处改动")
                         .font(.system(size: 9))
                         .foregroundColor(.secondary)
                 } else {
-                    Text("clean")
+                    Text("干净")
                         .font(.system(size: 9))
                         .foregroundColor(.green)
                 }
@@ -174,9 +174,9 @@ struct LargeRepoRow: View {
             } else {
                 // Placeholder skeleton
                 Circle().fill(.secondary).frame(width: 6, height: 6)
-                Text("Repository").font(.system(size: 11))
+                Text("项目").font(.system(size: 11))
                 Spacer()
-                Text("5 files").font(.system(size: 9))
+                Text("5 处改动").font(.system(size: 9))
                 Text("main").font(.system(size: 8))
             }
         }
@@ -192,7 +192,7 @@ struct RiskWidgetBadge: View {
         Circle()
             .fill(color)
             .frame(width: 6, height: 6)
-            .help("Risk: \(level.rawValue)")
+            .help("风险：\(level.rawValue)")
     }
 
     private var color: Color {

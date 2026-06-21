@@ -259,12 +259,15 @@ enum GitRepositoryScanner {
                 addedFileCount: 0,
                 deletedFileCount: 0,
                 untrackedFileCount: 0,
+                stagedFileCount: 0,
+                conflictedFileCount: 0,
+                aheadCount: 0,
                 changedFileCount: 0,
                 changedFilesPreview: [],
                 risk: .low,
                 lastScannedAt: DateFormatting.nowISO(),
                 lastChangedAt: nil,
-                errorMessage: "Skipped (previously slow)",
+                errorMessage: "扫描已跳过",
                 isPinned: false
             ))
         }
@@ -288,12 +291,15 @@ enum GitRepositoryScanner {
                         addedFileCount: 0,
                         deletedFileCount: 0,
                         untrackedFileCount: 0,
+                        stagedFileCount: 0,
+                        conflictedFileCount: 0,
+                        aheadCount: 0,
                         changedFileCount: 0,
                         changedFilesPreview: [],
                         risk: .low,
                         lastScannedAt: DateFormatting.nowISO(),
                         lastChangedAt: nil,
-                        errorMessage: "Scan timeout",
+                        errorMessage: "扫描超时",
                         isPinned: false
                     ))
                 }
@@ -341,14 +347,8 @@ enum GitRepositoryScanner {
         let name = (repoPath as NSString).lastPathComponent
         let id = stableHash(repoPath)
 
-        let branch = ProcessRunner.run(
-            arguments: ["branch", "--show-current"],
-            workingDirectory: repoPath,
-            timeout: config.gitCommandTimeout
-        ) ?? "unknown"
-
         guard let statusOutput = ProcessRunner.run(
-            arguments: ["status", "--short"],
+            arguments: ["status", "--short", "--branch"],
             workingDirectory: repoPath,
             timeout: config.gitCommandTimeout
         ) else {
@@ -356,22 +356,26 @@ enum GitRepositoryScanner {
                 id: id,
                 name: name,
                 path: repoPath,
-                branch: branch.isEmpty ? "detached" : branch,
+                branch: "unknown",
                 status: .error,
                 modifiedFileCount: 0,
                 addedFileCount: 0,
                 deletedFileCount: 0,
                 untrackedFileCount: 0,
+                stagedFileCount: 0,
+                conflictedFileCount: 0,
+                aheadCount: 0,
                 changedFileCount: 0,
                 changedFilesPreview: [],
                 risk: .low,
                 lastScannedAt: DateFormatting.nowISO(),
                 lastChangedAt: nil,
-                errorMessage: "Failed to run git status",
+                errorMessage: "读取失败",
                 isPinned: false
             )
         }
 
+        let branchMetadata = GitStatusParser.parseBranchMetadata(statusOutput)
         let entries = GitStatusParser.parseStatusEntries(statusOutput)
         let summary = GitStatusParser.summarize(entries)
         let changedFiles = entries.map(\.path)
@@ -393,12 +397,15 @@ enum GitRepositoryScanner {
             id: id,
             name: name,
             path: repoPath,
-            branch: branch.isEmpty ? "detached" : branch,
+            branch: branchMetadata.branch,
             status: status,
             modifiedFileCount: summary.modified,
             addedFileCount: summary.added,
             deletedFileCount: summary.deleted,
             untrackedFileCount: summary.untracked,
+            stagedFileCount: summary.staged,
+            conflictedFileCount: summary.conflicted,
+            aheadCount: branchMetadata.aheadCount,
             changedFileCount: changedCount,
             changedFilesPreview: preview,
             risk: risk.level,

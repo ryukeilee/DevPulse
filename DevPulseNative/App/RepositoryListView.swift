@@ -5,6 +5,8 @@ struct RepositoryListView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            refreshHint
+
             if scheduler.lastResult.repositories.isEmpty {
                 emptyView
             } else {
@@ -12,7 +14,7 @@ struct RepositoryListView: View {
                     ForEach(scheduler.lastResult.repositories) { repo in
                         RepositoryRow(repo: repo)
                             .contextMenu {
-                                Button(repo.isPinned ? "Unpin" : "Pin") {
+                                Button(repo.isPinned ? "取消置顶" : "置顶") {
                                     scheduler.togglePin(repoID: repo.id)
                                 }
                             }
@@ -23,143 +25,188 @@ struct RepositoryListView: View {
         }
     }
 
+    @ViewBuilder
+    private var refreshHint: some View {
+        if scheduler.lastScanAt != nil || scheduler.refreshPhase != .idle {
+            HStack(spacing: 6) {
+                if scheduler.refreshPhase == .refreshing {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                }
+
+                Text(scheduler.refreshStatusText)
+                    .font(.caption)
+                    .foregroundStyle(refreshHintTint)
+
+                if let detail = scheduler.refreshDetailText {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color.secondary.opacity(0.05))
+        }
+    }
+
     private var emptyView: some View {
         VStack(spacing: 12) {
             Spacer()
             Image(systemName: "tray")
                 .font(.system(size: 32))
                 .foregroundColor(.secondary)
-            Text("No repositories found in configured scan roots")
+            Text("配置的扫描目录中没有仓库")
                 .font(.body)
                 .foregroundColor(.secondary)
-            Text("Press Rescan Now in the Overview tab to start scanning.")
+            Text("请在概览页点击“立即刷新”开始扫描。")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-}
 
-// MARK: - Repository row
+    private var refreshHintTint: Color {
+        switch scheduler.refreshPhase {
+        case .failure:
+            return .orange
+        case .refreshing:
+            return .secondary
+        case .idle, .success:
+            return scheduler.snapshotFreshness == .stale ? .orange : .secondary
+        }
+    }
+}
 
 struct RepositoryRow: View {
     let repo: RepositorySnapshot
 
     var body: some View {
-        HStack(spacing: 12) {
-            // Pin indicator
-            if repo.isPinned {
-                Image(systemName: "pin.fill")
-                    .font(.caption2)
-                    .foregroundColor(.accentColor)
-                    .frame(width: 12)
-            } else {
-                Spacer().frame(width: 12)
-            }
+        HStack(alignment: .top, spacing: 10) {
+            pinIndicator
 
-            // Status icon
-            statusIcon
-                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(repo.name)
+                        .font(.system(size: 14, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
 
-            // Repo info
-            VStack(alignment: .leading, spacing: 2) {
-                Text(repo.name)
-                    .font(.body)
-                    .fontWeight(.medium)
-                HStack(spacing: 6) {
-                    branchLabel
-                    if repo.changedFileCount > 0 {
-                        Text("modified \(repo.modifiedFileCount) · added \(repo.addedFileCount) · deleted \(repo.deletedFileCount) · untracked \(repo.untrackedFileCount)")
+                    Spacer(minLength: 8)
+
+                    if let topLineSummary {
+                        Text(topLineSummary)
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
-                }
-                Text(repo.commitReadiness.detail)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
 
-            Spacer()
-
-            // Risk badge
-            VStack(alignment: .trailing, spacing: 4) {
-                if repo.status != .error {
-                    RiskBadge(level: repo.risk)
+                    CommitReadinessBadge(level: repo.commitReadiness.level, compact: true)
                 }
-                CommitReadinessBadge(level: repo.commitReadiness.level, compact: true)
+
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    branchLabel
+
+                    Text(bottomLineSummary)
+                        .font(.caption)
+                        .foregroundStyle(bottomLineColor)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 5)
     }
 
     @ViewBuilder
-    private var statusIcon: some View {
-        switch repo.status {
-        case .changed:
-            Image(systemName: "circle.fill")
-                .font(.system(size: 8))
-                .foregroundColor(.orange)
-        case .clean:
-            Image(systemName: "circle.fill")
-                .font(.system(size: 8))
-                .foregroundColor(.green)
-        case .error:
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.caption)
-                .foregroundColor(.red)
+    private var pinIndicator: some View {
+        if repo.isPinned {
+            Image(systemName: "pin.fill")
+                .font(.caption2)
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 12, height: 20)
+        } else {
+            Color.clear
+                .frame(width: 12, height: 20)
         }
     }
 
-    @ViewBuilder
+    private var topLineSummary: String? {
+        if repo.status == .error {
+            return nil
+        }
+        if repo.changedFileCount > 0 {
+            return repo.changedFileCount == 1 ? "1 处改动" : "\(repo.changedFileCount) 处改动"
+        }
+        if let aheadCount = repo.aheadCount, aheadCount > 0 {
+            return aheadCount == 1 ? "领先 1 个提交" : "领先 \(aheadCount) 个提交"
+        }
+        return nil
+    }
+
+    private var bottomLineSummary: String {
+        if repo.status == .error {
+            return repo.errorMessage ?? "Git 状态不可用"
+        }
+
+        if repo.commitReadiness.level == .clean {
+            return "没有本地改动"
+        }
+
+        if repo.commitReadiness.level == .pushSuggested, let aheadCount = repo.aheadCount, aheadCount > 0 {
+            return aheadCount == 1 ? "可 Push 1 个本地提交" : "可 Push \(aheadCount) 个本地提交"
+        }
+
+        let parts = [
+            stagedSummary,
+            repo.modifiedFileCount > 0 ? "已修改 \(repo.modifiedFileCount)" : nil,
+            repo.addedFileCount > 0 ? "已新增 \(repo.addedFileCount)" : nil,
+            repo.deletedFileCount > 0 ? "已删除 \(repo.deletedFileCount)" : nil,
+            repo.untrackedFileCount > 0 ? "未跟踪 \(repo.untrackedFileCount)" : nil
+        ].compactMap { $0 }
+
+        return parts.isEmpty ? repo.commitReadiness.detail : parts.joined(separator: " · ")
+    }
+
+    private var stagedSummary: String? {
+        let stagedCount = repo.stagedFileCount ?? 0
+        guard stagedCount > 0 else { return nil }
+        return "已暂存 \(stagedCount)"
+    }
+
+    private var bottomLineColor: Color {
+        repo.commitReadiness.level == .attention ? .red : .secondary
+    }
+
     private var branchLabel: some View {
         HStack(spacing: 4) {
-            Image(systemName: "arrow.triangle.branch")
-                .font(.system(size: 10))
+            Image(systemName: branchIconName)
+                .font(.system(size: 10, weight: .medium))
             Text(repo.branch)
+                .lineLimit(1)
         }
         .font(.caption)
-        .foregroundColor(.secondary)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
+        .foregroundStyle(branchColor)
+        .padding(.horizontal, 7)
+        .frame(height: 20)
         .background(
-            RoundedRectangle(cornerRadius: 4)
-                .fill(Color.secondary.opacity(0.1))
+            Capsule()
+                .fill(branchColor.opacity(branchFillOpacity))
         )
     }
-}
 
-// MARK: - Risk badge
-
-struct RiskBadge: View {
-    let level: RiskLevel
-
-    var body: some View {
-        Text(level.rawValue.capitalized)
-            .font(.caption2)
-            .fontWeight(.semibold)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(backgroundColor)
-            )
-            .foregroundColor(textColor)
+    private var branchIconName: String {
+        repo.commitReadiness.level == .attention ? "exclamationmark.triangle.fill" : "arrow.triangle.branch"
     }
 
-    private var backgroundColor: Color {
-        switch level {
-        case .low: return .green.opacity(0.15)
-        case .medium: return .orange.opacity(0.15)
-        case .high: return .red.opacity(0.15)
-        }
+    private var branchColor: Color {
+        repo.commitReadiness.level == .attention ? .red : .secondary
     }
 
-    private var textColor: Color {
-        switch level {
-        case .low: return .green
-        case .medium: return .orange
-        case .high: return .red
-        }
+    private var branchFillOpacity: Double {
+        repo.commitReadiness.level == .attention ? 0.14 : 0.08
     }
 }

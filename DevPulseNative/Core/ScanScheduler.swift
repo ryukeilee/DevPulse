@@ -27,6 +27,8 @@ final class ScanScheduler: ObservableObject {
     @Published var lastResult: AppGroupData = .empty()
     @Published var isScanning = false
     @Published var lastScanAt: Date?
+    @Published var refreshPhase: RefreshPhase = .idle
+    @Published var refreshFailureMessage: String?
     @Published var gitAvailable: Bool = true
     @Published var appGroupAvailable: Bool = true
     @Published var warnings: [String] = []
@@ -84,12 +86,65 @@ final class ScanScheduler: ObservableObject {
         startPowerMonitoring()
     }
 
+    var snapshotFreshness: SnapshotFreshness? {
+        guard let lastScanAt else { return nil }
+        return RefreshStatusFormatter.freshness(for: lastScanAt)
+    }
+
+    var refreshStatusText: String {
+        switch refreshPhase {
+        case .refreshing:
+            return "刷新中…"
+        case .failure:
+            return refreshFailureMessage ?? "刷新失败"
+        case .idle, .success:
+            guard let lastScanAt else { return "尚未刷新" }
+            if snapshotFreshness == .stale {
+                return "数据可能过期"
+            }
+            return RefreshStatusFormatter.updateLabel(for: lastScanAt)
+        }
+    }
+
+    var refreshDetailText: String? {
+        switch refreshPhase {
+        case .refreshing:
+            if let lastScanAt {
+                return "上次成功刷新：\(RefreshStatusFormatter.updateLabel(for: lastScanAt))"
+            }
+            return nil
+        case .failure:
+            if let lastScanAt {
+                return "显示上次成功数据 · \(RefreshStatusFormatter.updateLabel(for: lastScanAt))"
+            }
+            return "显示上次成功数据"
+        case .idle, .success:
+            guard let lastScanAt else { return nil }
+            switch snapshotFreshness {
+            case .fresh, .none:
+                return nil
+            case .aging:
+                return "数据略旧"
+            case .stale:
+                return "超过 15 分钟未刷新"
+            }
+        }
+    }
+
     // MARK: - Scan (async, non-blocking)
 
     func scanNow() {
         guard !isScanning else { return }
 
+        gitAvailable = ProcessRunner.isGitAvailable()
+        guard gitAvailable else {
+            failRefresh("Git 不可用")
+            return
+        }
+
         isScanning = true
+        refreshPhase = .refreshing
+        refreshFailureMessage = nil
         warnings = []
         diagnostics.validationIssues = []
         diagnostics.sharedDataWriteError = nil
@@ -104,6 +159,25 @@ final class ScanScheduler: ObservableObject {
             let result = await GitRepositoryScanner.scan(config: currentConfig, scanRoots: currentScanRoots.roots)
 
             await MainActor.run {
+                if let failureMessage = self.scanFailureMessage(
+                    for: result.data,
+                    scanRoots: currentScanRoots
+                ) {
+                    let combinedWarnings = self.summarizeWarnings(
+                        result.warnings,
+                        accessWarning: currentScanRoots.warning
+                    )
+
+                    self.isScanning = false
+                    self.refreshPhase = .failure
+                    self.refreshFailureMessage = failureMessage
+                    self.scanRootAccessWarning = currentScanRoots.warning
+                    self.warnings = [failureMessage] + combinedWarnings.filter { $0 != failureMessage }
+                    self.diagnostics.validationIssues = self.warnings
+                    self.recordEvent(.scanFailed, failureMessage)
+                    return
+                }
+
                 let pinned = self.applyPins(result.data)
                 let hadChanges = self.hadChanges(before: self.lastResult, after: pinned)
                 var combinedWarnings = self.summarizeWarnings(
@@ -112,10 +186,12 @@ final class ScanScheduler: ObservableObject {
                 )
 
                 self.lastResult = pinned
-                self.lastScanAt = Date()
+                self.lastScanAt = DateFormatting.date(from: pinned.generatedAt) ?? Date()
                 self.diagnostics.lastScanAt = self.lastScanAt
                 self.warnings = combinedWarnings
                 self.isScanning = false
+                self.refreshPhase = .success
+                self.refreshFailureMessage = nil
                 self.scanRootAccessWarning = currentScanRoots.warning
                 self.diagnostics.validationIssues = combinedWarnings.isEmpty ? [] : combinedWarnings
 
@@ -284,6 +360,8 @@ final class ScanScheduler: ObservableObject {
                 lastScanAt = generatedAt
                 diagnostics.lastScanAt = generatedAt
             }
+            refreshPhase = .idle
+            refreshFailureMessage = nil
             warnings = []
             validateConsistency(expected: pinned, shared: snapshot, reason: "startup")
         case .failure(let error):
@@ -291,6 +369,8 @@ final class ScanScheduler: ObservableObject {
             diagnostics.sharedDataReadError = error.localizedDescription
             diagnostics.widgetSnapshotReadError = error.localizedDescription
             diagnostics.validationIssues = [error.localizedDescription]
+            refreshPhase = .failure
+            refreshFailureMessage = "读取共享快照失败"
             recordEvent(.sharedDataReadFailed, "Shared snapshot read failed at startup: \(error.localizedDescription)")
         }
     }
@@ -415,6 +495,30 @@ final class ScanScheduler: ObservableObject {
         }
 
         return summarized
+    }
+
+    private func scanFailureMessage(for data: AppGroupData,
+                                    scanRoots: (roots: [String], warning: String?)) -> String? {
+        if scanRoots.roots.isEmpty {
+            return scanRoots.warning ?? "刷新失败，无法访问扫描目录"
+        }
+
+        if !lastResult.repositories.isEmpty,
+           data.repositories.isEmpty,
+           let warning = scanRoots.warning {
+            return warning
+        }
+
+        return nil
+    }
+
+    private func failRefresh(_ message: String) {
+        isScanning = false
+        refreshPhase = .failure
+        refreshFailureMessage = message
+        warnings = [message]
+        diagnostics.validationIssues = [message]
+        recordEvent(.scanFailed, message)
     }
 
     // MARK: - Power monitoring
