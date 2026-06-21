@@ -140,6 +140,38 @@ struct CommitReadinessEngineTests {
         #expect(result.detail == "请先处理 Git 冲突")
     }
 
+    @Test func activityTimelinePrioritizesErrorsOverCleanRepos() {
+        let feed = ActivityTimelineBuilder.build(
+            from: [
+                snapshot(
+                    status: .clean,
+                    branch: "main"
+                ),
+                snapshot(
+                    modified: 0,
+                    status: .error,
+                    branch: "feature/error",
+                    errorMessage: "Failed to run git status"
+                )
+            ],
+            lastScanAt: Date(timeIntervalSince1970: 1_718_000_000)
+        )
+
+        #expect(feed.state == .active)
+        #expect(feed.topItem?.status == .error)
+        #expect(feed.items.first?.branch == "feature/error")
+    }
+
+    @Test func activityTimelineUsesNoRepositoriesStateAfterFirstScan() {
+        let feed = ActivityTimelineBuilder.build(
+            from: [],
+            lastScanAt: Date(timeIntervalSince1970: 1_718_000_000)
+        )
+
+        #expect(feed.state == .noRepositories)
+        #expect(feed.items.isEmpty)
+    }
+
     private func snapshot(
         modified: Int = 0,
         added: Int = 0,

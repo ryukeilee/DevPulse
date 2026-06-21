@@ -273,9 +273,9 @@ enum ActivityTimelineBuilder {
         switch status {
         case .changed:
             return 0
-        case .clean:
-            return 1
         case .error:
+            return 1
+        case .clean:
             return 2
         }
     }

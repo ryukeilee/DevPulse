@@ -364,6 +364,16 @@ final class ScanScheduler: ObservableObject {
             refreshFailureMessage = nil
             warnings = []
             validateConsistency(expected: pinned, shared: snapshot, reason: "startup")
+        case .failure(.snapshotMissing):
+            diagnostics.snapshotDecodable = false
+            diagnostics.sharedDataSnapshot = nil
+            diagnostics.widgetSnapshot = nil
+            diagnostics.sharedDataReadError = nil
+            diagnostics.widgetSnapshotReadError = nil
+            diagnostics.validationIssues = []
+            refreshPhase = .idle
+            refreshFailureMessage = nil
+            warnings = []
         case .failure(let error):
             diagnostics.snapshotDecodable = false
             diagnostics.sharedDataReadError = error.localizedDescription
@@ -400,6 +410,7 @@ final class ScanScheduler: ObservableObject {
             diagnostics.sharedDataWriteError = error.localizedDescription
             diagnostics.snapshotDecodable = false
             diagnostics.validationIssues = [error.localizedDescription]
+            markSharedSnapshotSyncFailure(error.localizedDescription)
             recordEvent(.sharedDataWriteFailed, "Shared snapshot write failed: \(error.localizedDescription)")
             return
         }
@@ -407,6 +418,7 @@ final class ScanScheduler: ObservableObject {
         guard let verifiedSnapshot else {
             diagnostics.sharedDataWriteError = "Shared snapshot verification failed without a decoded payload."
             diagnostics.validationIssues = [diagnostics.sharedDataWriteError ?? "Verification failed."]
+            markSharedSnapshotSyncFailure(diagnostics.sharedDataWriteError ?? "Verification failed.")
             recordEvent(.sharedDataWriteFailed, "Shared snapshot verification failed unexpectedly.")
             return
         }
@@ -422,6 +434,18 @@ final class ScanScheduler: ObservableObject {
         diagnostics.lastReloadRequestedAt = Date()
         recordEvent(.widgetReloadRequested, "Widget reload requested (\(reason))")
         AppGroupStore.reloadWidgets()
+    }
+
+    private func markSharedSnapshotSyncFailure(_ reason: String) {
+        let message = "扫描已完成，但 Widget 数据同步失败"
+        refreshPhase = .failure
+        refreshFailureMessage = message
+        if !warnings.contains(message) {
+            warnings.append(message)
+        }
+        if !warnings.contains(reason) {
+            warnings.append(reason)
+        }
     }
 
     private func syncStoreInspection() {
