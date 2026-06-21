@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject var scheduler: ScanScheduler
+    @EnvironmentObject var launchAtLoginController: LaunchAtLoginController
     @State private var newCustomPath: String = ""
     @State private var builtInToggles: [ScanLocationToggle] = ScanLocationProvider.builtInToggles()
 
@@ -29,6 +30,11 @@ struct SettingsView: View {
 
                 Divider()
 
+                // Section: Launch At Login
+                launchAtLoginSection
+
+                Divider()
+
                 // Section: Widget Instructions
                 widgetInstructionsSection
 
@@ -38,7 +44,10 @@ struct SettingsView: View {
                 diagnosticsSection
             }
             .padding(20)
-            .onAppear(perform: refreshBuiltInToggles)
+            .onAppear {
+                refreshBuiltInToggles()
+                launchAtLoginController.refreshStatus()
+            }
             .onChange(of: scheduler.scanDirectories) { _, _ in
                 refreshBuiltInToggles()
             }
@@ -228,6 +237,52 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Launch At Login
+
+    private var launchAtLoginSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Launch At Login", systemImage: "power.circle")
+                .font(.headline)
+
+            Toggle(isOn: Binding(
+                get: { launchAtLoginController.isEnabled },
+                set: { launchAtLoginController.setEnabled($0) }
+            )) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Start DevPulse automatically after login")
+                        .font(.caption.weight(.semibold))
+                    Text(launchAtLoginController.diagnostics.detail)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .disabled(launchAtLoginController.isUpdating)
+
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: severitySymbol(launchAtLoginSeverity))
+                    .foregroundColor(severityColor(launchAtLoginSeverity))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(launchAtLoginStatusLabel)
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(severityColor(launchAtLoginSeverity))
+                    Text(launchAtLoginOperationDetail)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            if launchAtLoginController.status == .requiresApproval || launchAtLoginController.status == .notFound {
+                Button("Open Login Items in System Settings") {
+                    launchAtLoginController.openSystemSettings()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+    }
+
     // MARK: - Widget Instructions
 
     private var widgetInstructionsSection: some View {
@@ -283,6 +338,7 @@ struct SettingsView: View {
                 .cornerRadius(8)
             }
 
+            launchAtLoginDiagnosticsSection
             diagnosticsOverviewCard
             diagnosticsSections
             diagnosticsScanRootsSection
@@ -563,6 +619,45 @@ struct SettingsView: View {
         .cornerRadius(8)
     }
 
+    private var launchAtLoginDiagnosticsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Label("Launch at login", systemImage: severitySymbol(launchAtLoginSeverity))
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(severityColor(launchAtLoginSeverity))
+                Spacer()
+                Text(launchAtLoginStatusLabel)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            diagnosticsInsightRow(
+                DiagnosticsStatusItem(
+                    id: "launch-at-login-system-status",
+                    title: "System status",
+                    value: launchAtLoginStatusLabel,
+                    detail: launchAtLoginController.diagnostics.detail,
+                    nextStep: launchAtLoginController.diagnostics.nextStep,
+                    severity: launchAtLoginSeverity
+                )
+            )
+
+            diagnosticsInsightRow(
+                DiagnosticsStatusItem(
+                    id: "launch-at-login-last-action",
+                    title: "Last action",
+                    value: launchAtLoginOperationLabel,
+                    detail: launchAtLoginOperationDetail,
+                    nextStep: launchAtLoginController.lastError == nil ? nil : "切换失败时不会读取仓库内容，只需检查系统登录项授权。",
+                    severity: launchAtLoginOperationSeverity
+                )
+            )
+        }
+        .padding(10)
+        .background(severityBackground(launchAtLoginSeverity))
+        .cornerRadius(8)
+    }
+
     private var diagnosticsSections: some View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach(diagnosticsOverview.sections) { section in
@@ -638,6 +733,68 @@ struct SettingsView: View {
             readError: scheduler.diagnostics.widgetSnapshotReadError,
             missingReason: "Widget 侧还没有拿到可用快照时间。"
         )
+    }
+
+    private var launchAtLoginSeverity: DiagnosticsSeverity {
+        switch launchAtLoginController.diagnostics.severity {
+        case .normal:
+            return .normal
+        case .warning:
+            return .warning
+        case .error:
+            return .error
+        }
+    }
+
+    private var launchAtLoginStatusLabel: String {
+        switch launchAtLoginController.status {
+        case .enabled:
+            return "Enabled"
+        case .requiresApproval:
+            return "Approval Required"
+        case .notRegistered:
+            return "Disabled"
+        case .notFound:
+            return "App Not Found"
+        case .unknown:
+            return "Unknown"
+        }
+    }
+
+    private var launchAtLoginOperationLabel: String {
+        if launchAtLoginController.isUpdating {
+            return "Updating"
+        }
+        if launchAtLoginController.lastOperationSucceeded == true {
+            return "Succeeded"
+        }
+        if launchAtLoginController.lastOperationSucceeded == false {
+            return "Failed"
+        }
+        return "Not run"
+    }
+
+    private var launchAtLoginOperationDetail: String {
+        if launchAtLoginController.isUpdating {
+            return "正在更新系统登录项状态。"
+        }
+        if let lastError = launchAtLoginController.lastError {
+            return lastError
+        }
+        if launchAtLoginController.lastOperationSucceeded == true {
+            return "最近一次切换已被系统接受，并已刷新当前状态。"
+        }
+        return "尚未在本次启动中切换过开机启动。"
+    }
+
+    private var launchAtLoginOperationSeverity: DiagnosticsSeverity {
+        if launchAtLoginController.lastOperationSucceeded == false {
+            return .error
+        }
+        if launchAtLoginController.lastOperationSucceeded == true {
+            return .normal
+        }
+        return .warning
     }
 
     private func diagnosticsRow(title: String, value: String, detail: String, isError: Bool) -> some View {

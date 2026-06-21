@@ -75,7 +75,14 @@ final class ScanScheduler: ObservableObject {
         }
     }
 
-    init() {
+    init(commandMode: Bool = false) {
+        if commandMode {
+            appGroupAvailable = AppGroupStore.isAvailable
+            gitAvailable = ProcessRunner.isGitAvailable()
+            updatePowerState()
+            return
+        }
+
         loadConfig()
         loadScanDirectories()
         syncStoreInspection()

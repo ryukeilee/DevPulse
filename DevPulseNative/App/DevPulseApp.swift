@@ -1,14 +1,20 @@
 import AppKit
+import Darwin
 import SwiftUI
 
 @main
 struct DevPulseApp: App {
+    @NSApplicationDelegateAdaptor(StartupCommandDelegate.self) private var startupCommandDelegate
     @StateObject private var scheduler: ScanScheduler
+    @StateObject private var launchAtLoginController: LaunchAtLoginController
     @State private var mainWindow: NSWindow?
 
     init() {
-        let scheduler = ScanScheduler()
+        let startupCommand = LaunchAtLoginCommand(arguments: ProcessInfo.processInfo.arguments)
+        let scheduler = ScanScheduler(commandMode: startupCommand != nil)
+        let launchAtLoginController = LaunchAtLoginController()
         _scheduler = StateObject(wrappedValue: scheduler)
+        _launchAtLoginController = StateObject(wrappedValue: launchAtLoginController)
     }
 
     var body: some Scene {
@@ -40,6 +46,8 @@ struct DevPulseApp: App {
     }
 
     private func openMainWindow() {
+        launchAtLoginController.refreshStatus()
+
         if let mainWindow {
             show(window: mainWindow)
             return
@@ -57,6 +65,7 @@ struct DevPulseApp: App {
         window.contentView = NSHostingView(
             rootView: ContentView()
                 .environmentObject(scheduler)
+                .environmentObject(launchAtLoginController)
                 .frame(minWidth: 600, idealWidth: 720, minHeight: 480, idealHeight: 560)
         )
         window.center()
@@ -68,5 +77,18 @@ struct DevPulseApp: App {
     private func show(window: NSWindow) {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+final class StartupCommandDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard let command = LaunchAtLoginCommand(arguments: ProcessInfo.processInfo.arguments) else { return }
+
+        Task { @MainActor in
+            let controller = LaunchAtLoginController()
+            print(controller.run(command: command))
+            fflush(stdout)
+            NSApp.terminate(nil)
+        }
     }
 }
