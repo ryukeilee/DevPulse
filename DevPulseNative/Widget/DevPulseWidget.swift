@@ -116,23 +116,32 @@ struct WidgetEntry: TimelineEntry {
     let snapshot: AppGroupData?
     let feed: ActivityTimelineFeed
     let loadState: WidgetLoadState
+    let trustAssessment: SnapshotTrustAssessment?
 
     static var placeholder: WidgetEntry {
         WidgetEntry(
             date: Date(),
             snapshot: nil,
             feed: ActivityTimelineFeed(state: .neverScanned, items: []),
-            loadState: .placeholder
+            loadState: .placeholder,
+            trustAssessment: nil
         )
     }
 
     static func content(snapshot: AppGroupData,
                         feed: ActivityTimelineFeed) -> WidgetEntry {
-        WidgetEntry(
+        let trustAssessment = RefreshStatusFormatter.snapshotAssessment(
+            generatedAt: snapshot.generatedAt,
+            writtenAt: snapshot.writtenAt,
+            missingReason: "共享快照缺少 generatedAt / writtenAt，无法确认 Widget 数据是否最新。"
+        )
+
+        return WidgetEntry(
             date: Date(),
             snapshot: snapshot,
             feed: feed,
-            loadState: .ready
+            loadState: .ready,
+            trustAssessment: trustAssessment
         )
     }
 
@@ -141,7 +150,8 @@ struct WidgetEntry: TimelineEntry {
             date: Date(),
             snapshot: nil,
             feed: ActivityTimelineFeed(state: .neverScanned, items: []),
-            loadState: .noSnapshot
+            loadState: .noSnapshot,
+            trustAssessment: nil
         )
     }
 
@@ -150,7 +160,8 @@ struct WidgetEntry: TimelineEntry {
             date: Date(),
             snapshot: nil,
             feed: ActivityTimelineFeed(state: .neverScanned, items: []),
-            loadState: .unavailable
+            loadState: .unavailable,
+            trustAssessment: nil
         )
     }
 }
@@ -199,6 +210,13 @@ private struct WidgetChromeHeader: View {
 private struct SmallGlanceWidgetView: View {
     let entry: WidgetEntry
 
+    private var summary: WidgetPrioritySummary {
+        WidgetPrioritySummaryBuilder.build(
+            feed: entry.feed,
+            trustAssessment: entry.trustAssessment
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             WidgetChromeHeader(trailingText: nil)
@@ -219,72 +237,75 @@ private struct SmallGlanceWidgetView: View {
             placeholderContent
         case .noSnapshot:
             shortState(
-                title: "打开 DevPulse",
-                detail: nil,
+                title: "尚未生成数据",
+                detail: "打开 DevPulse 后执行一次刷新",
                 icon: "arrow.triangle.2.circlepath"
             )
         case .unavailable:
             shortState(
-                title: "数据不可用",
-                detail: "打开 DevPulse 以刷新",
+                title: "共享数据异常",
+                detail: "打开 DevPulse 查看 Diagnostics",
                 icon: "exclamationmark.triangle.fill"
             )
         case .ready:
+            guardedReadyContent
+        }
+    }
+
+    @ViewBuilder
+    private var guardedReadyContent: some View {
+        switch entry.trustAssessment?.state {
+        case .fresh:
             readyContent
+        case .stale, .expired:
+            shortState(
+                title: "数据可能已过期",
+                detail: "打开 DevPulse 刷新后再判断是否适合提交",
+                icon: "clock.badge.exclamationmark"
+            )
+        case .unknown, .failed:
+            shortState(
+                title: "状态未知",
+                detail: "打开 DevPulse 查看 Diagnostics",
+                icon: "questionmark.circle"
+            )
+        case .none:
+            shortState(
+                title: "状态未知",
+                detail: "打开 DevPulse 查看 Diagnostics",
+                icon: "questionmark.circle"
+            )
         }
     }
 
     @ViewBuilder
     private var readyContent: some View {
-        if entry.feed.state == .noRepositories {
-            shortState(
-                title: "没有仓库",
-                detail: nil,
-                icon: "tray"
-            )
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                if entry.feed.state == .allClean {
-                    Text("全部干净")
-                        .font(.system(size: 16, weight: .semibold))
-                        .lineLimit(1)
-                }
+        prioritySummary(summary, largeBadge: true, showAuxiliary: false)
+    }
 
-                if let item = entry.feed.topItem {
-                    HStack(alignment: .top, spacing: 8) {
-                        WidgetReadinessBadge(level: item.commitReadiness.level, size: .large)
+    @ViewBuilder
+    private func prioritySummary(_ summary: WidgetPrioritySummary,
+                                 largeBadge: Bool,
+                                 showAuxiliary: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let readinessLevel = summary.readinessLevel {
+                WidgetReadinessBadge(level: readinessLevel, size: largeBadge ? .large : .compact)
+            }
 
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                Text(item.repoName)
-                                    .font(.system(size: 15, weight: .semibold))
-                                    .lineLimit(1)
+            Text(summary.title)
+                .font(.system(size: 16, weight: .semibold))
+                .lineLimit(1)
 
-                                Spacer(minLength: 0)
+            Text(summary.message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
 
-                                Text(item.fileCountLabel)
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-
-                            HStack(alignment: .center, spacing: 6) {
-                                WidgetBranchPill(text: item.branch)
-                                Text(item.changeBreakdownLabel)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                            }
-                        }
-                    }
-                } else {
-                    shortState(
-                        title: "打开 DevPulse",
-                        detail: nil,
-                        icon: "arrow.triangle.2.circlepath"
-                    )
-                }
+            if showAuxiliary, let auxiliary = summary.auxiliary {
+                Text(auxiliary)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
     }
@@ -330,19 +351,22 @@ private struct SmallGlanceWidgetView: View {
 
     @ViewBuilder
     private var footer: some View {
-        if let updatedText = entry.updatedText {
-            Text("更新于 \(updatedText)")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
+        Text(entry.footerText)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
     }
 }
 
 private struct MediumGlanceWidgetView: View {
     let entry: WidgetEntry
 
-    private let maxItems = 3
+    private var summary: WidgetPrioritySummary {
+        WidgetPrioritySummaryBuilder.build(
+            feed: entry.feed,
+            trustAssessment: entry.trustAssessment
+        )
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -358,7 +382,11 @@ private struct MediumGlanceWidgetView: View {
     }
 
     private var headerTrailingText: String? {
-        guard case .ready = entry.loadState, let summary = entry.snapshot?.scanSummary else {
+        guard
+            case .ready = entry.loadState,
+            entry.trustAssessment?.state == .fresh,
+            let summary = entry.snapshot?.scanSummary
+        else {
             return nil
         }
 
@@ -385,44 +413,75 @@ private struct MediumGlanceWidgetView: View {
             placeholderRows
         case .noSnapshot:
             shortState(
-                title: "打开 DevPulse",
-                detail: nil,
+                title: "尚未生成数据",
+                detail: "打开 DevPulse 后执行一次刷新",
                 icon: "arrow.triangle.2.circlepath"
             )
         case .unavailable:
             shortState(
-                title: "数据不可用",
-                detail: "打开 DevPulse 以刷新",
+                title: "共享数据异常",
+                detail: "打开 DevPulse 查看 Diagnostics",
                 icon: "exclamationmark.triangle.fill"
             )
         case .ready:
+            guardedReadyContent
+        }
+    }
+
+    @ViewBuilder
+    private var guardedReadyContent: some View {
+        switch entry.trustAssessment?.state {
+        case .fresh:
             readyContent
+        case .stale, .expired:
+            shortState(
+                title: "数据可能已过期",
+                detail: "打开 DevPulse 刷新后再判断是否适合提交",
+                icon: "clock.badge.exclamationmark"
+            )
+        case .unknown, .failed:
+            shortState(
+                title: "状态未知",
+                detail: "打开 DevPulse 查看 Diagnostics",
+                icon: "questionmark.circle"
+            )
+        case .none:
+            shortState(
+                title: "状态未知",
+                detail: "打开 DevPulse 查看 Diagnostics",
+                icon: "questionmark.circle"
+            )
         }
     }
 
     @ViewBuilder
     private var readyContent: some View {
-        if entry.feed.state == .noRepositories {
-            shortState(
-                title: "没有仓库",
-                detail: nil,
-                icon: "tray"
-            )
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                if entry.feed.state == .allClean {
-                    Text("全部干净")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.green)
-                }
+        prioritySummary(summary, largeBadge: false, showAuxiliary: true)
+    }
 
-                ForEach(entry.feed.items.prefix(maxItems), id: \.id) { item in
-                    WidgetRepoRow(item: item)
+    @ViewBuilder
+    private func prioritySummary(_ summary: WidgetPrioritySummary,
+                                 largeBadge: Bool,
+                                 showAuxiliary: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            if let readinessLevel = summary.readinessLevel {
+                WidgetReadinessBadge(level: readinessLevel, size: largeBadge ? .large : .compact)
+            }
 
-                    if item.id != entry.feed.items.prefix(maxItems).last?.id {
-                        Divider().opacity(0.25)
-                    }
-                }
+            Text(summary.title)
+                .font(.system(size: 15, weight: .semibold))
+                .lineLimit(1)
+
+            Text(summary.message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+
+            if showAuxiliary, let auxiliary = summary.auxiliary {
+                Text(auxiliary)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
     }
@@ -430,9 +489,18 @@ private struct MediumGlanceWidgetView: View {
     @ViewBuilder
     private var placeholderRows: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(0..<3, id: \.self) { _ in
-                WidgetRepoRow(item: nil)
-            }
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.secondary.opacity(0.14))
+                .frame(width: 70, height: 20)
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.18))
+                .frame(width: 140, height: 12)
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.12))
+                .frame(width: 190, height: 10)
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.12))
+                .frame(width: 88, height: 9)
         }
         .redacted(reason: .placeholder)
     }
@@ -459,77 +527,10 @@ private struct MediumGlanceWidgetView: View {
 
     @ViewBuilder
     private var footer: some View {
-        if let updatedText = entry.updatedText {
-            Text("更新于 \(updatedText)")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-    }
-}
-
-private struct WidgetRepoRow: View {
-    let item: ActivityTimelineItem?
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            if let item {
-                WidgetReadinessBadge(level: item.commitReadiness.level, size: .compact)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(item.repoName)
-                            .font(.system(size: 12.5, weight: .semibold))
-                            .lineLimit(1)
-
-                        Spacer(minLength: 0)
-
-                        Text(item.fileCountLabel)
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-
-                    HStack(spacing: 6) {
-                        WidgetBranchPill(text: item.branch)
-                        Text(item.changeBreakdownLabel)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                }
-            } else {
-                WidgetReadinessBadge(level: .needsReview, size: .compact)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(Color.secondary.opacity(0.18))
-                        .frame(width: 92, height: 10)
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(Color.secondary.opacity(0.14))
-                        .frame(width: 128, height: 9)
-                }
-            }
-        }
-    }
-}
-
-private struct WidgetBranchPill: View {
-    let text: String
-
-    var body: some View {
-        Text(text.isEmpty ? "detached" : text)
-            .textCase(nil)
+        Text(entry.footerText)
             .font(.caption2)
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(
-                Capsule().fill(Color.secondary.opacity(0.12))
-            )
             .foregroundStyle(.secondary)
+            .lineLimit(1)
     }
 }
 
@@ -588,66 +589,84 @@ private struct WidgetReadinessBadge: View {
 
     private var tint: Color {
         switch level {
-        case .clean:
+        case .idle:
             return .secondary
-        case .inProgress:
+        case .review:
             return .orange
-        case .commitReady:
-            return .blue
-        case .needsReview:
-            return .orange
-        case .pushSuggested:
+        case .ready:
             return .green
-        case .attention:
+        case .dirty:
+            return .red
+        case .unknown:
             return .red
         }
     }
 
     private var symbolName: String {
         switch level {
-        case .clean:
+        case .idle:
             return "checkmark.circle.fill"
-        case .inProgress:
-            return "pencil.circle.fill"
-        case .commitReady:
-            return "checkmark.seal.fill"
-        case .needsReview:
+        case .review:
             return "questionmark.circle.fill"
-        case .pushSuggested:
+        case .ready:
             return "arrow.up.circle.fill"
-        case .attention:
+        case .dirty:
+            return "exclamationmark.triangle.fill"
+        case .unknown:
             return "exclamationmark.triangle.fill"
         }
     }
 }
 
 private extension WidgetEntry {
-    var updatedText: String? {
-        guard let snapshot else { return nil }
+    var footerText: String {
+        switch loadState {
+        case .placeholder:
+            return "正在读取共享快照"
+        case .noSnapshot:
+            return "最近刷新: 尚未生成"
+        case .unavailable:
+            return "最近刷新: 读取失败"
+        case .ready:
+            if let trustAssessment, trustAssessment.state != .fresh {
+                return trustAssessment.detail
+            }
 
-        var timestamps: [(timestamp: String, date: Date)] = []
-        if let writtenAt = snapshot.writtenAt, let writtenDate = DateFormatting.date(from: writtenAt) {
-            timestamps.append((timestamp: writtenAt, date: writtenDate))
+            guard let snapshot else {
+                return "最近刷新: 未知"
+            }
+
+            var timestamps: [(timestamp: String, date: Date)] = []
+            if let writtenAt = snapshot.writtenAt, let writtenDate = DateFormatting.date(from: writtenAt) {
+                timestamps.append((timestamp: writtenAt, date: writtenDate))
+            }
+
+            if let generatedDate = DateFormatting.date(from: snapshot.generatedAt) {
+                timestamps.append((timestamp: snapshot.generatedAt, date: generatedDate))
+            }
+
+            guard let latest = timestamps.max(by: { $0.date < $1.date }) else {
+                return "最近刷新: 未知"
+            }
+
+            return "最近刷新 \(DateFormatting.relativeTime(from: latest.timestamp, relativeTo: date))"
         }
-
-        if let generatedDate = DateFormatting.date(from: snapshot.generatedAt) {
-            timestamps.append((timestamp: snapshot.generatedAt, date: generatedDate))
-        }
-
-        guard let latest = timestamps.max(by: { $0.date < $1.date }) else {
-            return nil
-        }
-
-        return DateFormatting.relativeTime(from: latest.timestamp, relativeTo: date)
     }
 }
 
 private extension ActivityTimelineItem {
     var fileCountLabel: String {
-        changedFileCount == 1 ? "1 处改动" : "\(changedFileCount) 处改动"
+        if commitReadiness.level == .unknown {
+            return "状态异常"
+        }
+        return changedFileCount == 1 ? "1 处改动" : "\(changedFileCount) 处改动"
     }
 
     var changeBreakdownLabel: String {
+        if commitReadiness.level == .unknown {
+            return commitReadiness.detail
+        }
+
         let parts = [
             modifiedFileCount > 0 ? "已修改 \(modifiedFileCount)" : nil,
             addedFileCount > 0 ? "已新增 \(addedFileCount)" : nil,

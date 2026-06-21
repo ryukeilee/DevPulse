@@ -76,7 +76,12 @@ struct RepositoryListView: View {
         case .refreshing:
             return .secondary
         case .idle, .success:
-            return scheduler.snapshotFreshness == .stale ? .orange : .secondary
+            switch scheduler.snapshotFreshness {
+            case .stale, .expired, .unknown:
+                return .orange
+            case .fresh, .none:
+                return .secondary
+            }
         }
     }
 }
@@ -152,11 +157,11 @@ struct RepositoryRow: View {
             return repo.errorMessage ?? "Git 状态不可用"
         }
 
-        if repo.commitReadiness.level == .clean {
+        if repo.commitReadiness.level == .idle {
             return "没有本地改动"
         }
 
-        if repo.commitReadiness.level == .pushSuggested, let aheadCount = repo.aheadCount, aheadCount > 0 {
+        if repo.commitReadiness.level == .ready, repo.changedFileCount == 0, let aheadCount = repo.aheadCount, aheadCount > 0 {
             return aheadCount == 1 ? "可 Push 1 个本地提交" : "可 Push \(aheadCount) 个本地提交"
         }
 
@@ -178,7 +183,14 @@ struct RepositoryRow: View {
     }
 
     private var bottomLineColor: Color {
-        repo.commitReadiness.level == .attention ? .red : .secondary
+        switch repo.commitReadiness.level {
+        case .dirty, .unknown:
+            return .red
+        case .ready:
+            return .green
+        case .idle, .review:
+            return .secondary
+        }
     }
 
     private var branchLabel: some View {
@@ -199,14 +211,35 @@ struct RepositoryRow: View {
     }
 
     private var branchIconName: String {
-        repo.commitReadiness.level == .attention ? "exclamationmark.triangle.fill" : "arrow.triangle.branch"
+        switch repo.commitReadiness.level {
+        case .dirty, .unknown:
+            return "exclamationmark.triangle.fill"
+        case .ready:
+            return "checkmark.circle.fill"
+        case .idle, .review:
+            return "arrow.triangle.branch"
+        }
     }
 
     private var branchColor: Color {
-        repo.commitReadiness.level == .attention ? .red : .secondary
+        switch repo.commitReadiness.level {
+        case .dirty, .unknown:
+            return .red
+        case .ready:
+            return .green
+        case .idle, .review:
+            return .secondary
+        }
     }
 
     private var branchFillOpacity: Double {
-        repo.commitReadiness.level == .attention ? 0.14 : 0.08
+        switch repo.commitReadiness.level {
+        case .dirty, .unknown:
+            return 0.14
+        case .ready:
+            return 0.12
+        case .idle, .review:
+            return 0.08
+        }
     }
 }

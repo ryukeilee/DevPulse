@@ -78,9 +78,9 @@ struct ScanStatusView: View {
             return .secondary
         case .idle, .success:
             switch scheduler.snapshotFreshness {
-            case .stale:
+            case .stale, .expired, .unknown:
                 return .orange
-            case .aging, .fresh, .none:
+            case .fresh, .none:
                 return .secondary
             }
         }

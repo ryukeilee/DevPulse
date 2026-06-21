@@ -18,26 +18,26 @@ struct CommitReadinessBadge: View {
 
     private var backgroundColor: Color {
         switch level {
-        case .clean:
+        case .idle:
             return .secondary
-        case .inProgress:
+        case .review:
             return .orange
-        case .commitReady:
-            return .blue
-        case .needsReview:
-            return .orange
-        case .pushSuggested:
+        case .ready:
             return .green
-        case .attention:
+        case .dirty:
+            return .red
+        case .unknown:
             return .red
         }
     }
 
     private var backgroundOpacity: Double {
         switch level {
-        case .attention:
+        case .unknown:
             return 0.16
-        case .clean:
+        case .dirty:
+            return 0.14
+        case .idle:
             return 0.08
         default:
             return 0.12

@@ -193,16 +193,22 @@ struct ActivityTimelineRow: View {
         let tint: Color
         let label: String
 
-        switch item.status {
-        case .changed:
+        switch item.commitReadiness.level {
+        case .dirty:
             tint = .orange
             label = "dirty"
-        case .clean:
+        case .ready:
             tint = .green
-            label = "clean"
-        case .error:
+            label = "ready"
+        case .review:
+            tint = .orange
+            label = "review"
+        case .idle:
+            tint = .secondary
+            label = "idle"
+        case .unknown:
             tint = .red
-            label = "error"
+            label = "unknown"
         }
 
         return Text(label)

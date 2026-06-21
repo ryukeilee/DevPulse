@@ -130,8 +130,6 @@ enum AppGroupStore {
         switch read() {
         case .success(let verified):
             if verified == data {
-                print("[DevPulse] Wrote repositories.json (schema v\(data.schemaVersion), "
-                      + "\(data.repositories.count) repos)")
                 return .success(verified)
             }
             return .failure(.verificationFailed("Read-back snapshot does not match the written payload."))

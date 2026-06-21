@@ -60,18 +60,16 @@ enum RepositorySorter {
 
     private static func readinessPriority(_ level: CommitReadinessLevel) -> Int {
         switch level {
-        case .attention:
+        case .unknown:
             return 0
-        case .needsReview:
+        case .dirty:
             return 1
-        case .commitReady:
+        case .review:
             return 2
-        case .inProgress:
+        case .ready:
             return 3
-        case .pushSuggested:
+        case .idle:
             return 4
-        case .clean:
-            return 5
         }
     }
 }

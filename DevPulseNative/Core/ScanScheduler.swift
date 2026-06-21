@@ -87,22 +87,22 @@ final class ScanScheduler: ObservableObject {
     }
 
     var snapshotFreshness: SnapshotFreshness? {
-        guard let lastScanAt else { return nil }
-        return RefreshStatusFormatter.freshness(for: lastScanAt)
+        RefreshStatusFormatter.freshness(for: lastScanAt)
+    }
+
+    var refreshTrustAssessment: SnapshotTrustAssessment {
+        RefreshStatusFormatter.refreshAssessment(
+            lastUpdatedAt: lastScanAt,
+            failureMessage: refreshPhase == .failure ? refreshFailureMessage : nil
+        )
     }
 
     var refreshStatusText: String {
         switch refreshPhase {
         case .refreshing:
             return "刷新中…"
-        case .failure:
-            return refreshFailureMessage ?? "刷新失败"
-        case .idle, .success:
-            guard let lastScanAt else { return "尚未刷新" }
-            if snapshotFreshness == .stale {
-                return "数据可能过期"
-            }
-            return RefreshStatusFormatter.updateLabel(for: lastScanAt)
+        case .failure, .idle, .success:
+            return refreshTrustAssessment.title
         }
     }
 
@@ -113,21 +113,8 @@ final class ScanScheduler: ObservableObject {
                 return "上次成功刷新：\(RefreshStatusFormatter.updateLabel(for: lastScanAt))"
             }
             return nil
-        case .failure:
-            if let lastScanAt {
-                return "显示上次成功数据 · \(RefreshStatusFormatter.updateLabel(for: lastScanAt))"
-            }
-            return "显示上次成功数据"
-        case .idle, .success:
-            guard let lastScanAt else { return nil }
-            switch snapshotFreshness {
-            case .fresh, .none:
-                return nil
-            case .aging:
-                return "数据略旧"
-            case .stale:
-                return "超过 15 分钟未刷新"
-            }
+        case .failure, .idle, .success:
+            return refreshTrustAssessment.state == .fresh ? nil : refreshTrustAssessment.detail
         }
     }
 
@@ -180,7 +167,7 @@ final class ScanScheduler: ObservableObject {
 
                 let pinned = self.applyPins(result.data)
                 let hadChanges = self.hadChanges(before: self.lastResult, after: pinned)
-                var combinedWarnings = self.summarizeWarnings(
+                let combinedWarnings = self.summarizeWarnings(
                     result.warnings,
                     accessWarning: currentScanRoots.warning
                 )
@@ -279,9 +266,6 @@ final class ScanScheduler: ObservableObject {
         UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
             .set(scanIntervalSeconds, forKey: lastScanIntervalKey)
 
-        print("[DevPulse] Scan interval: \(Int(scanIntervalSeconds))s "
-              + "(no-change streak: \(consecutiveNoChanges), power: \(powerState))")
-
         // Re-schedule if timer is active
         if backgroundTimer != nil {
             scheduleNextTimer()
@@ -301,10 +285,15 @@ final class ScanScheduler: ObservableObject {
 
         var accessibleRoots: [String] = []
         var inaccessibleCount = 0
+        var containerPathCount = 0
 
         for directory in configuredDirectories {
             if let url = resolvedURL(for: directory) {
                 let path = ScanLocationProvider.normalizePersistedPath(url.path)
+                guard !isAppContainerPath(path) else {
+                    containerPathCount += 1
+                    continue
+                }
                 guard isAccessibleScanRoot(path) else {
                     inaccessibleCount += 1
                     continue
@@ -314,6 +303,10 @@ final class ScanScheduler: ObservableObject {
             }
 
             let normalizedPath = ScanLocationProvider.normalizePersistedPath(directory.path)
+            guard !isAppContainerPath(normalizedPath) else {
+                containerPathCount += 1
+                continue
+            }
             guard isAccessibleScanRoot(normalizedPath) else {
                 inaccessibleCount += 1
                 continue
@@ -326,12 +319,16 @@ final class ScanScheduler: ObservableObject {
         let warning: String?
         if deduped.isEmpty && configuredDirectories.isEmpty {
             warning = "No scan roots configured. Add a directory in Settings."
+        } else if containerPathCount > 0 {
+            warning = "检测到沙盒容器路径，已忽略。请把扫描目录改回真实用户目录。"
         } else if inaccessibleCount > 0 {
             warning = "部分目录权限失效，请在 Settings 重新授权。"
         } else {
             warning = nil
         }
 
+        diagnostics.scanRoots = deduped
+        diagnostics.scanRootWarnings = warning.map { [$0] } ?? []
         return (deduped, warning)
     }
 
@@ -344,13 +341,10 @@ final class ScanScheduler: ObservableObject {
             let pinned = applyPins(snapshot)
             lastResult = pinned
             diagnostics.sharedDataSnapshot = snapshot
-            diagnostics.widgetSnapshot = snapshot
             diagnostics.snapshotDecodable = true
             let now = Date()
             diagnostics.sharedDataReadAt = now
-            diagnostics.widgetSnapshotReadAt = now
             diagnostics.sharedDataReadError = nil
-            diagnostics.widgetSnapshotReadError = nil
             diagnostics.lastGeneratedAt = snapshot.generatedAt
             diagnostics.lastWrittenAt = snapshot.writtenAt
             if let writtenAt = snapshot.writtenAt.flatMap(DateFormatting.date(from:)) {
@@ -363,7 +357,8 @@ final class ScanScheduler: ObservableObject {
             refreshPhase = .idle
             refreshFailureMessage = nil
             warnings = []
-            validateConsistency(expected: pinned, shared: snapshot, reason: "startup")
+            refreshWidgetReadableSnapshot()
+            validateConsistency(expected: pinned, shared: snapshot, widget: diagnostics.widgetSnapshot, reason: "startup")
         case .failure(.snapshotMissing):
             diagnostics.snapshotDecodable = false
             diagnostics.sharedDataSnapshot = nil
@@ -424,12 +419,10 @@ final class ScanScheduler: ObservableObject {
         }
 
         diagnostics.sharedDataReadAt = Date()
-        diagnostics.widgetSnapshotReadAt = Date()
         diagnostics.sharedDataSnapshot = verifiedSnapshot
-        diagnostics.widgetSnapshot = verifiedSnapshot
         diagnostics.sharedDataReadError = nil
-        diagnostics.widgetSnapshotReadError = nil
-        validateConsistency(expected: snapshotToWrite, shared: verifiedSnapshot, reason: reason)
+        refreshWidgetReadableSnapshot()
+        validateConsistency(expected: snapshotToWrite, shared: verifiedSnapshot, widget: diagnostics.widgetSnapshot, reason: reason)
         lastResult = applyPins(verifiedSnapshot)
         diagnostics.lastReloadRequestedAt = Date()
         recordEvent(.widgetReloadRequested, "Widget reload requested (\(reason))")
@@ -462,7 +455,27 @@ final class ScanScheduler: ObservableObject {
         diagnostics.snapshotWritable = inspection.snapshotWritable
     }
 
-    private func validateConsistency(expected: AppGroupData, shared: AppGroupData?, reason: String) {
+    private func refreshWidgetReadableSnapshot() {
+        switch AppGroupStore.read() {
+        case .success(let snapshot):
+            diagnostics.widgetSnapshot = snapshot
+            diagnostics.widgetSnapshotReadAt = Date()
+            diagnostics.widgetSnapshotReadError = nil
+        case .failure(.snapshotMissing):
+            diagnostics.widgetSnapshot = nil
+            diagnostics.widgetSnapshotReadAt = nil
+            diagnostics.widgetSnapshotReadError = "Widget 可读快照不存在。请先执行一次 Rescan。"
+        case .failure(let error):
+            diagnostics.widgetSnapshot = nil
+            diagnostics.widgetSnapshotReadAt = nil
+            diagnostics.widgetSnapshotReadError = error.localizedDescription
+        }
+    }
+
+    private func validateConsistency(expected: AppGroupData,
+                                     shared: AppGroupData?,
+                                     widget: AppGroupData?,
+                                     reason: String) {
         var issues: [String] = []
 
         if !appGroupAvailable {
@@ -480,6 +493,14 @@ final class ScanScheduler: ObservableObject {
             issues.append("Main app snapshot differs from shared snapshot.")
         }
 
+        if let widgetSnapshotReadError = diagnostics.widgetSnapshotReadError {
+            issues.append(widgetSnapshotReadError)
+        } else if let widget, widget != shared {
+            issues.append("Widget-facing snapshot differs from shared snapshot.")
+        } else if widget == nil {
+            issues.append("Widget-facing snapshot is unavailable.")
+        }
+
         if issues.isEmpty {
             diagnostics.validationIssues = []
             recordEvent(.validationPassed, "Validation passed (\(reason))")
@@ -487,6 +508,8 @@ final class ScanScheduler: ObservableObject {
             diagnostics.validationIssues = issues
             recordEvent(.validationFailed, "Validation failed (\(reason)): \(issues.joined(separator: " "))")
         }
+
+        diagnostics.nextSteps = suggestedNextSteps(from: issues)
     }
 
     private func recordEvent(_ kind: DiagnosticEvent.Kind, _ message: String) {
@@ -499,7 +522,6 @@ final class ScanScheduler: ObservableObject {
         if diagnosticEvents.count > 20 {
             diagnosticEvents = Array(diagnosticEvents.suffix(20))
         }
-        print("[DevPulse][\(kind.rawValue)] \(message)")
     }
 
     private func summarizeWarnings(_ warnings: [String], accessWarning: String?) -> [String] {
@@ -542,6 +564,7 @@ final class ScanScheduler: ObservableObject {
         refreshFailureMessage = message
         warnings = [message]
         diagnostics.validationIssues = [message]
+        diagnostics.nextSteps = suggestedNextSteps(from: [message])
         recordEvent(.scanFailed, message)
     }
 
@@ -687,6 +710,10 @@ final class ScanScheduler: ObservableObject {
     func addCustomPath(_ path: String) {
         let expanded = ScanLocationProvider.normalizePersistedPath(path)
         guard !expanded.isEmpty else { return }
+        guard !isAppContainerPath(expanded) else {
+            scanRootAccessWarning = "不能把 DevPulse 自己的沙盒容器当作扫描目录，请选择真实的用户目录。"
+            return
+        }
         guard isAccessibleScanRoot(expanded) else {
             scanRootAccessWarning = "部分目录权限失效，请在 Settings 重新授权。"
             return
@@ -739,10 +766,13 @@ final class ScanScheduler: ObservableObject {
     private func sanitizeScanDirectories(_ directories: [CustomScanDirectory]) -> [CustomScanDirectory] {
         var sanitized: [CustomScanDirectory] = []
         var inaccessibleCount = 0
+        var containerCount = 0
 
         for directory in directories {
             let normalizedPath = ScanLocationProvider.normalizePersistedPath(directory.path)
-            if isAccessibleScanRoot(normalizedPath) && !isAppContainerPath(normalizedPath) {
+            if isAppContainerPath(normalizedPath) {
+                containerCount += 1
+            } else if isAccessibleScanRoot(normalizedPath) {
                 let bookmarkData = directory.bookmarkData ?? bookmarkData(for: URL(fileURLWithPath: normalizedPath))
                 sanitized.append(CustomScanDirectory(id: directory.id, path: normalizedPath, bookmarkData: bookmarkData))
             } else {
@@ -750,7 +780,9 @@ final class ScanScheduler: ObservableObject {
             }
         }
 
-        if inaccessibleCount > 0 {
+        if containerCount > 0 {
+            scanRootAccessWarning = "检测到旧的沙盒容器路径，已自动忽略。请确认扫描目录仍指向你的真实仓库根目录。"
+        } else if inaccessibleCount > 0 {
             scanRootAccessWarning = "部分目录权限失效，请在 Settings 重新授权。"
         }
 
@@ -807,6 +839,36 @@ final class ScanScheduler: ObservableObject {
     }
 
     private func isAppContainerPath(_ path: String) -> Bool {
-        path.contains("/Library/Containers/")
+        ScanLocationProvider.isLikelySandboxContainerPath(path)
+    }
+
+    private func suggestedNextSteps(from issues: [String]) -> [String] {
+        if issues.isEmpty {
+            if diagnostics.scanRoots.isEmpty {
+                return ["在 Settings 添加至少一个真实的仓库根目录，然后执行 Rescan。"]
+            }
+            return ["当前链路看起来正常；如果 Widget 未立即变化，等待 macOS 刷新时间线或手动重新添加 Widget。"]
+        }
+
+        var steps: [String] = []
+
+        if issues.contains(where: { $0.contains("沙盒容器路径") }) {
+            steps.append("把扫描目录从 DevPulse 容器路径改回 `/Users/...` 下的真实目录。")
+        }
+        if issues.contains(where: { $0.contains("权限") || $0.contains("unavailable") }) {
+            steps.append("在 Settings 重新选择扫描目录，确认目录可读且 App Group entitlement 生效。")
+        }
+        if issues.contains(where: { $0.contains("快照") || $0.contains("snapshot") }) {
+            steps.append("先执行一次 Rescan，再检查 Diagnostics 里的 shared write、widget snapshot 和 reload requested。")
+        }
+        if issues.contains(where: { $0.contains("decode") || $0.contains("schema") }) {
+            steps.append("删除损坏的共享快照后重新扫描，确认 App 与 Widget 使用同一份 schema。")
+        }
+
+        if steps.isEmpty {
+            steps.append("根据 Diagnostics 的失败项重新执行一次 Rescan，并核对扫描目录、App Group 和共享快照文件路径。")
+        }
+
+        return steps
     }
 }

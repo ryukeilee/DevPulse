@@ -244,8 +244,8 @@ struct SettingsView: View {
             }
             .font(.caption)
 
-            Text("The widget updates automatically after each scan. "
-                 + "Refresh frequency is managed by macOS.")
+            Text("The widget only requests a refresh after you run Rescan. "
+                 + "Final refresh timing is still managed by macOS.")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .padding(.top, 4)
@@ -283,7 +283,9 @@ struct SettingsView: View {
                 .cornerRadius(8)
             }
 
-            diagnosticsStatusGrid
+            diagnosticsOverviewCard
+            diagnosticsSections
+            diagnosticsScanRootsSection
 
             if let widgetSnapshot = scheduler.diagnostics.widgetSnapshot {
                 VStack(alignment: .leading, spacing: 6) {
@@ -301,6 +303,21 @@ struct SettingsView: View {
                             .foregroundColor(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
+                    }
+                }
+                .padding(10)
+                .background(Color.secondary.opacity(0.06))
+                .cornerRadius(8)
+            }
+
+            if !scheduler.diagnostics.nextSteps.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Next steps")
+                        .font(.caption.weight(.semibold))
+                    ForEach(scheduler.diagnostics.nextSteps, id: \.self) { step in
+                        Label(step, systemImage: "arrow.right.circle")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
                 }
                 .padding(10)
@@ -366,6 +383,41 @@ struct SettingsView: View {
             .background(Color.secondary.opacity(0.06))
             .cornerRadius(8)
         }
+    }
+
+    private var diagnosticsScanRootsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Scan roots")
+                .font(.caption.weight(.semibold))
+
+            if scheduler.diagnostics.scanRoots.isEmpty {
+                Text("No accessible scan roots.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                ForEach(scheduler.diagnostics.scanRoots, id: \.self) { path in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "folder")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(path)
+                            .font(.caption)
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+                }
+            }
+
+            ForEach(scheduler.diagnostics.scanRootWarnings, id: \.self) { warning in
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundColor(.red)
+            }
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.06))
+        .cornerRadius(8)
     }
 
     private var diagnosticsStatusGrid: some View {
@@ -445,8 +497,26 @@ struct SettingsView: View {
             diagnosticsRow(
                 title: "Validation",
                 value: scheduler.diagnostics.validationIssues.isEmpty ? "Pass" : "Mismatch",
-                detail: scheduler.diagnostics.validationIssues.isEmpty ? "Main app, shared data, and widget snapshot match." : scheduler.diagnostics.validationIssues.joined(separator: " "),
+                detail: scheduler.diagnostics.validationIssues.isEmpty ? "Main app, shared data, and widget-readable snapshot match." : scheduler.diagnostics.validationIssues.joined(separator: " "),
                 isError: !scheduler.diagnostics.validationIssues.isEmpty
+            )
+            diagnosticsRow(
+                title: "Refresh trust",
+                value: scheduler.refreshTrustAssessment.title,
+                detail: scheduler.refreshTrustAssessment.basis,
+                isError: scheduler.refreshTrustAssessment.isError
+            )
+            diagnosticsRow(
+                title: "Widget trust",
+                value: widgetTrustAssessment.title,
+                detail: widgetTrustAssessment.basis,
+                isError: widgetTrustAssessment.isError
+            )
+            diagnosticsRow(
+                title: "Last refresh",
+                value: scheduler.lastScanAt.map { snapshotTimeLabel($0) } ?? "Unavailable",
+                detail: scheduler.lastScanAt.map { formattedDate($0) } ?? "No successful refresh recorded yet.",
+                isError: scheduler.lastScanAt == nil
             )
             diagnosticsRow(
                 title: "Generated at",
@@ -466,6 +536,38 @@ struct SettingsView: View {
                 detail: scheduler.diagnostics.lastReloadRequestedAt.map { formattedDate($0) } ?? "Widget reload has not been requested yet.",
                 isError: scheduler.diagnostics.lastReloadRequestedAt == nil
             )
+        }
+    }
+
+    private var diagnosticsOverview: DiagnosticsOverviewModel {
+        DiagnosticsOverviewBuilder.build(
+            diagnostics: scheduler.diagnostics,
+            refreshTrust: scheduler.refreshTrustAssessment,
+            widgetTrust: widgetTrustAssessment,
+            repositories: scheduler.lastResult.repositories
+        )
+    }
+
+    private var diagnosticsOverviewCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(diagnosticsOverview.headline, systemImage: severitySymbol(diagnosticsOverview.severity))
+                .font(.caption.weight(.semibold))
+                .foregroundColor(severityColor(diagnosticsOverview.severity))
+            Text(diagnosticsOverview.summary)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(3)
+        }
+        .padding(10)
+        .background(severityBackground(diagnosticsOverview.severity))
+        .cornerRadius(8)
+    }
+
+    private var diagnosticsSections: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(diagnosticsOverview.sections) { section in
+                diagnosticsSectionCard(section)
+            }
         }
     }
 
@@ -529,6 +631,15 @@ struct SettingsView: View {
         return "Waiting for the widget-readable snapshot after launch."
     }
 
+    private var widgetTrustAssessment: SnapshotTrustAssessment {
+        RefreshStatusFormatter.snapshotAssessment(
+            generatedAt: scheduler.diagnostics.widgetSnapshot?.generatedAt,
+            writtenAt: scheduler.diagnostics.widgetSnapshot?.writtenAt,
+            readError: scheduler.diagnostics.widgetSnapshotReadError,
+            missingReason: "Widget 侧还没有拿到可用快照时间。"
+        )
+    }
+
     private func diagnosticsRow(title: String, value: String, detail: String, isError: Bool) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text(title)
@@ -547,8 +658,93 @@ struct SettingsView: View {
         }
     }
 
+    private func diagnosticsSectionCard(_ section: DiagnosticsSectionModel) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Label(section.title, systemImage: severitySymbol(section.severity))
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(severityColor(section.severity))
+                Spacer()
+                Text(section.summary)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.trailing)
+            }
+
+            ForEach(section.items) { item in
+                diagnosticsInsightRow(item)
+            }
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.06))
+        .cornerRadius(8)
+    }
+
+    private func diagnosticsInsightRow(_ item: DiagnosticsStatusItem) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(item.title)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(width: 110, alignment: .leading)
+                Text(item.value)
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(severityColor(item.severity))
+            }
+
+            Text(item.detail)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .lineLimit(3)
+
+            if let nextStep = item.nextStep {
+                Label(nextStep, systemImage: "arrow.right.circle")
+                    .font(.caption2)
+                    .foregroundColor(severityColor(item.severity))
+                    .lineLimit(3)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func severityColor(_ severity: DiagnosticsSeverity) -> Color {
+        switch severity {
+        case .normal:
+            return .green
+        case .warning:
+            return .orange
+        case .error:
+            return .red
+        }
+    }
+
+    private func severityBackground(_ severity: DiagnosticsSeverity) -> Color {
+        switch severity {
+        case .normal:
+            return Color.green.opacity(0.08)
+        case .warning:
+            return Color.orange.opacity(0.08)
+        case .error:
+            return Color.red.opacity(0.08)
+        }
+    }
+
+    private func severitySymbol(_ severity: DiagnosticsSeverity) -> String {
+        switch severity {
+        case .normal:
+            return "checkmark.circle.fill"
+        case .warning:
+            return "exclamationmark.circle.fill"
+        case .error:
+            return "xmark.octagon.fill"
+        }
+    }
+
     private func diagnosticsRepositoryRow(_ repo: RepositorySnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let receipt = repo.commitReadiness.reviewReceipt
+
+        return VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(repo.name)
                     .font(.caption.weight(.semibold))
@@ -564,18 +760,30 @@ struct SettingsView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
 
-            Text("modified \(repo.modifiedFileCount) · added \(repo.addedFileCount) · deleted \(repo.deletedFileCount) · untracked \(repo.untrackedFileCount) · total \(repo.changedFileCount)")
+            Text("staged \(repo.stagedFileCount ?? 0) · unstaged \(repo.unstagedFileCount ?? (repo.modifiedFileCount + repo.addedFileCount + repo.deletedFileCount)) · untracked \(repo.untrackedFileCount) · total \(repo.changedFileCount)")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
+            Text("readiness \(repo.commitReadiness.shortLabel) · \(receipt.summary)")
+                .font(.caption2)
+                .foregroundColor(repo.commitReadiness.level == .unknown ? .red : .secondary)
+
+            Text("review receipt · \(receipt.nextStep)")
+                .font(.caption2)
+                .foregroundColor(repo.commitReadiness.level == .unknown ? .red : .secondary)
+
+            Text(receipt.basisSummary)
                 .font(.caption2)
                 .foregroundColor(.secondary)
 
             HStack(spacing: 8) {
                 Text("status \(repo.status.rawValue)")
                 if let lastChangedAt = repo.lastChangedAt {
-                    Text("changed \(snapshotTimeLabel(DateFormatting.date(from: lastChangedAt)))")
+                    Text("last commit \(snapshotTimeLabel(DateFormatting.date(from: lastChangedAt)))")
                 }
             }
             .font(.caption2)
-            .foregroundColor(repo.status == .error ? .red : .secondary)
+            .foregroundColor(repo.commitReadiness.level == .unknown ? .red : .secondary)
 
             Text("scan \(snapshotTimeLabel(DateFormatting.date(from: repo.lastScannedAt)))")
                 .font(.caption2)

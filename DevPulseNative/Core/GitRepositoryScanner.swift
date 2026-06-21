@@ -129,13 +129,6 @@ enum GitRepositoryScanner {
             repositories: sorted
         )
 
-        let elapsed = Date().timeIntervalSince(startTime)
-        print("[DevPulse] Scan completed in \(String(format: "%.2f", elapsed))s: "
-              + "\(sorted.count) repos, \(changedCount) changed, \(errorCount) errors")
-        for warning in warnings {
-            print("[DevPulse] ⚠ \(warning)")
-        }
-
         return (result, warnings)
     }
 
@@ -260,6 +253,7 @@ enum GitRepositoryScanner {
                 deletedFileCount: 0,
                 untrackedFileCount: 0,
                 stagedFileCount: 0,
+                unstagedFileCount: 0,
                 conflictedFileCount: 0,
                 aheadCount: 0,
                 changedFileCount: 0,
@@ -292,6 +286,7 @@ enum GitRepositoryScanner {
                         deletedFileCount: 0,
                         untrackedFileCount: 0,
                         stagedFileCount: 0,
+                        unstagedFileCount: 0,
                         conflictedFileCount: 0,
                         aheadCount: 0,
                         changedFileCount: 0,
@@ -363,6 +358,7 @@ enum GitRepositoryScanner {
                 deletedFileCount: 0,
                 untrackedFileCount: 0,
                 stagedFileCount: 0,
+                unstagedFileCount: 0,
                 conflictedFileCount: 0,
                 aheadCount: 0,
                 changedFileCount: 0,
@@ -404,13 +400,14 @@ enum GitRepositoryScanner {
             deletedFileCount: summary.deleted,
             untrackedFileCount: summary.untracked,
             stagedFileCount: summary.staged,
+            unstagedFileCount: summary.unstaged,
             conflictedFileCount: summary.conflicted,
             aheadCount: branchMetadata.aheadCount,
             changedFileCount: changedCount,
             changedFilesPreview: preview,
             risk: risk.level,
             lastScannedAt: DateFormatting.nowISO(),
-            lastChangedAt: status == .changed ? (lastCommitAt ?? DateFormatting.nowISO()) : lastCommitAt,
+            lastChangedAt: lastCommitAt,
             errorMessage: nil,
             isPinned: false
         )

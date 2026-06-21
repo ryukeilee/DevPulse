@@ -8,7 +8,6 @@ struct DevPulseApp: App {
 
     init() {
         let scheduler = ScanScheduler()
-        scheduler.startBackgroundScanning()
         _scheduler = StateObject(wrappedValue: scheduler)
     }
 

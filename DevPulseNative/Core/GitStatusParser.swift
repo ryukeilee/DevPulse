@@ -78,11 +78,15 @@ enum GitStatusParser {
         var deleted = 0
         var untracked = 0
         var staged = 0
+        var unstaged = 0
         var conflicted = 0
 
         for entry in entries {
             if entry.isStaged {
                 staged += 1
+            }
+            if entry.isUnstaged {
+                unstaged += 1
             }
             if entry.isConflicted {
                 conflicted += 1
@@ -108,6 +112,7 @@ enum GitStatusParser {
             deleted: deleted,
             untracked: untracked,
             staged: staged,
+            unstaged: unstaged,
             conflicted: conflicted
         )
     }
@@ -126,6 +131,17 @@ enum GitStatusParser {
 
         var isConflicted: Bool {
             statusCode.contains("U") || statusCode == "AA" || statusCode == "DD"
+        }
+
+        var isUnstaged: Bool {
+            if statusCode == "??" {
+                return false
+            }
+
+            let characters = Array(statusCode)
+            guard characters.indices.contains(1) else { return false }
+            let worktreeStatus = characters[1]
+            return worktreeStatus != " "
         }
 
         var category: StatusCategory {
@@ -156,6 +172,7 @@ enum GitStatusParser {
         let deleted: Int
         let untracked: Int
         let staged: Int
+        let unstaged: Int
         let conflicted: Int
 
         var total: Int {

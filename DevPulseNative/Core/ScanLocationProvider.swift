@@ -64,6 +64,12 @@ enum ScanLocationProvider {
         return userHome + String(expanded.dropFirst(containerHome.count))
     }
 
+    static func isLikelySandboxContainerPath(_ path: String) -> Bool {
+        let normalized = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.contains("/Library/Containers/")
+            || normalized.contains("/Containers/local.devpulse.app/")
+    }
+
     /// Return a set of unique absolute paths from mixed raw locations.
     static func expandAll(_ paths: [String]) -> [String] {
         Array(Set(paths.map(expandTilde))).sorted()
@@ -100,7 +106,7 @@ enum ScanLocationProvider {
     }
 
     private static func isContainerHome(_ path: String) -> Bool {
-        path.contains("/Library/Containers/")
+        isLikelySandboxContainerPath(path)
     }
 
     private static func legacyContainerHomePrefix() -> String {
