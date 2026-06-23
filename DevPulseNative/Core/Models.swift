@@ -361,6 +361,81 @@ enum WidgetPrioritySummaryBuilder {
     }
 }
 
+enum WidgetRepositoryPriorityBuilder {
+    static func build(from repositories: [RepositorySnapshot]) -> [ActivityTimelineItem] {
+        repositories
+            .map(ActivityTimelineItem.init(from:))
+            .sorted(by: sort(_:_:))
+    }
+
+    static func build(from snapshot: AppGroupData?) -> [ActivityTimelineItem] {
+        build(from: snapshot?.repositories ?? [])
+    }
+
+    private static func sort(_ lhs: ActivityTimelineItem,
+                             _ rhs: ActivityTimelineItem) -> Bool {
+        let lhsStatusPriority = statusPriority(lhs.status)
+        let rhsStatusPriority = statusPriority(rhs.status)
+        if lhsStatusPriority != rhsStatusPriority {
+            return lhsStatusPriority < rhsStatusPriority
+        }
+
+        let lhsReadinessPriority = readinessPriority(lhs.commitReadiness.level)
+        let rhsReadinessPriority = readinessPriority(rhs.commitReadiness.level)
+        if lhsReadinessPriority != rhsReadinessPriority {
+            return lhsReadinessPriority < rhsReadinessPriority
+        }
+
+        if let lhsDate = lhs.activityDate, let rhsDate = rhs.activityDate, lhsDate != rhsDate {
+            return lhsDate > rhsDate
+        }
+
+        if lhs.activityDate != nil {
+            return true
+        }
+
+        if rhs.activityDate != nil {
+            return false
+        }
+
+        if lhs.changedFileCount != rhs.changedFileCount {
+            return lhs.changedFileCount > rhs.changedFileCount
+        }
+
+        if lhs.risk != rhs.risk {
+            return lhs.risk > rhs.risk
+        }
+
+        return lhs.repoName.localizedStandardCompare(rhs.repoName) == .orderedAscending
+    }
+
+    private static func statusPriority(_ status: RepositoryStatus) -> Int {
+        switch status {
+        case .changed:
+            return 0
+        case .error:
+            return 1
+        case .clean:
+            return 2
+        }
+    }
+
+    private static func readinessPriority(_ level: CommitReadinessLevel) -> Int {
+        switch level {
+        case .dirty:
+            return 0
+        case .unknown:
+            return 1
+        case .review:
+            return 2
+        case .ready:
+            return 3
+        case .idle:
+            return 4
+        }
+    }
+}
+
 // MARK: - Scan summary
 
 struct ScanSummary: Codable, Equatable {

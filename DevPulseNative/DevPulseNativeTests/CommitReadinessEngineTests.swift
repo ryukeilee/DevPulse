@@ -160,6 +160,50 @@ struct CommitReadinessEngineTests {
         #expect(summary.message == "状态读取失败，先看 Diagnostics")
     }
 
+    @Test func widgetRepositoryPriorityBuilderPrefersDirtyRepos() {
+        let repos = [
+            snapshot(id: "clean", name: "clean", modified: 0, status: .clean, lastChangedAt: "2026-06-20T10:00:00Z"),
+            snapshot(id: "dirty", name: "dirty", modified: 1, status: .changed, lastChangedAt: "2026-06-18T10:00:00Z")
+        ]
+
+        let items = WidgetRepositoryPriorityBuilder.build(from: repos)
+
+        #expect(items.map(\.repoName) == ["dirty", "clean"])
+    }
+
+    @Test func widgetRepositoryPriorityBuilderUsesReadinessAndRiskBeforeRecency() {
+        let repos = [
+            snapshot(id: "review", name: "review", modified: 1, risk: .low, lastChangedAt: "2026-06-22T10:00:00Z"),
+            snapshot(id: "dirty", name: "dirty", modified: 5, risk: .high, lastChangedAt: "2026-06-21T10:00:00Z")
+        ]
+
+        let items = WidgetRepositoryPriorityBuilder.build(from: repos)
+
+        #expect(items.map(\.repoName) == ["dirty", "review"])
+    }
+
+    @Test func widgetRepositoryPriorityBuilderUsesRecentActivityBeforeRawRisk() {
+        let repos = [
+            snapshot(id: "older-high-risk", name: "older-high-risk", modified: 1, risk: .high, lastChangedAt: "2026-06-20T10:00:00Z"),
+            snapshot(id: "newer-low-risk", name: "newer-low-risk", modified: 1, risk: .low, lastChangedAt: "2026-06-22T10:00:00Z")
+        ]
+
+        let items = WidgetRepositoryPriorityBuilder.build(from: repos)
+
+        #expect(items.map(\.repoName) == ["newer-low-risk", "older-high-risk"])
+    }
+
+    @Test func widgetRepositoryPriorityBuilderUsesRecentActivityAsStableTieBreaker() {
+        let repos = [
+            snapshot(id: "older", name: "older", modified: 1, risk: .low, lastChangedAt: "2026-06-20T10:00:00Z"),
+            snapshot(id: "newer", name: "newer", modified: 1, risk: .low, lastChangedAt: "2026-06-22T10:00:00Z")
+        ]
+
+        let items = WidgetRepositoryPriorityBuilder.build(from: repos)
+
+        #expect(items.map(\.repoName) == ["newer", "older"])
+    }
+
     @Test func diagnosticsOverviewShowsHealthySharedChain() {
         var diagnostics = DiagnosticsSnapshot()
         diagnostics.appGroupAvailable = true
@@ -557,6 +601,8 @@ struct CommitReadinessEngineTests {
     }
 
     private func snapshot(
+        id: String = "repo-1",
+        name: String = "repo-1",
         modified: Int = 0,
         added: Int = 0,
         deleted: Int = 0,
@@ -568,12 +614,14 @@ struct CommitReadinessEngineTests {
         risk: RiskLevel = .low,
         status: RepositoryStatus = .changed,
         branch: String = "main",
+        lastScannedAt: String = "2026-06-19T00:00:00Z",
+        lastChangedAt: String? = nil,
         errorMessage: String? = nil
     ) -> RepositorySnapshot {
         RepositorySnapshot(
-            id: "repo-1",
-            name: "repo-1",
-            path: "/tmp/repo-1",
+            id: id,
+            name: name,
+            path: "/tmp/\(name)",
             branch: branch,
             status: status,
             modifiedFileCount: modified,
@@ -587,8 +635,8 @@ struct CommitReadinessEngineTests {
             changedFileCount: modified + added + deleted + untracked,
             changedFilesPreview: [],
             risk: risk,
-            lastScannedAt: "2026-06-19T00:00:00Z",
-            lastChangedAt: nil,
+            lastScannedAt: lastScannedAt,
+            lastChangedAt: lastChangedAt,
             errorMessage: errorMessage,
             isPinned: false
         )

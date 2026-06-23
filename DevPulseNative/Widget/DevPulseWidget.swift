@@ -177,6 +177,8 @@ struct DevPulseWidgetEntryView: View {
                 SmallGlanceWidgetView(entry: entry)
             case .systemMedium:
                 MediumGlanceWidgetView(entry: entry)
+            case .systemLarge:
+                LargeGlanceWidgetView(entry: entry)
             default:
                 SmallGlanceWidgetView(entry: entry)
             }
@@ -207,14 +209,133 @@ private struct WidgetChromeHeader: View {
     }
 }
 
+private struct WidgetRepositoryBoard: View {
+    let items: [ActivityTimelineItem]
+    let limit: Int
+    var prominentFirst: Bool = false
+    var showHintOnFirst: Bool = false
+
+    var body: some View {
+        let visibleItems = Array(items.prefix(limit))
+
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(visibleItems.enumerated()), id: \.element.id) { index, item in
+                WidgetRepositoryRow(
+                    item: item,
+                    prominent: prominentFirst && index == 0,
+                    showHint: showHintOnFirst && index == 0
+                )
+
+                if index < visibleItems.count - 1 {
+                    Divider()
+                        .opacity(0.35)
+                }
+            }
+        }
+    }
+}
+
+private struct WidgetRepositoryRow: View {
+    let item: ActivityTimelineItem
+    var prominent: Bool = false
+    var showHint: Bool = false
+
+    private var readiness: CommitReadinessAssessment {
+        item.commitReadiness
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: prominent ? 6 : 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(item.repoName)
+                    .font(prominent ? .system(size: 16, weight: .semibold) : .system(size: 14, weight: .semibold))
+                    .lineLimit(1)
+
+                Spacer(minLength: 6)
+
+                Text(item.widgetChangeCountLabel)
+                    .font(prominent ? .caption.weight(.semibold) : .caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            HStack(spacing: 6) {
+                WidgetRepositoryStatusBadge(status: item.status)
+
+                WidgetReadinessBadge(level: readiness.level, size: prominent ? .large : .compact)
+
+                Spacer(minLength: 4)
+
+                Text(item.activityLabel)
+                    .font(prominent ? .caption.weight(.medium) : .caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            if showHint {
+                Text(readiness.widgetShortHint)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(prominent ? 2 : 1)
+            }
+        }
+    }
+}
+
+private struct WidgetRepositoryStatusBadge: View {
+    let status: RepositoryStatus
+
+    var body: some View {
+        Text(label)
+            .font(.caption2.weight(.semibold))
+            .lineLimit(1)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(
+                Capsule().fill(tint.opacity(backgroundOpacity))
+            )
+            .foregroundStyle(tint)
+    }
+
+    private var label: String {
+        switch status {
+        case .clean:
+            return "Clean"
+        case .changed:
+            return "Dirty"
+        case .error:
+            return "Error"
+        }
+    }
+
+    private var tint: Color {
+        switch status {
+        case .clean:
+            return .secondary
+        case .changed:
+            return .orange
+        case .error:
+            return .red
+        }
+    }
+
+    private var backgroundOpacity: Double {
+        switch status {
+        case .clean:
+            return 0.1
+        case .changed:
+            return 0.14
+        case .error:
+            return 0.16
+        }
+    }
+}
+
 private struct SmallGlanceWidgetView: View {
     let entry: WidgetEntry
 
-    private var summary: WidgetPrioritySummary {
-        WidgetPrioritySummaryBuilder.build(
-            feed: entry.feed,
-            trustAssessment: entry.trustAssessment
-        )
+    private var prioritizedItems: [ActivityTimelineItem] {
+        WidgetRepositoryPriorityBuilder.build(from: entry.snapshot)
     }
 
     var body: some View {
@@ -280,33 +401,19 @@ private struct SmallGlanceWidgetView: View {
 
     @ViewBuilder
     private var readyContent: some View {
-        prioritySummary(summary, largeBadge: true, showAuxiliary: false)
-    }
-
-    @ViewBuilder
-    private func prioritySummary(_ summary: WidgetPrioritySummary,
-                                 largeBadge: Bool,
-                                 showAuxiliary: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let readinessLevel = summary.readinessLevel {
-                WidgetReadinessBadge(level: readinessLevel, size: largeBadge ? .large : .compact)
-            }
-
-            Text(summary.title)
-                .font(.system(size: 16, weight: .semibold))
-                .lineLimit(1)
-
-            Text(summary.message)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-
-            if showAuxiliary, let auxiliary = summary.auxiliary {
-                Text(auxiliary)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
+        if prioritizedItems.isEmpty {
+            shortState(
+                title: "没有找到仓库",
+                detail: "检查扫描目录后重新刷新",
+                icon: "folder"
+            )
+        } else {
+            WidgetRepositoryBoard(
+                items: prioritizedItems,
+                limit: 1,
+                prominentFirst: true,
+                showHintOnFirst: true
+            )
         }
     }
 
@@ -361,11 +468,8 @@ private struct SmallGlanceWidgetView: View {
 private struct MediumGlanceWidgetView: View {
     let entry: WidgetEntry
 
-    private var summary: WidgetPrioritySummary {
-        WidgetPrioritySummaryBuilder.build(
-            feed: entry.feed,
-            trustAssessment: entry.trustAssessment
-        )
+    private var prioritizedItems: [ActivityTimelineItem] {
+        WidgetRepositoryPriorityBuilder.build(from: entry.snapshot)
     }
 
     var body: some View {
@@ -456,33 +560,14 @@ private struct MediumGlanceWidgetView: View {
 
     @ViewBuilder
     private var readyContent: some View {
-        prioritySummary(summary, largeBadge: false, showAuxiliary: true)
-    }
-
-    @ViewBuilder
-    private func prioritySummary(_ summary: WidgetPrioritySummary,
-                                 largeBadge: Bool,
-                                 showAuxiliary: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            if let readinessLevel = summary.readinessLevel {
-                WidgetReadinessBadge(level: readinessLevel, size: largeBadge ? .large : .compact)
-            }
-
-            Text(summary.title)
-                .font(.system(size: 15, weight: .semibold))
-                .lineLimit(1)
-
-            Text(summary.message)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-
-            if showAuxiliary, let auxiliary = summary.auxiliary {
-                Text(auxiliary)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
+        if prioritizedItems.isEmpty {
+            shortState(
+                title: "没有找到仓库",
+                detail: "检查扫描目录后重新刷新",
+                icon: "folder"
+            )
+        } else {
+            WidgetRepositoryBoard(items: prioritizedItems, limit: 2)
         }
     }
 
@@ -513,6 +598,154 @@ private struct MediumGlanceWidgetView: View {
                     .font(.caption.weight(.semibold))
                 Text(title)
                     .font(.system(size: 15, weight: .semibold))
+                    .lineLimit(1)
+            }
+
+            if let detail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var footer: some View {
+        Text(entry.footerText)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+    }
+}
+
+private struct LargeGlanceWidgetView: View {
+    let entry: WidgetEntry
+
+    private var prioritizedItems: [ActivityTimelineItem] {
+        WidgetRepositoryPriorityBuilder.build(from: entry.snapshot)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            WidgetChromeHeader(trailingText: headerTrailingText)
+
+            content
+
+            Spacer(minLength: 0)
+
+            footer
+        }
+        .padding(12)
+    }
+
+    private var headerTrailingText: String? {
+        guard
+            case .ready = entry.loadState,
+            entry.trustAssessment?.state == .fresh,
+            let summary = entry.snapshot?.scanSummary
+        else {
+            return nil
+        }
+
+        if summary.totalRepositories == 0 {
+            return "没有仓库"
+        }
+
+        let activeRepos = summary.changedRepositories + summary.errorRepositories
+        if activeRepos == 0 {
+            return "全部干净"
+        }
+
+        return "\(activeRepos) 个待看仓库"
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch entry.loadState {
+        case .placeholder:
+            placeholderRows
+        case .noSnapshot:
+            shortState(
+                title: "尚未生成数据",
+                detail: "打开 DevPulse 后执行一次刷新",
+                icon: "arrow.triangle.2.circlepath"
+            )
+        case .unavailable:
+            shortState(
+                title: "共享数据异常",
+                detail: "打开 DevPulse 查看 Diagnostics",
+                icon: "exclamationmark.triangle.fill"
+            )
+        case .ready:
+            guardedReadyContent
+        }
+    }
+
+    @ViewBuilder
+    private var guardedReadyContent: some View {
+        switch entry.trustAssessment?.state {
+        case .fresh:
+            readyContent
+        case .stale, .expired:
+            shortState(
+                title: "数据可能已过期",
+                detail: "打开 DevPulse 刷新后再判断是否适合提交",
+                icon: "clock.badge.exclamationmark"
+            )
+        case .unknown, .failed:
+            shortState(
+                title: "状态未知",
+                detail: "打开 DevPulse 查看 Diagnostics",
+                icon: "questionmark.circle"
+            )
+        case .none:
+            shortState(
+                title: "状态未知",
+                detail: "打开 DevPulse 查看 Diagnostics",
+                icon: "questionmark.circle"
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var readyContent: some View {
+        if prioritizedItems.isEmpty {
+            shortState(
+                title: "没有找到仓库",
+                detail: "检查扫描目录后重新刷新",
+                icon: "folder"
+            )
+        } else {
+            WidgetRepositoryBoard(items: prioritizedItems, limit: 4)
+        }
+    }
+
+    @ViewBuilder
+    private var placeholderRows: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(0..<4, id: \.self) { _ in
+                VStack(alignment: .leading, spacing: 6) {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.secondary.opacity(0.18))
+                        .frame(width: 170, height: 12)
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.secondary.opacity(0.12))
+                        .frame(height: 10)
+                }
+            }
+        }
+        .redacted(reason: .placeholder)
+    }
+
+    @ViewBuilder
+    private func shortState(title: String, detail: String?, icon: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.caption.weight(.semibold))
+                Text(title)
+                    .font(.system(size: 16, weight: .semibold))
                     .lineLimit(1)
             }
 
@@ -655,34 +888,16 @@ private extension WidgetEntry {
 }
 
 private extension ActivityTimelineItem {
-    var fileCountLabel: String {
-        if commitReadiness.level == .unknown {
-            return "状态异常"
-        }
-        return changedFileCount == 1 ? "1 处改动" : "\(changedFileCount) 处改动"
+    var widgetChangeCountLabel: String {
+        changedFileCount == 1 ? "1 处改动" : "\(changedFileCount) 处改动"
     }
 
-    var changeBreakdownLabel: String {
-        if commitReadiness.level == .unknown {
-            return commitReadiness.detail
+    var activityLabel: String {
+        if let lastChangedAt {
+            return DateFormatting.relativeTime(from: lastChangedAt)
         }
 
-        let parts = [
-            modifiedFileCount > 0 ? "已修改 \(modifiedFileCount)" : nil,
-            addedFileCount > 0 ? "已新增 \(addedFileCount)" : nil,
-            deletedFileCount > 0 ? "已删除 \(deletedFileCount)" : nil,
-            untrackedFileCount > 0 ? "未跟踪 \(untrackedFileCount)" : nil
-        ].compactMap { $0 }
-
-        guard !parts.isEmpty else {
-            return "没有本地改动"
-        }
-
-        if parts.count <= 2 {
-            return parts.joined(separator: " · ")
-        }
-
-        return changedFileCount == 1 ? "1 处改动" : "\(changedFileCount) 处改动"
+        return DateFormatting.relativeTime(from: lastScannedAt)
     }
 }
 
@@ -696,6 +911,6 @@ struct DevPulseWidget: Widget {
         }
         .configurationDisplayName("DevPulse")
         .description("一眼查看本地 Git 仓库状态。")
-        .supportedFamilies([.systemSmall, .systemMedium])
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
     }
 }
