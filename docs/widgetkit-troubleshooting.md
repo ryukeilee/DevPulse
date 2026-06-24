@@ -65,17 +65,25 @@ If the app still reports App Group unavailable:
 3. Clean build.
 4. Delete the old app copy and rebuild from scratch.
 
-## If the widget shows "snapshot missing" or "decode failed"
+## If the widget shows "尚未生成快照", "没有找到仓库", "数据可能已过期", or "共享快照损坏"
 
-This usually means the shared `repositories.json` file is missing, stale, or incompatible with the current schema.
+This usually means the shared `repositories.json` file is missing, empty, stale, unreadable, or incompatible with the current schema.
 
 Useful checks:
 
 - open the app
-- click `Rescan Now`
+- click `Refresh Data` or `Rescan Now`
 - open the Settings tab
 - inspect the Diagnostics section
-- confirm `Snapshot exists`, `Snapshot readable`, and `Snapshot decodable`
+- confirm `Snapshot exists`, `Snapshot readable`, `Snapshot decodable`, `Generated at`, `Written at`, and `Reload requested`
+
+Interpret the widget states this way:
+
+- `尚未生成快照`: the shared snapshot file does not exist yet; trigger `Refresh Data` or `Rescan Now`
+- `没有找到仓库`: the snapshot decoded, but it currently contains zero repositories; check scan roots
+- `数据可能已过期`: the widget decoded a snapshot, but its `generatedAt` / `writtenAt` is outside the trusted freshness window
+- `共享快照损坏`: the file exists but failed to decode; rewrite it from the app
+- `快照版本不匹配`: the app and widget are not reading the same schema revision; rebuild both, then rewrite the snapshot
 
 If decoding fails:
 
@@ -114,6 +122,8 @@ In the Settings tab, the Diagnostics section should eventually show:
 - `Snapshot readable: Yes`
 - `Snapshot writable: Yes`
 - `Snapshot decodable: Yes`
+- a recent `Generated at` / `Written at`
+- a recent `Reload requested`
 - matching shared read/write/widget snapshot state
 
 If those fields disagree, the app, shared snapshot, and widget are not all looking at the same state yet.

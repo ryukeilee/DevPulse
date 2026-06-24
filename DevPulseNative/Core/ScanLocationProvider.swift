@@ -75,6 +75,28 @@ enum ScanLocationProvider {
         Array(Set(paths.map(expandTilde))).sorted()
     }
 
+    /// Accessible built-in locations used for zero-config discovery.
+    static func defaultDiscoveryRoots(from rawPaths: [String] = builtInLocations) -> [String] {
+        var seen = Set<String>()
+        var roots: [String] = []
+
+        for rawPath in rawPaths {
+            let expanded = expandTilde(rawPath)
+            guard seen.insert(expanded).inserted else { continue }
+
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir),
+                  isDir.boolValue,
+                  (try? FileManager.default.contentsOfDirectory(atPath: expanded)) != nil else {
+                continue
+            }
+
+            roots.append(expanded)
+        }
+
+        return roots
+    }
+
     /// Built-in locations expanded to absolute paths.
     static var builtInAbsolute: [String] {
         expandAll(builtInLocations)

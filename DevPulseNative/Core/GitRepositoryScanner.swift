@@ -63,22 +63,59 @@ private actor SlowRepoTracker {
     }
 }
 
+private actor RepositoryDiscoveryCache {
+    struct Entry {
+        let paths: [String]
+        let expiresAt: Date
+    }
+
+    private var entries: [String: Entry] = [:]
+
+    func cachedPaths(for key: String, now: Date = Date()) -> [String]? {
+        if let entry = entries[key], entry.expiresAt > now {
+            return entry.paths
+        }
+
+        entries.removeValue(forKey: key)
+        return nil
+    }
+
+    func store(paths: [String], for key: String, ttl: TimeInterval, now: Date = Date()) {
+        entries[key] = Entry(
+            paths: paths,
+            expiresAt: now.addingTimeInterval(ttl)
+        )
+    }
+
+    func removeValue(for key: String) {
+        entries.removeValue(forKey: key)
+    }
+}
+
 // MARK: - Scanner
 
 enum GitRepositoryScanner {
     private static let slowTracker = SlowRepoTracker()
+    private static let discoveryCache = RepositoryDiscoveryCache()
+    private static let discoveryCacheTTL: TimeInterval = 10 * 60
 
     // MARK: - Public API
 
     /// Run a full scan with all low-power safeguards.
     /// Returns the scan result and an array of warning strings.
     static func scan(config: ScanConfig = .default,
-                     scanRoots: [String]? = nil) async -> (data: AppGroupData, warnings: [String]) {
+                     scanRoots: [String]? = nil,
+                     forceRepositoryDiscovery: Bool = false) async -> (data: AppGroupData, warnings: [String]) {
         let startTime = Date()
         var warnings: [String] = []
 
         // Phase 1: discover all git repositories
-        let discoveredPaths = discoverRepositories(config: config, scanRoots: scanRoots, warnings: &warnings)
+        let discoveredPaths = await discoverRepositories(
+            config: config,
+            scanRoots: scanRoots,
+            forceRefresh: forceRepositoryDiscovery,
+            warnings: &warnings
+        )
         var pathsToScan = discoveredPaths
 
         // Throttle: if >30 repos, only scan changed/active ones
@@ -136,13 +173,20 @@ enum GitRepositoryScanner {
 
     private static func discoverRepositories(config: ScanConfig,
                                              scanRoots: [String]?,
-                                             warnings: inout [String]) -> [String] {
+                                             forceRefresh: Bool,
+                                             warnings: inout [String]) async -> [String] {
         var discovered = Set<String>()
-
         let allPaths = scanRoots ?? Array(config.enabledBuiltInPaths) + config.customPaths
-        for rawPath in allPaths {
-            let root = ScanLocationProvider.expandTilde(rawPath)
+        let normalizedRoots = allPaths.map(ScanLocationProvider.expandTilde)
+        let cacheKey = discoveryCacheKey(for: normalizedRoots)
 
+        if forceRefresh {
+            await discoveryCache.removeValue(for: cacheKey)
+        } else if let cached = await discoveryCache.cachedPaths(for: cacheKey) {
+            return cached
+        }
+
+        for root in normalizedRoots {
             var isDir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: root, isDirectory: &isDir),
                   isDir.boolValue else {
@@ -161,7 +205,9 @@ enum GitRepositoryScanner {
             }
         }
 
-        return Array(discovered).sorted()
+        let sorted = Array(discovered).sorted()
+        await discoveryCache.store(paths: sorted, for: cacheKey, ttl: discoveryCacheTTL)
+        return sorted
     }
 
     private static func walkDirectory(_ directory: String,
@@ -181,19 +227,23 @@ enum GitRepositoryScanner {
             return
         }
 
-        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: directory) else {
+        let directoryURL = URL(fileURLWithPath: directory)
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsPackageDescendants]
+        ) else {
             return
         }
 
-        for entry in entries {
-            let fullPath = (directory as NSString).appendingPathComponent(entry)
-            let entryName = (fullPath as NSString).lastPathComponent
+        for entryURL in entries {
+            let fullPath = entryURL.path
+            let entryName = entryURL.lastPathComponent
 
             guard !ExcludedDirectoryRules.isExcluded(dirName: entryName) else { continue }
 
-            var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: fullPath, isDirectory: &isDir),
-                  isDir.boolValue else { continue }
+            let isDirectory = (try? entryURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            guard isDirectory else { continue }
 
             walkDirectory(fullPath,
                           config: config,
@@ -420,5 +470,9 @@ enum GitRepositoryScanner {
         hasher.combine(input)
         let hashValue = hasher.finalize()
         return String(format: "%08x", hashValue)
+    }
+
+    private static func discoveryCacheKey(for roots: [String]) -> String {
+        roots.sorted().joined(separator: "\n")
     }
 }

@@ -11,18 +11,18 @@ struct ActivityTimelineView: View {
             switch feed.state {
             case .neverScanned:
                 emptyState(
-                    icon: "hourglass",
-                    title: "No scan yet",
-                    detail: "Press Rescan Now to build your first activity timeline.",
-                    actionTitle: "Rescan Now",
+                    icon: "magnifyingglass",
+                    title: "尚未开始扫描",
+                    detail: "点击“立即刷新”，DevPulse 会先扫描默认目录并尝试发现本机 Git 仓库。",
+                    actionTitle: "立即刷新",
                     action: onRescan
                 )
             case .noRepositories:
                 emptyState(
                     icon: "tray",
-                    title: "No repositories found",
-                    detail: "Check scan roots in Settings, then run Rescan Now.",
-                    actionTitle: "Rescan Now",
+                    title: "未发现 Git 仓库",
+                    detail: "检查 Settings 里的扫描目录；如果默认目录里没有仓库，可手动添加其他目录后重新刷新。",
+                    actionTitle: "立即刷新",
                     action: onRescan
                 )
             case .allClean:
@@ -81,8 +81,8 @@ struct ActivityTimelineView: View {
             if feed.items.isEmpty {
                 emptyState(
                     icon: "arrow.triangle.2.circlepath",
-                    title: "Timeline unavailable",
-                    detail: "Open DevPulse to refresh the current snapshot.",
+                    title: "时间线暂不可用",
+                    detail: "打开 DevPulse 执行一次刷新，重建当前快照。",
                     actionTitle: nil,
                     action: nil
                 )

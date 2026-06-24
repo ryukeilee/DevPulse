@@ -37,6 +37,7 @@
 		E7FC26D0368998B9F817F8A3 /* ScanStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 317BDD24648E8023D33489F0 /* ScanStatusView.swift */; };
 		E8D49150B8C2B720B4AE3490 /* RepositoryListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5372E9A7A4D214017A6A3E05 /* RepositoryListView.swift */; };
 		E9D54589ABB2B3D1F51E2AD8 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 6C0803CED3ED0B599315D845 /* Assets.xcassets */; };
+		F3835F2463A794860CDCA8BF /* RepositoryDiscoveryExperienceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 087151EDA65E84F82D33C331 /* RepositoryDiscoveryExperienceTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -73,6 +74,7 @@
 /* Begin PBXFileReference section */
 		03EF463934B29F3AABA08BFA /* DevPulseTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DevPulseTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		048FC2CF2173C1D892EC77ED /* CommitReadinessEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommitReadinessEngineTests.swift; sourceTree = "<group>"; };
+		087151EDA65E84F82D33C331 /* RepositoryDiscoveryExperienceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryDiscoveryExperienceTests.swift; sourceTree = "<group>"; };
 		0A2CBE8389817E81B7EA977B /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		193D9DD3EE1AFEEAD2F6BD9B /* DevPulseWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevPulseWidget.swift; sourceTree = "<group>"; };
 		1C7D3FB592624A4168700A13 /* DateFormatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DateFormatting.swift; sourceTree = "<group>"; };
@@ -194,6 +196,7 @@
 			children = (
 				048FC2CF2173C1D892EC77ED /* CommitReadinessEngineTests.swift */,
 				6905C32690CB29628B456791 /* LaunchAtLoginControllerTests.swift */,
+				087151EDA65E84F82D33C331 /* RepositoryDiscoveryExperienceTests.swift */,
 			);
 			path = DevPulseNativeTests;
 			sourceTree = "<group>";
@@ -277,9 +280,11 @@
 				LastUpgradeCheck = 1600;
 				TargetAttributes = {
 					3F4D5EBC403852F2B41C01F8 = {
+						DevelopmentTeam = 5BJ9GM7VZR;
 						ProvisioningStyle = Automatic;
 					};
 					E5041EA581BD0B987059594E = {
+						DevelopmentTeam = 5BJ9GM7VZR;
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -345,6 +350,7 @@
 			files = (
 				AC5843D6975B89D2C8ECDB28 /* CommitReadinessEngineTests.swift in Sources */,
 				820E27DB980988D1A11D34BA /* LaunchAtLoginControllerTests.swift in Sources */,
+				F3835F2463A794860CDCA8BF /* RepositoryDiscoveryExperienceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -502,9 +508,9 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 5BJ9GM7VZR;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/Info.plist;
-				DEVELOPMENT_TEAM = JYL9G28DP3;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -524,9 +530,9 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 5BJ9GM7VZR;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Widget/Info.plist;
-				DEVELOPMENT_TEAM = JYL9G28DP3;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -547,6 +553,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 5BJ9GM7VZR;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/Info.plist;
@@ -633,6 +640,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 5BJ9GM7VZR;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Widget/Info.plist;

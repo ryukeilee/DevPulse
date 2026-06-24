@@ -600,6 +600,36 @@ struct CommitReadinessEngineTests {
         #expect(repo.commitReadiness.reviewReceipt.nextStep == "先打开 Diagnostics，确认 Git 读取失败原因")
     }
 
+    @Test func gitScannerReusesDiscoveryCacheUntilForcedRescan() async throws {
+        let root = try temporaryDirectory(named: "scanner-discovery-cache")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let firstRepo = root.appendingPathComponent("first-repo")
+        try createCommittedRepository(at: firstRepo)
+
+        let firstScan = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path]
+        )
+        #expect(firstScan.data.scanSummary.totalRepositories == 1)
+
+        let secondRepo = root.appendingPathComponent("second-repo")
+        try createCommittedRepository(at: secondRepo)
+
+        let cachedScan = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path]
+        )
+        #expect(cachedScan.data.scanSummary.totalRepositories == 1)
+
+        let forcedScan = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true
+        )
+        #expect(forcedScan.data.scanSummary.totalRepositories == 2)
+    }
+
     private func snapshot(
         id: String = "repo-1",
         name: String = "repo-1",

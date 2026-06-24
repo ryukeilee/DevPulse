@@ -30,6 +30,7 @@ targets:
         MARKETING_VERSION: "0.2.0"
         CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 5BJ9GM7VZR
         CODE_SIGN_ENTITLEMENTS: App/DevPulse.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       configs:
@@ -71,6 +72,7 @@ targets:
         MARKETING_VERSION: "0.2.0"
         CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 5BJ9GM7VZR
         CODE_SIGN_ENTITLEMENTS: Widget/DevPulseWidgetExtension.entitlements
         APP_BUNDLE_ID: local.devpulse.app
       configs:

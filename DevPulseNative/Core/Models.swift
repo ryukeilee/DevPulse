@@ -389,10 +389,8 @@ enum WidgetRepositoryPriorityBuilder {
             return lhsStatusPriority < rhsStatusPriority
         }
 
-        let lhsReadinessPriority = readinessPriority(lhs.commitReadiness.level)
-        let rhsReadinessPriority = readinessPriority(rhs.commitReadiness.level)
-        if lhsReadinessPriority != rhsReadinessPriority {
-            return lhsReadinessPriority < rhsReadinessPriority
+        if lhs.changedFileCount != rhs.changedFileCount {
+            return lhs.changedFileCount > rhs.changedFileCount
         }
 
         if let lhsDate = lhs.activityDate, let rhsDate = rhs.activityDate, lhsDate != rhsDate {
@@ -407,8 +405,10 @@ enum WidgetRepositoryPriorityBuilder {
             return false
         }
 
-        if lhs.changedFileCount != rhs.changedFileCount {
-            return lhs.changedFileCount > rhs.changedFileCount
+        let lhsReadinessPriority = readinessPriority(lhs.commitReadiness.level)
+        let rhsReadinessPriority = readinessPriority(rhs.commitReadiness.level)
+        if lhsReadinessPriority != rhsReadinessPriority {
+            return lhsReadinessPriority < rhsReadinessPriority
         }
 
         if lhs.risk != rhs.risk {
@@ -442,6 +442,50 @@ enum WidgetRepositoryPriorityBuilder {
         case .idle:
             return 4
         }
+    }
+}
+
+struct RepositoryEmptyState: Equatable {
+    let title: String
+    let detail: String
+    let systemImage: String
+}
+
+enum RepositoryEmptyStateBuilder {
+    static func build(lastScanAt: Date?,
+                      refreshPhase: RefreshPhase,
+                      scanRoots: [String],
+                      accessWarning: String?,
+                      refreshFailureMessage: String?) -> RepositoryEmptyState {
+        if scanRoots.isEmpty {
+            return RepositoryEmptyState(
+                title: "没有可用的扫描目录",
+                detail: accessWarning ?? "DevPulse 没有找到可访问的默认目录。请在 Settings 添加真实的仓库根目录，然后重新刷新。",
+                systemImage: "folder.badge.questionmark"
+            )
+        }
+
+        if refreshPhase == .failure {
+            return RepositoryEmptyState(
+                title: "扫描未完成",
+                detail: refreshFailureMessage ?? accessWarning ?? "请检查扫描目录后重新刷新。",
+                systemImage: "exclamationmark.triangle"
+            )
+        }
+
+        if lastScanAt == nil {
+            return RepositoryEmptyState(
+                title: "尚未开始扫描",
+                detail: "点击“立即刷新”，DevPulse 会先扫描默认目录并尝试发现本机 Git 仓库。",
+                systemImage: "magnifyingglass"
+            )
+        }
+
+        return RepositoryEmptyState(
+            title: "未发现 Git 仓库",
+            detail: accessWarning ?? "已扫描当前目录，但没有发现可读取的 Git 仓库；可在 Settings 添加其他目录后重试。",
+            systemImage: "tray"
+        )
     }
 }
 

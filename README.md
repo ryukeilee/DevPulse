@@ -129,6 +129,8 @@ This checks the project wiring, the widget extension point, the App Group entitl
 4. Add the widget in the size you want.
 5. Keep the app open when you want to rescan or inspect diagnostics.
 
+The widget footer shows the current shared snapshot age. When the widget shows states such as `尚未生成快照`, `共享快照损坏`, `快照版本不匹配`, or `数据可能已过期`, open DevPulse and use `Refresh Data` or `Rescan Now`, then confirm the Diagnostics section.
+
 Widget refresh cadence is managed by macOS. DevPulse can request updates after a scan, but it does not control the system refresh clock.
 
 ## How To Rescan
@@ -149,6 +151,8 @@ The Diagnostics section shows:
 - whether the shared snapshot exists
 - whether the shared snapshot is readable and writable
 - whether the snapshot decoded successfully
+- generated / written timestamps and current freshness assessment
+- when the app last requested a WidgetKit reload
 - recent scan and validation state
 
 If the widget is not behaving correctly, this is the first place to look.

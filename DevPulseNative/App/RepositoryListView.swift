@@ -53,17 +53,27 @@ struct RepositoryListView: View {
     }
 
     private var emptyView: some View {
-        VStack(spacing: 12) {
+        let state = RepositoryEmptyStateBuilder.build(
+            lastScanAt: scheduler.lastScanAt,
+            refreshPhase: scheduler.refreshPhase,
+            scanRoots: scheduler.diagnostics.scanRoots,
+            accessWarning: scheduler.scanRootAccessWarning,
+            refreshFailureMessage: scheduler.refreshFailureMessage
+        )
+
+        return VStack(spacing: 12) {
             Spacer()
-            Image(systemName: "tray")
+            Image(systemName: state.systemImage)
                 .font(.system(size: 32))
                 .foregroundColor(.secondary)
-            Text("配置的扫描目录中没有仓库")
+            Text(state.title)
                 .font(.body)
                 .foregroundColor(.secondary)
-            Text("请在概览页点击“立即刷新”开始扫描。")
+            Text(state.detail)
                 .font(.caption)
                 .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 320)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

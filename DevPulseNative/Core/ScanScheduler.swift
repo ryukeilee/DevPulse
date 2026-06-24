@@ -127,7 +127,7 @@ final class ScanScheduler: ObservableObject {
 
     // MARK: - Scan (async, non-blocking)
 
-    func scanNow() {
+    func scanNow(forceRepositoryDiscovery: Bool = false) {
         guard !isScanning else { return }
 
         gitAvailable = ProcessRunner.isGitAvailable()
@@ -150,7 +150,11 @@ final class ScanScheduler: ObservableObject {
         recordEvent(.scanStarted, "Scan started")
 
         Task.detached(priority: .userInitiated) {
-            let result = await GitRepositoryScanner.scan(config: currentConfig, scanRoots: currentScanRoots.roots)
+            let result = await GitRepositoryScanner.scan(
+                config: currentConfig,
+                scanRoots: currentScanRoots.roots,
+                forceRepositoryDiscovery: forceRepositoryDiscovery
+            )
 
             await MainActor.run {
                 if let failureMessage = self.scanFailureMessage(
@@ -217,14 +221,16 @@ final class ScanScheduler: ObservableObject {
         // Reset adaptive state so user gets a fresh full scan
         consecutiveNoChanges = 0
         updateScanInterval()
-        scanNow()
+        scanNow(forceRepositoryDiscovery: true)
     }
 
     // MARK: - Background scheduling
 
     func startBackgroundScanning() {
         stopBackgroundScanning()
-        scanNow()
+        if shouldRunImmediateStartupScan {
+            scanNow()
+        }
         scheduleNextTimer()
     }
 
@@ -289,6 +295,16 @@ final class ScanScheduler: ObservableObject {
 
     private func scanRoots() -> (roots: [String], warning: String?) {
         let configuredDirectories = scanDirectories
+
+        if configuredDirectories.isEmpty {
+            let defaultRoots = ScanLocationProvider.defaultDiscoveryRoots()
+            let warning: String? = defaultRoots.isEmpty
+                ? "未发现可用的默认扫描目录。请在 Settings 添加真实的仓库根目录后再刷新。"
+                : nil
+            diagnostics.scanRoots = defaultRoots
+            diagnostics.scanRootWarnings = warning.map { [$0] } ?? []
+            return (defaultRoots, warning)
+        }
 
         var accessibleRoots: [String] = []
         var inaccessibleCount = 0
@@ -364,7 +380,7 @@ final class ScanScheduler: ObservableObject {
             refreshPhase = .idle
             refreshFailureMessage = nil
             warnings = []
-            refreshWidgetReadableSnapshot()
+            setWidgetReadableSnapshot(snapshot, readAt: now)
             validateConsistency(expected: pinned, shared: snapshot, widget: diagnostics.widgetSnapshot, reason: "startup")
         case .failure(.snapshotMissing):
             diagnostics.snapshotDecodable = false
@@ -428,7 +444,7 @@ final class ScanScheduler: ObservableObject {
         diagnostics.sharedDataReadAt = Date()
         diagnostics.sharedDataSnapshot = verifiedSnapshot
         diagnostics.sharedDataReadError = nil
-        refreshWidgetReadableSnapshot()
+        setWidgetReadableSnapshot(verifiedSnapshot, readAt: diagnostics.sharedDataReadAt ?? Date())
         validateConsistency(expected: snapshotToWrite, shared: verifiedSnapshot, widget: diagnostics.widgetSnapshot, reason: reason)
         lastResult = applyPins(verifiedSnapshot)
         diagnostics.lastReloadRequestedAt = Date()
@@ -465,9 +481,7 @@ final class ScanScheduler: ObservableObject {
     private func refreshWidgetReadableSnapshot() {
         switch AppGroupStore.read() {
         case .success(let snapshot):
-            diagnostics.widgetSnapshot = snapshot
-            diagnostics.widgetSnapshotReadAt = Date()
-            diagnostics.widgetSnapshotReadError = nil
+            setWidgetReadableSnapshot(snapshot, readAt: Date())
         case .failure(.snapshotMissing):
             diagnostics.widgetSnapshot = nil
             diagnostics.widgetSnapshotReadAt = nil
@@ -477,6 +491,12 @@ final class ScanScheduler: ObservableObject {
             diagnostics.widgetSnapshotReadAt = nil
             diagnostics.widgetSnapshotReadError = error.localizedDescription
         }
+    }
+
+    private func setWidgetReadableSnapshot(_ snapshot: AppGroupData, readAt: Date) {
+        diagnostics.widgetSnapshot = snapshot
+        diagnostics.widgetSnapshotReadAt = readAt
+        diagnostics.widgetSnapshotReadError = nil
     }
 
     private func validateConsistency(expected: AppGroupData,
@@ -847,6 +867,18 @@ final class ScanScheduler: ObservableObject {
 
     private func isAppContainerPath(_ path: String) -> Bool {
         ScanLocationProvider.isLikelySandboxContainerPath(path)
+    }
+
+    private var shouldRunImmediateStartupScan: Bool {
+        guard refreshPhase != .failure else { return true }
+        guard !lastResult.repositories.isEmpty else { return true }
+
+        switch RefreshStatusFormatter.freshness(for: lastScanAt) {
+        case .fresh:
+            return false
+        case .stale, .expired, .unknown:
+            return true
+        }
     }
 
     private func suggestedNextSteps(from issues: [String]) -> [String] {

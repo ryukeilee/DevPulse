@@ -42,7 +42,7 @@ private enum WidgetSnapshotStore {
     }
 }
 
-private enum WidgetSnapshotLoadError: LocalizedError {
+enum WidgetSnapshotLoadError: LocalizedError, Equatable {
     case appGroupUnavailable
     case snapshotMissing(path: String)
     case readFailed(path: String, reason: String)
@@ -68,8 +68,15 @@ private enum WidgetSnapshotLoadError: LocalizedError {
 enum WidgetLoadState: Equatable {
     case placeholder
     case noSnapshot
-    case unavailable
+    case loadFailed
     case ready
+}
+
+struct WidgetLoadFailurePresentation: Equatable {
+    let title: String
+    let detail: String
+    let icon: String
+    let footerText: String
 }
 
 struct Provider: TimelineProvider {
@@ -89,7 +96,14 @@ struct Provider: TimelineProvider {
     func getTimeline(in context: Context,
                      completion: @escaping (Timeline<WidgetEntry>) -> Void) {
         let entry = loadEntry()
-        let nextRefresh = Date().addingTimeInterval(entry.loadState == .unavailable ? 300 : 900)
+        let nextRefreshInterval: TimeInterval
+        switch entry.loadState {
+        case .placeholder, .noSnapshot, .loadFailed:
+            nextRefreshInterval = 300
+        case .ready:
+            nextRefreshInterval = 900
+        }
+        let nextRefresh = Date().addingTimeInterval(nextRefreshInterval)
         completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
     }
 
@@ -105,7 +119,7 @@ struct Provider: TimelineProvider {
             case .snapshotMissing:
                 return .noSnapshot()
             case .appGroupUnavailable, .readFailed, .decodeFailed, .schemaMismatch:
-                return .unavailable()
+                return .loadFailed(error)
             }
         }
     }
@@ -116,6 +130,7 @@ struct WidgetEntry: TimelineEntry {
     let snapshot: AppGroupData?
     let feed: ActivityTimelineFeed
     let loadState: WidgetLoadState
+    let loadFailure: WidgetLoadFailurePresentation?
     let trustAssessment: SnapshotTrustAssessment?
 
     static var placeholder: WidgetEntry {
@@ -124,6 +139,7 @@ struct WidgetEntry: TimelineEntry {
             snapshot: nil,
             feed: ActivityTimelineFeed(state: .neverScanned, items: []),
             loadState: .placeholder,
+            loadFailure: nil,
             trustAssessment: nil
         )
     }
@@ -141,6 +157,7 @@ struct WidgetEntry: TimelineEntry {
             snapshot: snapshot,
             feed: feed,
             loadState: .ready,
+            loadFailure: nil,
             trustAssessment: trustAssessment
         )
     }
@@ -151,16 +168,23 @@ struct WidgetEntry: TimelineEntry {
             snapshot: nil,
             feed: ActivityTimelineFeed(state: .neverScanned, items: []),
             loadState: .noSnapshot,
+            loadFailure: nil,
             trustAssessment: nil
         )
     }
 
-    static func unavailable() -> WidgetEntry {
+    static func loadFailed(_ error: WidgetSnapshotLoadError) -> WidgetEntry {
         WidgetEntry(
             date: Date(),
             snapshot: nil,
             feed: ActivityTimelineFeed(state: .neverScanned, items: []),
-            loadState: .unavailable,
+            loadState: .loadFailed,
+            loadFailure: WidgetLoadFailurePresentation(
+                title: error.widgetTitle,
+                detail: error.widgetDetail,
+                icon: error.widgetIcon,
+                footerText: error.footerText
+            ),
             trustAssessment: nil
         )
     }
@@ -214,6 +238,7 @@ private struct WidgetRepositoryBoard: View {
     let limit: Int
     var prominentFirst: Bool = false
     var showHintOnFirst: Bool = false
+    var hideSecondaryBadgeOnFirst: Bool = false
 
     var body: some View {
         let visibleItems = Array(items.prefix(limit))
@@ -223,7 +248,8 @@ private struct WidgetRepositoryBoard: View {
                 WidgetRepositoryRow(
                     item: item,
                     prominent: prominentFirst && index == 0,
-                    showHint: showHintOnFirst && index == 0
+                    showHint: showHintOnFirst && index == 0,
+                    hideSecondaryBadge: hideSecondaryBadgeOnFirst && index == 0
                 )
 
                 if index < visibleItems.count - 1 {
@@ -239,6 +265,7 @@ private struct WidgetRepositoryRow: View {
     let item: ActivityTimelineItem
     var prominent: Bool = false
     var showHint: Bool = false
+    var hideSecondaryBadge: Bool = false
 
     private var readiness: CommitReadinessAssessment {
         item.commitReadiness
@@ -262,7 +289,9 @@ private struct WidgetRepositoryRow: View {
             HStack(spacing: 6) {
                 WidgetRepositoryStatusBadge(status: item.status)
 
-                WidgetReadinessBadge(level: readiness.level, size: prominent ? .large : .compact)
+                if !hideSecondaryBadge {
+                    WidgetReadinessBadge(level: readiness.level, size: prominent ? .large : .compact)
+                }
 
                 Spacer(minLength: 4)
 
@@ -358,15 +387,15 @@ private struct SmallGlanceWidgetView: View {
             placeholderContent
         case .noSnapshot:
             shortState(
-                title: "尚未生成数据",
-                detail: "打开 DevPulse 后执行一次刷新",
+                title: "尚未生成快照",
+                detail: "打开 DevPulse 执行 Refresh Data 或 Rescan Now",
                 icon: "arrow.triangle.2.circlepath"
             )
-        case .unavailable:
+        case .loadFailed:
             shortState(
-                title: "共享数据异常",
-                detail: "打开 DevPulse 查看 Diagnostics",
-                icon: "exclamationmark.triangle.fill"
+                title: entry.loadFailure?.title ?? "共享快照读取失败",
+                detail: entry.loadFailure?.detail,
+                icon: entry.loadFailure?.icon ?? "exclamationmark.triangle.fill"
             )
         case .ready:
             guardedReadyContent
@@ -381,19 +410,19 @@ private struct SmallGlanceWidgetView: View {
         case .stale, .expired:
             shortState(
                 title: "数据可能已过期",
-                detail: "打开 DevPulse 刷新后再判断是否适合提交",
+                detail: staleDetail,
                 icon: "clock.badge.exclamationmark"
             )
         case .unknown, .failed:
             shortState(
                 title: "状态未知",
-                detail: "打开 DevPulse 查看 Diagnostics",
+                detail: "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照",
                 icon: "questionmark.circle"
             )
         case .none:
             shortState(
                 title: "状态未知",
-                detail: "打开 DevPulse 查看 Diagnostics",
+                detail: "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照",
                 icon: "questionmark.circle"
             )
         }
@@ -412,7 +441,8 @@ private struct SmallGlanceWidgetView: View {
                 items: prioritizedItems,
                 limit: 1,
                 prominentFirst: true,
-                showHintOnFirst: true
+                showHintOnFirst: true,
+                hideSecondaryBadgeOnFirst: true
             )
         }
     }
@@ -463,6 +493,13 @@ private struct SmallGlanceWidgetView: View {
             .foregroundStyle(.secondary)
             .lineLimit(1)
     }
+
+    private var staleDetail: String {
+        if let trustAssessment = entry.trustAssessment {
+            return "\(trustAssessment.detail)。打开 DevPulse 执行 Refresh Data"
+        }
+        return "打开 DevPulse 执行 Refresh Data，再判断当前状态"
+    }
 }
 
 private struct MediumGlanceWidgetView: View {
@@ -486,6 +523,12 @@ private struct MediumGlanceWidgetView: View {
     }
 
     private var headerTrailingText: String? {
+        if case .ready = entry.loadState,
+           let trustAssessment = entry.trustAssessment,
+           trustAssessment.state != .fresh {
+            return trustAssessment.title
+        }
+
         guard
             case .ready = entry.loadState,
             entry.trustAssessment?.state == .fresh,
@@ -517,15 +560,15 @@ private struct MediumGlanceWidgetView: View {
             placeholderRows
         case .noSnapshot:
             shortState(
-                title: "尚未生成数据",
-                detail: "打开 DevPulse 后执行一次刷新",
+                title: "尚未生成快照",
+                detail: "打开 DevPulse 执行 Refresh Data 或 Rescan Now",
                 icon: "arrow.triangle.2.circlepath"
             )
-        case .unavailable:
+        case .loadFailed:
             shortState(
-                title: "共享数据异常",
-                detail: "打开 DevPulse 查看 Diagnostics",
-                icon: "exclamationmark.triangle.fill"
+                title: entry.loadFailure?.title ?? "共享快照读取失败",
+                detail: entry.loadFailure?.detail,
+                icon: entry.loadFailure?.icon ?? "exclamationmark.triangle.fill"
             )
         case .ready:
             guardedReadyContent
@@ -540,19 +583,19 @@ private struct MediumGlanceWidgetView: View {
         case .stale, .expired:
             shortState(
                 title: "数据可能已过期",
-                detail: "打开 DevPulse 刷新后再判断是否适合提交",
+                detail: staleDetail,
                 icon: "clock.badge.exclamationmark"
             )
         case .unknown, .failed:
             shortState(
                 title: "状态未知",
-                detail: "打开 DevPulse 查看 Diagnostics",
+                detail: "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照",
                 icon: "questionmark.circle"
             )
         case .none:
             shortState(
                 title: "状态未知",
-                detail: "打开 DevPulse 查看 Diagnostics",
+                detail: "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照",
                 icon: "questionmark.circle"
             )
         }
@@ -617,6 +660,13 @@ private struct MediumGlanceWidgetView: View {
             .foregroundStyle(.secondary)
             .lineLimit(1)
     }
+
+    private var staleDetail: String {
+        if let trustAssessment = entry.trustAssessment {
+            return "\(trustAssessment.detail)。打开 DevPulse 执行 Refresh Data"
+        }
+        return "打开 DevPulse 执行 Refresh Data，再判断当前状态"
+    }
 }
 
 private struct LargeGlanceWidgetView: View {
@@ -640,6 +690,12 @@ private struct LargeGlanceWidgetView: View {
     }
 
     private var headerTrailingText: String? {
+        if case .ready = entry.loadState,
+           let trustAssessment = entry.trustAssessment,
+           trustAssessment.state != .fresh {
+            return trustAssessment.title
+        }
+
         guard
             case .ready = entry.loadState,
             entry.trustAssessment?.state == .fresh,
@@ -667,15 +723,15 @@ private struct LargeGlanceWidgetView: View {
             placeholderRows
         case .noSnapshot:
             shortState(
-                title: "尚未生成数据",
-                detail: "打开 DevPulse 后执行一次刷新",
+                title: "尚未生成快照",
+                detail: "打开 DevPulse 执行 Refresh Data 或 Rescan Now",
                 icon: "arrow.triangle.2.circlepath"
             )
-        case .unavailable:
+        case .loadFailed:
             shortState(
-                title: "共享数据异常",
-                detail: "打开 DevPulse 查看 Diagnostics",
-                icon: "exclamationmark.triangle.fill"
+                title: entry.loadFailure?.title ?? "共享快照读取失败",
+                detail: entry.loadFailure?.detail,
+                icon: entry.loadFailure?.icon ?? "exclamationmark.triangle.fill"
             )
         case .ready:
             guardedReadyContent
@@ -690,19 +746,19 @@ private struct LargeGlanceWidgetView: View {
         case .stale, .expired:
             shortState(
                 title: "数据可能已过期",
-                detail: "打开 DevPulse 刷新后再判断是否适合提交",
+                detail: staleDetail,
                 icon: "clock.badge.exclamationmark"
             )
         case .unknown, .failed:
             shortState(
                 title: "状态未知",
-                detail: "打开 DevPulse 查看 Diagnostics",
+                detail: "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照",
                 icon: "questionmark.circle"
             )
         case .none:
             shortState(
                 title: "状态未知",
-                detail: "打开 DevPulse 查看 Diagnostics",
+                detail: "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照",
                 icon: "questionmark.circle"
             )
         }
@@ -764,6 +820,13 @@ private struct LargeGlanceWidgetView: View {
             .font(.caption2)
             .foregroundStyle(.secondary)
             .lineLimit(1)
+    }
+
+    private var staleDetail: String {
+        if let trustAssessment = entry.trustAssessment {
+            return "\(trustAssessment.detail)。打开 DevPulse 执行 Refresh Data"
+        }
+        return "打开 DevPulse 执行 Refresh Data，再判断当前状态"
     }
 }
 
@@ -857,9 +920,9 @@ private extension WidgetEntry {
         case .placeholder:
             return "正在读取共享快照"
         case .noSnapshot:
-            return "最近刷新: 尚未生成"
-        case .unavailable:
-            return "最近刷新: 读取失败"
+            return "最近刷新: 尚未生成快照"
+        case .loadFailed:
+            return loadFailure?.footerText ?? "最近刷新: snapshot 读取失败"
         case .ready:
             if let trustAssessment, trustAssessment.state != .fresh {
                 return trustAssessment.detail
@@ -883,6 +946,68 @@ private extension WidgetEntry {
             }
 
             return "最近刷新 \(DateFormatting.relativeTime(from: latest.timestamp, relativeTo: date))"
+        }
+    }
+}
+
+private extension WidgetSnapshotLoadError {
+    var widgetTitle: String {
+        switch self {
+        case .appGroupUnavailable:
+            return "共享容器不可用"
+        case .snapshotMissing:
+            return "尚未生成快照"
+        case .readFailed:
+            return "共享快照读取失败"
+        case .decodeFailed:
+            return "共享快照损坏"
+        case .schemaMismatch:
+            return "快照版本不匹配"
+        }
+    }
+
+    var widgetDetail: String {
+        switch self {
+        case .appGroupUnavailable:
+            return "检查 App 与 Widget 是否使用同一 Team / App Group，然后打开 Diagnostics"
+        case .snapshotMissing:
+            return "打开 DevPulse 执行 Refresh Data 或 Rescan Now"
+        case .readFailed:
+            return "打开 Diagnostics 检查 snapshot 路径、权限和共享容器状态"
+        case .decodeFailed:
+            return "在 DevPulse 执行 Refresh Data，重写共享 snapshot"
+        case .schemaMismatch:
+            return "重新构建 App 与 Widget 后，再执行 Refresh Data"
+        }
+    }
+
+    var widgetIcon: String {
+        switch self {
+        case .appGroupUnavailable:
+            return "externaldrive.badge.exclamationmark"
+        case .snapshotMissing:
+            return "arrow.triangle.2.circlepath"
+        case .readFailed:
+            return "exclamationmark.triangle.fill"
+        case .decodeFailed:
+            return "doc.badge.gearshape"
+        case .schemaMismatch:
+            return "arrow.triangle.2.circlepath.circle"
+        }
+    }
+
+    var footerText: String {
+        switch self {
+        case .appGroupUnavailable:
+            return "最近刷新: 共享容器不可用"
+        case .snapshotMissing:
+            return "最近刷新: 尚未生成快照"
+        case .readFailed:
+            return "最近刷新: snapshot 读取失败"
+        case .decodeFailed:
+            return "最近刷新: snapshot 解码失败"
+        case .schemaMismatch:
+            return "最近刷新: snapshot 版本不匹配"
         }
     }
 }

@@ -40,6 +40,10 @@ func repo(
         addedFileCount: 2,
         deletedFileCount: 3,
         untrackedFileCount: 4,
+        stagedFileCount: 0,
+        unstagedFileCount: 6,
+        conflictedFileCount: 0,
+        aheadCount: 0,
         changedFileCount: 10,
         changedFilesPreview: preview,
         risk: risk,
@@ -88,7 +92,7 @@ let activeFeed = ActivityTimelineBuilder.build(
 struct Main {
     static func main() throws {
         expect(activeFeed.state == .active, "active feed should be active")
-        expect(activeFeed.items.map(\.repoName) == ["recent-changed", "older-changed", "clean-repo", "error-repo"], "timeline sort order should prefer recent changes and keep errors last")
+        expect(activeFeed.items.map(\.repoName) == ["recent-changed", "older-changed", "error-repo", "clean-repo"], "timeline sort order should prefer recent changes and keep Git read failures ahead of clean repos")
         expect(activeFeed.topItem?.changedFilesPreview == ["timeline.swift", "README.md"], "timeline preview should be normalized to basenames and deduplicated")
 
         let neverScanned = ActivityTimelineBuilder.build(from: [], lastScanAt: nil)
@@ -162,6 +166,7 @@ xcrun swiftc \
     -module-cache-path "$MODULE_CACHE" \
     -o "$BIN" \
     "$ROOT_DIR/DevPulseNative/Utilities/DateFormatting.swift" \
+    "$ROOT_DIR/DevPulseNative/Core/CommitReadinessEngine.swift" \
     "$ROOT_DIR/DevPulseNative/Core/Models.swift" \
     "$HARNESS"
 

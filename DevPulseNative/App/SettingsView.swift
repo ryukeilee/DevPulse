@@ -340,6 +340,7 @@ struct SettingsView: View {
 
             launchAtLoginDiagnosticsSection
             diagnosticsOverviewCard
+            diagnosticsSnapshotFactsSection
             diagnosticsSections
             diagnosticsScanRootsSection
 
@@ -619,6 +620,17 @@ struct SettingsView: View {
         .cornerRadius(8)
     }
 
+    private var diagnosticsSnapshotFactsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Snapshot facts")
+                .font(.caption.weight(.semibold))
+            diagnosticsStatusGrid
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.06))
+        .cornerRadius(8)
+    }
+
     private var launchAtLoginDiagnosticsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
@@ -681,7 +693,8 @@ struct SettingsView: View {
             return scheduler.diagnostics.sharedDataReadError ?? "Shared data read failed."
         }
         if scheduler.diagnostics.sharedDataSnapshot != nil {
-            return snapshotTimeLabel(scheduler.diagnostics.sharedDataReadAt)
+            return scheduler.diagnostics.sharedDataReadAt.map { "最近读回：\(formattedDate($0))" }
+                ?? "共享快照已成功读回。"
         }
         return "Waiting for the first App Group read-back after launch."
     }
@@ -701,7 +714,8 @@ struct SettingsView: View {
             return scheduler.diagnostics.sharedDataWriteError ?? "Shared data write failed."
         }
         if scheduler.diagnostics.lastSharedWriteAt != nil {
-            return snapshotTimeLabel(scheduler.diagnostics.lastSharedWriteAt)
+            return scheduler.diagnostics.lastSharedWriteAt.map { "最近写入：\(formattedDate($0))" }
+                ?? "共享快照已成功写入。"
         }
         return "Waiting for the first verified snapshot write."
     }
@@ -720,8 +734,13 @@ struct SettingsView: View {
         if scheduler.diagnostics.widgetSnapshotReadError != nil {
             return scheduler.diagnostics.widgetSnapshotReadError ?? "Widget snapshot read failed."
         }
-        if scheduler.diagnostics.widgetSnapshot != nil {
-            return snapshotTimeLabel(scheduler.diagnostics.widgetSnapshotReadAt)
+        if let widgetSnapshot = scheduler.diagnostics.widgetSnapshot {
+            let readSummary = scheduler.diagnostics.widgetSnapshotReadAt.map { "最近读取：\(formattedDate($0))" }
+                ?? "Widget 已读到共享快照。"
+            let timestampSummary = widgetSnapshot.writtenAt
+                .map { "writtenAt: \($0)" }
+                ?? "writtenAt 缺失"
+            return "\(readSummary) · repos \(widgetSnapshot.repositories.count) · \(timestampSummary)"
         }
         return "Waiting for the widget-readable snapshot after launch."
     }
