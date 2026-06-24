@@ -7,8 +7,8 @@ private enum WidgetSnapshotSchema {
 }
 
 private enum WidgetSnapshotStore {
-    static let appGroupIdentifier = "group.local.devpulse"
-    private static let snapshotFileName = "repositories.json"
+    static let appGroupIdentifier = SharedSnapshotLocation.appGroupIdentifier
+    private static let snapshotFileName = SharedSnapshotLocation.fileName
 
     static func load() -> Result<AppGroupData, WidgetSnapshotLoadError> {
         guard let containerURL = FileManager.default.containerURL(
@@ -903,7 +903,7 @@ private extension ActivityTimelineItem {
 
 @main
 struct DevPulseWidget: Widget {
-    let kind = "DevPulseWidget"
+    let kind = WidgetIdentity.kind
 
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: Provider()) { entry in

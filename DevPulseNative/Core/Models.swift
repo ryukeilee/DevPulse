@@ -6,6 +6,15 @@ enum RepositorySnapshotSchema {
     static let version = 1
 }
 
+enum SharedSnapshotLocation {
+    static let appGroupIdentifier = "group.local.devpulse"
+    static let fileName = "repositories.json"
+}
+
+enum WidgetIdentity {
+    static let kind = "DevPulseWidget"
+}
+
 // MARK: - Risk level
 
 enum RiskLevel: String, Codable, Comparable {
@@ -747,7 +756,7 @@ struct DiagnosticEvent: Identifiable, Equatable {
 struct DiagnosticsSnapshot {
     var appBundleIdentifier: String = Bundle.main.bundleIdentifier ?? "unknown"
     var widgetBundleIdentifier: String = "local.devpulse.app.widget"
-    var appGroupIdentifier: String = "group.local.devpulse"
+    var appGroupIdentifier: String = SharedSnapshotLocation.appGroupIdentifier
     var appGroupContainerPath: String?
     var snapshotFilePath: String?
     var appGroupAvailable: Bool = false

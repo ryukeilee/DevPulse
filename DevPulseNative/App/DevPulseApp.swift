@@ -13,6 +13,9 @@ struct DevPulseApp: App {
         let startupCommand = LaunchAtLoginCommand(arguments: ProcessInfo.processInfo.arguments)
         let scheduler = ScanScheduler(commandMode: startupCommand != nil)
         let launchAtLoginController = LaunchAtLoginController()
+        if startupCommand == nil && !Self.isRunningTests {
+            scheduler.startBackgroundScanning()
+        }
         _scheduler = StateObject(wrappedValue: scheduler)
         _launchAtLoginController = StateObject(wrappedValue: launchAtLoginController)
     }
@@ -77,6 +80,10 @@ struct DevPulseApp: App {
     private func show(window: NSWindow) {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private static var isRunningTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
     }
 }
 

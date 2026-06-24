@@ -16,12 +16,12 @@ struct AppGroupStoreInspection {
 
 enum AppGroupStore {
     /// The App Group identifier shared with the Widget Extension.
-    static let appGroupIdentifier = "group.local.devpulse"
+    static let appGroupIdentifier = SharedSnapshotLocation.appGroupIdentifier
     static let appBundleIdentifier = "local.devpulse.app"
     static let widgetBundleIdentifier = "local.devpulse.app.widget"
 
     /// File name for the snapshot inside the group container.
-    private static let snapshotFileName = "repositories.json"
+    private static let snapshotFileName = SharedSnapshotLocation.fileName
 
     // MARK: - Container URL
 
@@ -141,7 +141,7 @@ enum AppGroupStore {
     /// Reload widget timelines after a successful write or manual refresh.
     static func reloadWidgets() {
         #if canImport(WidgetKit)
-        WidgetCenter.shared.reloadAllTimelines()
+        WidgetCenter.shared.reloadTimelines(ofKind: WidgetIdentity.kind)
         #endif
     }
 
