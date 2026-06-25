@@ -313,6 +313,80 @@ struct CommitReadinessEngineTests {
         #expect(scanSection.items.contains(where: { $0.title == "仓库识别" && $0.value == "没有仓库" }) == true)
     }
 
+    @Test func widgetDataTrustBuilderMarksHealthySnapshotAsTrusted() {
+        var diagnostics = DiagnosticsSnapshot()
+        diagnostics.appGroupAvailable = true
+        diagnostics.snapshotExists = true
+        diagnostics.snapshotReadable = true
+        diagnostics.snapshotWritable = true
+        diagnostics.snapshotDecodable = true
+        diagnostics.snapshotFilePath = "/tmp/group.local.devpulse/repositories.json"
+        diagnostics.sharedDataSnapshot = AppGroupData.empty()
+        diagnostics.widgetSnapshot = AppGroupData.empty()
+        diagnostics.lastSharedWriteAt = Date(timeIntervalSince1970: 1_718_000_000)
+
+        let trust = WidgetDataTrustBuilder.build(
+            diagnostics: diagnostics,
+            widgetTrust: freshTrust(),
+            repositories: [snapshot(status: .clean)]
+        )
+
+        #expect(trust.severity == .normal)
+        #expect(trust.headline == "当前 Widget 数据可信")
+        #expect(trust.nextSteps.first == "当前可以信任 Widget 数据；如果桌面没有立即变化，等待 macOS 刷新时间线即可。")
+    }
+
+    @Test func widgetDataTrustBuilderExplainsMissingSnapshotRecovery() {
+        var diagnostics = DiagnosticsSnapshot()
+        diagnostics.appGroupAvailable = true
+        diagnostics.snapshotExists = false
+        diagnostics.snapshotReadable = false
+        diagnostics.snapshotWritable = true
+        diagnostics.snapshotDecodable = false
+
+        let trust = WidgetDataTrustBuilder.build(
+            diagnostics: diagnostics,
+            widgetTrust: SnapshotTrustAssessment(
+                state: .unknown,
+                title: "状态未知",
+                detail: "无法确认数据是否最新",
+                basis: "共享快照缺失"
+            ),
+            repositories: []
+        )
+
+        #expect(trust.severity == .error)
+        #expect(trust.headline == "当前 Widget 数据不可信，建议先修复")
+        #expect(trust.summary.contains("共享快照还没有生成"))
+        #expect(trust.nextSteps.first?.contains("Rescan Now") == true)
+    }
+
+    @Test func widgetDataTrustBuilderFlagsStaleButReadableData() {
+        var diagnostics = DiagnosticsSnapshot()
+        diagnostics.appGroupAvailable = true
+        diagnostics.snapshotExists = true
+        diagnostics.snapshotReadable = true
+        diagnostics.snapshotWritable = true
+        diagnostics.snapshotDecodable = true
+        diagnostics.sharedDataSnapshot = AppGroupData.empty()
+        diagnostics.widgetSnapshot = AppGroupData.empty()
+
+        let trust = WidgetDataTrustBuilder.build(
+            diagnostics: diagnostics,
+            widgetTrust: SnapshotTrustAssessment(
+                state: .stale,
+                title: "数据可能已过期",
+                detail: "最近一次更新在 12 分钟前更新",
+                basis: "基于 writtenAt 判断已超过 10 分钟。"
+            ),
+            repositories: [snapshot(modified: 1)]
+        )
+
+        #expect(trust.severity == .warning)
+        #expect(trust.headline == "当前 Widget 数据可能过期")
+        #expect(trust.nextSteps.first?.contains("Refresh Data") == true)
+    }
+
     @Test func cleanRepositoryIsClean() {
         let result = CommitReadinessEngine.assess(snapshot: snapshot(status: .clean))
 

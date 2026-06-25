@@ -121,6 +121,20 @@ Run the widget verification script from the repository root:
 
 This checks the project wiring, the widget extension point, the App Group entitlement, and the host/widget bundle relationship.
 
+### Run Native Tests
+
+Use the shared `DevPulse` scheme and disable code signing for local CLI test runs:
+
+```sh
+xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug -derivedDataPath /tmp/devpulse-build -destination platform=macOS CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test
+```
+
+To run only the diagnostics and commit-readiness tests:
+
+```sh
+xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug -derivedDataPath /tmp/devpulse-build -destination platform=macOS CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO -only-testing:DevPulseTests/CommitReadinessEngineTests test
+```
+
 ## How To Use The Widget
 
 1. Launch DevPulse and run a scan.
@@ -145,6 +159,8 @@ Open the app and go to `Settings`.
 
 The Diagnostics section shows:
 
+- a top-level Widget data trust card that says whether the current Widget data is trustworthy, stale, or needs repair
+- a trust checklist for snapshot existence, app read/write, decode status, freshness, and App/Widget consistency
 - App and widget bundle identifiers
 - App Group status
 - shared snapshot path
@@ -155,7 +171,7 @@ The Diagnostics section shows:
 - when the app last requested a WidgetKit reload
 - recent scan and validation state
 
-If the widget is not behaving correctly, this is the first place to look.
+If the widget is not behaving correctly, this is the first place to look. Start with the Widget data trust card, then follow the listed next steps such as `Refresh Data`, `Rescan Now`, checking App Group / Signing, or doing a clean rebuild.
 
 ## WidgetKit And Signing Troubleshooting
 

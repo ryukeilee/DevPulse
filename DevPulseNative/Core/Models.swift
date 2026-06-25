@@ -868,6 +868,14 @@ struct DiagnosticsOverviewModel: Equatable {
     let sections: [DiagnosticsSectionModel]
 }
 
+struct WidgetDataTrustModel: Equatable {
+    let headline: String
+    let summary: String
+    let severity: DiagnosticsSeverity
+    let evidence: [DiagnosticsStatusItem]
+    let nextSteps: [String]
+}
+
 enum DiagnosticsOverviewBuilder {
     static func build(
         diagnostics: DiagnosticsSnapshot,
@@ -1103,6 +1111,278 @@ enum DiagnosticsOverviewBuilder {
             return .warning
         }
         return .normal
+    }
+
+    private static func formattedDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter.string(from: date)
+    }
+}
+
+enum WidgetDataTrustBuilder {
+    static func build(
+        diagnostics: DiagnosticsSnapshot,
+        widgetTrust: SnapshotTrustAssessment,
+        repositories: [RepositorySnapshot]
+    ) -> WidgetDataTrustModel {
+        let evidence = buildEvidence(diagnostics: diagnostics, widgetTrust: widgetTrust)
+        let severity = overallSeverity(diagnostics: diagnostics, widgetTrust: widgetTrust)
+        let headline = headline(for: severity, widgetTrust: widgetTrust)
+        let summary = summary(
+            diagnostics: diagnostics,
+            widgetTrust: widgetTrust,
+            repositories: repositories
+        )
+        let nextSteps = nextSteps(diagnostics: diagnostics, widgetTrust: widgetTrust)
+
+        return WidgetDataTrustModel(
+            headline: headline,
+            summary: summary,
+            severity: severity,
+            evidence: evidence,
+            nextSteps: nextSteps
+        )
+    }
+
+    private static func buildEvidence(
+        diagnostics: DiagnosticsSnapshot,
+        widgetTrust: SnapshotTrustAssessment
+    ) -> [DiagnosticsStatusItem] {
+        let snapshotExistsSeverity: DiagnosticsSeverity = diagnostics.snapshotExists ? .normal : .error
+        let snapshotReadableSeverity: DiagnosticsSeverity = diagnostics.snapshotReadable ? .normal : .error
+        let snapshotWritableSeverity: DiagnosticsSeverity = diagnostics.snapshotWritable ? .normal : .error
+        let snapshotDecodableSeverity: DiagnosticsSeverity = diagnostics.snapshotDecodable ? .normal : .error
+        let freshnessSeverity = severity(for: widgetTrust.state)
+        let consistencySeverity = diagnostics.validationIssues.isEmpty ? DiagnosticsSeverity.normal : .error
+
+        return [
+            DiagnosticsStatusItem(
+                id: "widget-trust-snapshot-exists",
+                title: "共享快照文件",
+                value: diagnostics.snapshotExists ? "已生成" : "缺失",
+                detail: diagnostics.snapshotFilePath ?? "还没有解析到 repositories.json 路径。",
+                nextStep: diagnostics.snapshotExists ? nil : "先执行一次 Rescan Now，确认主 App 已生成共享快照。",
+                severity: snapshotExistsSeverity
+            ),
+            DiagnosticsStatusItem(
+                id: "widget-trust-snapshot-readable",
+                title: "主 App 可读",
+                value: diagnostics.snapshotReadable ? "可以读取" : "无法读取",
+                detail: diagnostics.sharedDataReadError
+                    ?? "主 App 可以读回共享快照。读取失败时这里会显示错误原因。",
+                nextStep: diagnostics.snapshotReadable ? nil : "检查 App Group、签名和共享容器路径后再执行 Refresh Data。",
+                severity: snapshotReadableSeverity
+            ),
+            DiagnosticsStatusItem(
+                id: "widget-trust-snapshot-writable",
+                title: "主 App 可写",
+                value: diagnostics.snapshotWritable ? "可以重写" : "无法重写",
+                detail: diagnostics.sharedDataWriteError
+                    ?? diagnostics.lastSharedWriteAt.map { "最近一次确认写入：\(formattedDate($0))" }
+                    ?? "主 App 还没有完成一次确认写入。",
+                nextStep: diagnostics.snapshotWritable ? nil : "检查 App Group entitlement、签名和容器权限，再执行 Refresh Data。",
+                severity: snapshotWritableSeverity
+            ),
+            DiagnosticsStatusItem(
+                id: "widget-trust-snapshot-decodable",
+                title: "快照可解码",
+                value: diagnostics.snapshotDecodable ? "可以解码" : "无法解码",
+                detail: diagnostics.snapshotDecodable
+                    ? "共享快照 schema 和当前 App 一致。"
+                    : (diagnostics.sharedDataReadError ?? "还没有拿到一份可解码的共享快照。"),
+                nextStep: diagnostics.snapshotDecodable ? nil : "如果反复失败，清理构建产物并让 App 重写共享快照。",
+                severity: snapshotDecodableSeverity
+            ),
+            DiagnosticsStatusItem(
+                id: "widget-trust-freshness",
+                title: "最新程度",
+                value: widgetTrust.title,
+                detail: widgetTrust.basis,
+                nextStep: widgetTrust.state == .fresh ? nil : "如果时间已经过旧，优先执行 Refresh Data；仍异常再检查 Widget reload 和签名配置。",
+                severity: freshnessSeverity
+            ),
+            DiagnosticsStatusItem(
+                id: "widget-trust-consistency",
+                title: "App / Widget 一致性",
+                value: diagnostics.validationIssues.isEmpty ? "一致" : "不一致",
+                detail: diagnostics.validationIssues.isEmpty
+                    ? "主 App、共享快照和 Widget 当前看到的是同一份数据。"
+                    : diagnostics.validationIssues.joined(separator: " "),
+                nextStep: diagnostics.validationIssues.isEmpty ? nil : "先看 shared write、widget snapshot 和 reload requested 的时间是否连续成功。",
+                severity: consistencySeverity
+            )
+        ]
+    }
+
+    private static func overallSeverity(
+        diagnostics: DiagnosticsSnapshot,
+        widgetTrust: SnapshotTrustAssessment
+    ) -> DiagnosticsSeverity {
+        if !diagnostics.appGroupAvailable
+            || !diagnostics.snapshotExists
+            || !diagnostics.snapshotReadable
+            || !diagnostics.snapshotWritable
+            || !diagnostics.snapshotDecodable
+            || diagnostics.sharedDataReadError != nil
+            || diagnostics.sharedDataWriteError != nil
+            || diagnostics.widgetSnapshotReadError != nil
+            || !diagnostics.validationIssues.isEmpty {
+            return .error
+        }
+
+        switch widgetTrust.state {
+        case .fresh:
+            return .normal
+        case .stale, .expired, .unknown, .failed:
+            return .warning
+        }
+    }
+
+    private static func headline(
+        for severity: DiagnosticsSeverity,
+        widgetTrust: SnapshotTrustAssessment
+    ) -> String {
+        switch severity {
+        case .normal:
+            return "当前 Widget 数据可信"
+        case .warning:
+            switch widgetTrust.state {
+            case .stale, .expired:
+                return "当前 Widget 数据可能过期"
+            case .unknown, .failed:
+                return "当前无法确认 Widget 数据是否可信"
+            case .fresh:
+                return "当前 Widget 数据基本可信"
+            }
+        case .error:
+            return "当前 Widget 数据不可信，建议先修复"
+        }
+    }
+
+    private static func summary(
+        diagnostics: DiagnosticsSnapshot,
+        widgetTrust: SnapshotTrustAssessment,
+        repositories: [RepositorySnapshot]
+    ) -> String {
+        switch overallSeverity(diagnostics: diagnostics, widgetTrust: widgetTrust) {
+        case .normal:
+            let repoSummary = repositories.isEmpty ? "当前快照里还没有仓库" : "当前快照包含 \(repositories.count) 个仓库"
+            return "\(repoSummary)，且共享快照存在、可读、可写、可解码，Widget 看到的数据仍在可信时间窗内。"
+        case .warning:
+            return widgetTrust.detail + "。共享链路基本正常，但你应先刷新后再判断 Widget 里的仓库状态。"
+        case .error:
+            if !diagnostics.appGroupAvailable {
+                return "主 App 还拿不到共享容器，Widget 无法和 App 对齐同一份数据。"
+            }
+            if !diagnostics.snapshotExists {
+                return "共享快照还没有生成，Widget 现在没有可验证的数据来源。"
+            }
+            if !diagnostics.snapshotReadable || diagnostics.sharedDataReadError != nil {
+                return "主 App 读不回共享快照，当前无法确认 Widget 正在显示什么数据。"
+            }
+            if !diagnostics.snapshotWritable || diagnostics.sharedDataWriteError != nil {
+                return "主 App 无法重写共享快照，所以你不能相信 Widget 会跟上新的扫描结果。"
+            }
+            if !diagnostics.snapshotDecodable {
+                return "共享快照存在但无法解码，Widget 数据来源已经损坏或 schema 不一致。"
+            }
+            if let widgetSnapshotReadError = diagnostics.widgetSnapshotReadError {
+                return "Widget 侧读取共享快照失败：\(widgetSnapshotReadError)"
+            }
+            return diagnostics.validationIssues.first
+                ?? "主 App、共享快照和 Widget 之间出现不一致，当前状态需要先修复后再判断。"
+        }
+    }
+
+    private static func nextSteps(
+        diagnostics: DiagnosticsSnapshot,
+        widgetTrust: SnapshotTrustAssessment
+    ) -> [String] {
+        if !diagnostics.appGroupAvailable {
+            return [
+                "先检查 DevPulse 与 Widget Extension 是否使用同一个 Team 和 `group.local.devpulse`。",
+                "修正 Signing / App Group 后执行 Refresh Data，确认共享容器路径重新出现。",
+                "如果仍然不可用，清理构建目录并重装 App。"
+            ]
+        }
+
+        if !diagnostics.snapshotExists {
+            return [
+                "先执行一次 Rescan Now，让主 App 重新发现仓库并生成共享快照。",
+                "如果还是缺失，检查扫描目录是否指向真实仓库根目录。",
+                "若目录正常但快照仍未生成，再检查 App Group / Signing。"
+            ]
+        }
+
+        if !diagnostics.snapshotReadable || diagnostics.sharedDataReadError != nil {
+            return [
+                "执行 Refresh Data，再看 shared read 是否恢复成功。",
+                "如果仍然读取失败，检查 App Group 容器路径与签名是否一致。",
+                "必要时清理构建目录并重装 App，让共享容器重新建立。"
+            ]
+        }
+
+        if !diagnostics.snapshotWritable || diagnostics.sharedDataWriteError != nil {
+            return [
+                "先执行 Refresh Data，确认主 App 能重新写入共享快照。",
+                "如果写入仍失败，检查 App Group entitlement、签名和容器写权限。",
+                "必要时清理构建目录并重装 App。"
+            ]
+        }
+
+        if !diagnostics.snapshotDecodable {
+            return [
+                "先执行 Refresh Data，让当前版本的 App 重写共享快照。",
+                "如果仍无法解码，清理构建目录并同时重建 App 与 Widget。",
+                "确认 App 与 Widget 使用同一份 schema 后再重新扫描。"
+            ]
+        }
+
+        if let widgetSnapshotReadError = diagnostics.widgetSnapshotReadError, !widgetSnapshotReadError.isEmpty {
+            return [
+                "先执行 Refresh Data，确认 shared write 和 reload requested 都更新成功。",
+                "如果 Widget 仍然读取失败，移除桌面上的旧 Widget 后重新添加。",
+                "如仍异常，再检查 Signing / App Group 并清理构建目录。"
+            ]
+        }
+
+        if !diagnostics.validationIssues.isEmpty {
+            return [
+                "先对照 shared write、widget snapshot 和 reload requested 的时间，确认链路在哪一步断开。",
+                "执行 Refresh Data，观察一致性错误是否消失。",
+                "如果仍不一致，移除旧 Widget 并重新添加，再重新扫描确认。"
+            ]
+        }
+
+        switch widgetTrust.state {
+        case .fresh:
+            return ["当前可以信任 Widget 数据；如果桌面没有立即变化，等待 macOS 刷新时间线即可。"]
+        case .stale, .expired:
+            return [
+                "先执行 Refresh Data，再重新判断 Widget 上的仓库状态。",
+                "如果刷新后仍然过期，检查 Widget reload requested 是否更新。",
+                "如桌面仍不变，可移除旧 Widget 后重新添加。"
+            ]
+        case .unknown, .failed:
+            return [
+                "先执行 Refresh Data，补齐 generatedAt / writtenAt 与 reload requested。",
+                "如果仍无法确认，再检查 Diagnostics 中的共享快照与 Widget 读取结果。",
+                "必要时清理构建目录并重建 App 与 Widget。"
+            ]
+        }
+    }
+
+    private static func severity(for state: SnapshotTrustState) -> DiagnosticsSeverity {
+        switch state {
+        case .fresh:
+            return .normal
+        case .stale, .expired, .unknown:
+            return .warning
+        case .failed:
+            return .error
+        }
     }
 
     private static func formattedDate(_ date: Date) -> String {

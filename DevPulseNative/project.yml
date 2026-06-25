@@ -96,3 +96,34 @@ targets:
         GENERATE_INFOPLIST_FILE: "YES"
     dependencies:
       - target: DevPulse
+
+schemes:
+  DevPulse:
+    build:
+      targets:
+        DevPulse: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - name: DevPulseTests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+  DevPulseWidgetExtension:
+    build:
+      targets:
+        DevPulseWidgetExtension: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

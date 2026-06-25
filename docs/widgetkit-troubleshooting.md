@@ -74,8 +74,9 @@ Useful checks:
 - open the app
 - click `Refresh Data` or `Rescan Now`
 - open the Settings tab
-- inspect the Diagnostics section
-- confirm `Snapshot exists`, `Snapshot readable`, `Snapshot decodable`, `Generated at`, `Written at`, and `Reload requested`
+- inspect the Diagnostics section, starting from the Widget data trust card
+- confirm the trust checklist shows snapshot exists, app read/write, decodable, freshness, and App/Widget consistency
+- then confirm `Generated at`, `Written at`, and `Reload requested`
 
 Interpret the widget states this way:
 
@@ -114,6 +115,8 @@ Free Apple ID and ad-hoc signing can work for local testing, but they may be fra
 
 In the Settings tab, the Diagnostics section should eventually show:
 
+- `当前 Widget 数据可信` in the Widget data trust card
+- a trust checklist where snapshot file exists, the app can read/write it, the snapshot decodes, and App/Widget consistency is `一致`
 - a valid App Bundle identifier
 - a valid Widget Bundle identifier
 - an App Group container path

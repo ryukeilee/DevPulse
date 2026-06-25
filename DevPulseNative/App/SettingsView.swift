@@ -315,7 +315,7 @@ struct SettingsView: View {
                 Label("Diagnostics", systemImage: "stethoscope")
                     .font(.headline)
                 Spacer()
-                Button(action: { scheduler.rescan() }) {
+                Button(action: { scheduler.scanNow() }) {
                     Label(
                         scheduler.isScanning ? "Refreshing..." : "Refresh Data",
                         systemImage: "arrow.triangle.2.circlepath"
@@ -339,6 +339,8 @@ struct SettingsView: View {
             }
 
             launchAtLoginDiagnosticsSection
+            widgetDataTrustCard
+            widgetDataTrustEvidenceSection
             diagnosticsOverviewCard
             diagnosticsSnapshotFactsSection
             diagnosticsSections
@@ -367,11 +369,11 @@ struct SettingsView: View {
                 .cornerRadius(8)
             }
 
-            if !scheduler.diagnostics.nextSteps.isEmpty {
+            if !widgetTrustNextSteps.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Next steps")
+                    Text("What to do next")
                         .font(.caption.weight(.semibold))
-                    ForEach(scheduler.diagnostics.nextSteps, id: \.self) { step in
+                    ForEach(widgetTrustNextSteps, id: \.self) { step in
                         Label(step, systemImage: "arrow.right.circle")
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -603,6 +605,74 @@ struct SettingsView: View {
             widgetTrust: widgetTrustAssessment,
             repositories: scheduler.lastResult.repositories
         )
+    }
+
+    private var widgetDataTrust: WidgetDataTrustModel {
+        WidgetDataTrustBuilder.build(
+            diagnostics: scheduler.diagnostics,
+            widgetTrust: widgetTrustAssessment,
+            repositories: scheduler.lastResult.repositories
+        )
+    }
+
+    private var widgetTrustNextSteps: [String] {
+        var steps: [String] = []
+
+        for step in widgetDataTrust.nextSteps where !steps.contains(step) {
+            steps.append(step)
+        }
+
+        for step in scheduler.diagnostics.nextSteps where !steps.contains(step) {
+            steps.append(step)
+        }
+
+        return Array(steps.prefix(4))
+    }
+
+    private var widgetDataTrustCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(widgetDataTrust.headline, systemImage: severitySymbol(widgetDataTrust.severity))
+                .font(.caption.weight(.semibold))
+                .foregroundColor(severityColor(widgetDataTrust.severity))
+
+            Text(widgetDataTrust.summary)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                Button(action: { scheduler.scanNow() }) {
+                    Label("Refresh Data", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(scheduler.isScanning)
+
+                Button(action: { scheduler.rescan() }) {
+                    Label("Rescan Now", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(scheduler.isScanning)
+            }
+        }
+        .padding(10)
+        .background(severityBackground(widgetDataTrust.severity))
+        .cornerRadius(8)
+    }
+
+    private var widgetDataTrustEvidenceSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Widget data trust checklist")
+                .font(.caption.weight(.semibold))
+
+            ForEach(widgetDataTrust.evidence) { item in
+                diagnosticsInsightRow(item)
+            }
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.06))
+        .cornerRadius(8)
     }
 
     private var diagnosticsOverviewCard: some View {
