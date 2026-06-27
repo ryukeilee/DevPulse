@@ -28,6 +28,7 @@ It includes:
 - read-only Git metadata scanning
 - an App Group snapshot shared between the app and widget
 - WidgetKit diagnostics in the app
+- an Overview Widget data trust status bar
 - activity timeline views
 - rules-based commit readiness hints
 
@@ -111,6 +112,28 @@ Use Xcode's Run button, or run the Debug build from the command line:
 xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug -destination platform=macOS build
 ```
 
+If the machine does not have matching provisioning profiles, use the no-signing build for compile verification:
+
+```sh
+xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug -destination platform=macOS CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+```
+
+### Install A Local Debug Build
+
+For a local `/Applications` install, build the native app, sign the host app and widget extension with the same Apple Development identity and App Group entitlements, then copy the bundle:
+
+```sh
+xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug -derivedDataPath /tmp/devpulse-build -destination platform=macOS CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+security find-identity -v -p codesigning
+codesign --force --sign <SIGNING_IDENTITY_HASH> --timestamp=none --entitlements DevPulseNative/Widget/DevPulseWidgetExtension.entitlements /tmp/devpulse-build/Build/Products/Debug/DevPulse.app/Contents/PlugIns/DevPulseWidgetExtension.appex
+codesign --force --sign <SIGNING_IDENTITY_HASH> --timestamp=none --entitlements DevPulseNative/App/DevPulse.entitlements /tmp/devpulse-build/Build/Products/Debug/DevPulse.app
+codesign --verify --deep --strict --verbose=2 /tmp/devpulse-build/Build/Products/Debug/DevPulse.app
+ditto /tmp/devpulse-build/Build/Products/Debug/DevPulse.app /Applications/DevPulse.app
+open -n /Applications/DevPulse.app
+```
+
+If you ran tests immediately before installing and the build product contains `DevPulseTests.xctest` inside `DevPulse.app/Contents/PlugIns/`, remove that test bundle from the build product before signing the app for installation.
+
 ### Verify The Widget Wiring
 
 Run the widget verification script from the repository root:
@@ -152,6 +175,8 @@ Widget refresh cadence is managed by macOS. DevPulse can request updates after a
 Use the `Rescan Now` button in the app's Overview or Settings tabs.
 
 The Settings tab also exposes `Refresh Data`, which is useful when you want to force a fresh snapshot after changing signing, App Group, or scan directories.
+
+The Overview tab includes a Widget data trust status bar above the activity timeline. It summarizes whether the Widget data is trustworthy, stale, or currently not reliable, and its `Refresh Data` button rewrites the shared snapshot and requests a WidgetKit timeline refresh.
 
 ## How To Check Diagnostics
 
