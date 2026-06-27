@@ -1,6 +1,71 @@
 import Foundation
 import ServiceManagement
 
+struct LaunchAtLoginPendingRequest: Codable, Equatable {
+    let requestedEnabled: Bool
+    let recordedAt: Date
+}
+
+struct LaunchAtLoginPendingRequestStore {
+    static let propagationGracePeriod: TimeInterval = 10
+
+    private let defaults: UserDefaults
+    private let storageKey: String
+
+    init(
+        defaults: UserDefaults = .standard,
+        storageKey: String = "launch_at_login.pending_request"
+    ) {
+        self.defaults = defaults
+        self.storageKey = storageKey
+    }
+
+    func load(now: Date = Date()) -> LaunchAtLoginPendingRequest? {
+        guard let data = defaults.data(forKey: storageKey),
+              let request = try? JSONDecoder().decode(LaunchAtLoginPendingRequest.self, from: data) else {
+            return nil
+        }
+
+        guard request.recordedAt.addingTimeInterval(Self.propagationGracePeriod) > now else {
+            clear()
+            return nil
+        }
+
+        return request
+    }
+
+    func save(requestedEnabled: Bool, now: Date = Date()) {
+        let request = LaunchAtLoginPendingRequest(
+            requestedEnabled: requestedEnabled,
+            recordedAt: now
+        )
+        guard let data = try? JSONEncoder().encode(request) else { return }
+        defaults.set(data, forKey: storageKey)
+    }
+
+    func clear() {
+        defaults.removeObject(forKey: storageKey)
+    }
+}
+
+enum LaunchAtLoginStatusResolver {
+    static func resolve(
+        observedStatus: LaunchAtLoginStatus,
+        pendingRequest: LaunchAtLoginPendingRequest?
+    ) -> LaunchAtLoginStatus {
+        guard let pendingRequest else { return observedStatus }
+
+        switch (pendingRequest.requestedEnabled, observedStatus) {
+        case (true, .notFound), (true, .notRegistered):
+            return .requiresApproval
+        case (false, .notFound):
+            return .notRegistered
+        default:
+            return observedStatus
+        }
+    }
+}
+
 enum LaunchAtLoginCommand: Equatable {
     case status
     case enable
@@ -137,9 +202,14 @@ final class LaunchAtLoginController: ObservableObject {
     @Published private(set) var isUpdating = false
 
     private let service: SMAppService
+    private let pendingRequestStore: LaunchAtLoginPendingRequestStore
 
-    init(service: SMAppService = .mainApp) {
+    init(
+        service: SMAppService = .mainApp,
+        pendingRequestStore: LaunchAtLoginPendingRequestStore = LaunchAtLoginPendingRequestStore()
+    ) {
         self.service = service
+        self.pendingRequestStore = pendingRequestStore
         refreshStatus()
     }
 
@@ -152,7 +222,11 @@ final class LaunchAtLoginController: ObservableObject {
     }
 
     func refreshStatus() {
-        let nextStatus = LaunchAtLoginStatus(serviceStatus: service.status)
+        let observedStatus = LaunchAtLoginStatus(serviceStatus: service.status)
+        let nextStatus = LaunchAtLoginStatusResolver.resolve(
+            observedStatus: observedStatus,
+            pendingRequest: pendingRequestStore.load()
+        )
         status = nextStatus
         isEnabled = nextStatus == .enabled || nextStatus == .requiresApproval
     }
@@ -175,8 +249,10 @@ final class LaunchAtLoginController: ObservableObject {
             } else {
                 try service.unregister()
             }
+            pendingRequestStore.save(requestedEnabled: enabled)
             lastOperationSucceeded = true
         } catch {
+            pendingRequestStore.clear()
             lastError = describe(error)
             lastOperationSucceeded = false
         }

@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import DevPulse
 
@@ -63,5 +64,71 @@ struct LaunchAtLoginControllerTests {
         #expect(diagnostics.severity == .error)
         #expect(diagnostics.title == "开机启动切换失败")
         #expect(diagnostics.detail == "operation failed")
+    }
+
+    @Test func recentEnableRequestTreatsTransientNotFoundAsPendingApproval() {
+        let request = LaunchAtLoginPendingRequest(
+            requestedEnabled: true,
+            recordedAt: Date()
+        )
+
+        let resolved = LaunchAtLoginStatusResolver.resolve(
+            observedStatus: .notFound,
+            pendingRequest: request
+        )
+
+        #expect(resolved == .requiresApproval)
+    }
+
+    @Test func recentEnableRequestTreatsTransientNotRegisteredAsPendingApproval() {
+        let request = LaunchAtLoginPendingRequest(
+            requestedEnabled: true,
+            recordedAt: Date()
+        )
+
+        let resolved = LaunchAtLoginStatusResolver.resolve(
+            observedStatus: .notRegistered,
+            pendingRequest: request
+        )
+
+        #expect(resolved == .requiresApproval)
+    }
+
+    @Test func recentDisableRequestTreatsTransientNotFoundAsNotRegistered() {
+        let request = LaunchAtLoginPendingRequest(
+            requestedEnabled: false,
+            recordedAt: Date()
+        )
+
+        let resolved = LaunchAtLoginStatusResolver.resolve(
+            observedStatus: .notFound,
+            pendingRequest: request
+        )
+
+        #expect(resolved == .notRegistered)
+    }
+
+    @Test func pendingRequestStoreExpiresStalePropagationHints() {
+        let suiteName = "LaunchAtLoginPendingRequestStoreTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        let store = LaunchAtLoginPendingRequestStore(defaults: defaults)
+        let oldDate = Date().addingTimeInterval(
+            -(LaunchAtLoginPendingRequestStore.propagationGracePeriod + 1)
+        )
+
+        defaults.set(
+            try! JSONEncoder().encode(
+                LaunchAtLoginPendingRequest(
+                    requestedEnabled: true,
+                    recordedAt: oldDate
+                )
+            ),
+            forKey: "launch_at_login.pending_request"
+        )
+
+        #expect(store.load() == nil)
+        #expect(defaults.data(forKey: "launch_at_login.pending_request") == nil)
+
+        defaults.removePersistentDomain(forName: suiteName)
     }
 }
