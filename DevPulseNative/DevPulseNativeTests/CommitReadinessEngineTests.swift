@@ -476,6 +476,7 @@ struct CommitReadinessEngineTests {
         #expect(result.detail == "没有本地改动")
         #expect(result.reviewReceipt.nextStep == "暂无改动，暂时不用管")
         #expect(result.widgetShortHint == "暂无改动")
+        #expect(snapshot(status: .clean).nextActionHint == "当前无需操作。")
     }
 
     @Test func smallDirtyChangeNeedsReview() {
@@ -494,16 +495,15 @@ struct CommitReadinessEngineTests {
     }
 
     @Test func stagedChangesBecomeReady() {
-        let result = CommitReadinessEngine.assess(
-            snapshot: snapshot(
-                modified: 2,
-                added: 1,
-                deleted: 1,
-                staged: 4,
-                unstaged: 0,
-                risk: .low
-            )
+        let repo = snapshot(
+            modified: 2,
+            added: 1,
+            deleted: 1,
+            staged: 4,
+            unstaged: 0,
+            risk: .low
         )
+        let result = CommitReadinessEngine.assess(snapshot: repo)
 
         #expect(result.level == .ready)
         #expect(result.reasons == [.stagedChanges])
@@ -511,79 +511,105 @@ struct CommitReadinessEngineTests {
         #expect(result.detail == "有 4 个已暂存改动，看起来可以提交")
         #expect(result.reviewReceipt.nextStep == "如已自查改动范围，看起来可以提交")
         #expect(result.widgetShortHint == "看起来可以提交")
+        #expect(repo.nextActionHint == "确认 4 个已暂存改动后即可提交。")
     }
 
     @Test func mixedStagedAndUnstagedChangesNeedReview() {
-        let result = CommitReadinessEngine.assess(
-            snapshot: snapshot(
-                modified: 2,
-                untracked: 1,
-                staged: 1,
-                risk: .low
-            )
+        let repo = snapshot(
+            modified: 2,
+            untracked: 1,
+            staged: 1,
+            risk: .low
         )
+        let result = CommitReadinessEngine.assess(snapshot: repo)
 
         #expect(result.level == .review)
         #expect(result.reasons == [.mixedStagedAndUnstagedChanges, .reviewBeforeCommit])
         #expect(result.shortLabel == "Review")
         #expect(result.detail == "已有暂存改动，但工作区还有未整理内容，提交前先确认范围")
         #expect(result.reviewReceipt.nextStep == "建议先审查暂存范围，再决定是否提交")
+        #expect(repo.nextActionHint == "先拆清已暂存和未暂存改动，再决定是否提交。")
     }
 
     @Test func moderateChangesBecomeDirty() {
-        let result = CommitReadinessEngine.assess(
-            snapshot: snapshot(
-                modified: 4,
-                untracked: 1,
-                risk: .low
-            )
+        let repo = snapshot(
+            modified: 4,
+            untracked: 1,
+            risk: .low
         )
+        let result = CommitReadinessEngine.assess(snapshot: repo)
 
         #expect(result.level == .dirty)
         #expect(result.reasons.contains(.largeWorkingTree))
         #expect(result.detail == "未整理改动较多，建议先收敛再提交")
         #expect(result.reviewReceipt.nextStep == "需要先整理改动，再继续审查或提交")
         #expect(result.widgetShortHint == "需要整理改动")
+        #expect(repo.nextActionHint == "先收敛 5 处改动，再继续审查或提交。")
+    }
+
+    @Test func highRiskChangesMentionValidationInNextActionHint() {
+        let repo = snapshot(
+            modified: 1,
+            risk: .high
+        )
+
+        let result = CommitReadinessEngine.assess(snapshot: repo)
+
+        #expect(result.level == .dirty)
+        #expect(result.reasons.contains(.highRiskChanges))
+        #expect(repo.nextActionHint == "先收敛 1 处高风险改动，并跑一次验证。")
     }
 
     @Test func untrackedFilesNeedReview() {
-        let result = CommitReadinessEngine.assess(
-            snapshot: snapshot(
-                modified: 1,
-                untracked: 1,
-                risk: .low
-            )
+        let repo = snapshot(
+            modified: 1,
+            untracked: 1,
+            risk: .low
         )
+        let result = CommitReadinessEngine.assess(snapshot: repo)
 
         #expect(result.level == .review)
         #expect(result.reasons == [.untrackedFiles, .reviewBeforeCommit])
         #expect(result.shortLabel == "Review")
         #expect(result.detail == "有未跟踪文件，建议先看 diff 或确认是否纳入提交")
         #expect(result.reviewReceipt.nextStep == "建议先审查新文件，再决定是否提交")
+        #expect(repo.nextActionHint == "先确认 1 个新文件是否纳入提交。")
+    }
+
+    @Test func mediumRiskChangesNeedValidationHint() {
+        let repo = snapshot(
+            modified: 2,
+            risk: .medium
+        )
+
+        let result = CommitReadinessEngine.assess(snapshot: repo)
+
+        #expect(result.level == .review)
+        #expect(result.reasons.contains(.highRiskChanges))
+        #expect(repo.nextActionHint == "先看 diff 并跑一次验证，再决定是否提交。")
     }
 
     @Test func aheadOfRemoteIsReadyToPush() {
-        let result = CommitReadinessEngine.assess(
-            snapshot: snapshot(
-                ahead: 2,
-                status: .clean
-            )
+        let repo = snapshot(
+            ahead: 2,
+            status: .clean
         )
+        let result = CommitReadinessEngine.assess(snapshot: repo)
 
         #expect(result.level == .ready)
         #expect(result.reasons == [.localAhead])
         #expect(result.shortLabel == "Ready")
         #expect(result.detail == "有 2 个本地提交可 Push")
         #expect(result.reviewReceipt.nextStep == "如已准备好分享改动，再决定是否继续 push")
+        #expect(repo.nextActionHint == "确认准备好后 push 2 个本地提交。")
     }
 
     @Test func scanErrorIsUnknown() {
-        let result = CommitReadinessEngine.assess(
-            snapshot: snapshot(
-                status: .error,
-                errorMessage: "Failed to run git status"
-            )
+        let repo = snapshot(
+            status: .error,
+            errorMessage: "Failed to run git status"
         )
+        let result = CommitReadinessEngine.assess(snapshot: repo)
 
         #expect(result.level == .unknown)
         #expect(result.reasons == [.scanError])
@@ -591,6 +617,7 @@ struct CommitReadinessEngineTests {
         #expect(result.detail == "Git 状态读取失败")
         #expect(result.reviewReceipt.nextStep == "先打开 Diagnostics，确认 Git 读取失败原因")
         #expect(result.widgetShortHint == "状态读取失败，先看 Diagnostics")
+        #expect(repo.nextActionHint == "先看 Diagnostics，确认 Git 读取失败原因。")
     }
 
     @Test func conflictedFilesAreDirty() {

@@ -131,6 +131,12 @@ struct RepositoryRow: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
+
+                Text(repo.nextActionHint)
+                    .font(.caption)
+                    .foregroundStyle(nextActionColor)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.vertical, 5)
@@ -199,6 +205,19 @@ struct RepositoryRow: View {
         case .ready:
             return .green
         case .idle, .review:
+            return .secondary
+        }
+    }
+
+    private var nextActionColor: Color {
+        switch repo.commitReadiness.level {
+        case .unknown:
+            return .red
+        case .dirty, .review:
+            return .orange
+        case .ready:
+            return .green
+        case .idle:
             return .secondary
         }
     }

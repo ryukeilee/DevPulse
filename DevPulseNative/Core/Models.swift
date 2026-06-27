@@ -112,6 +112,83 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
     var commitReadiness: CommitReadinessAssessment {
         CommitReadinessEngine.assess(snapshot: self)
     }
+
+    var nextActionHint: String {
+        RepositoryNextActionHintBuilder.build(snapshot: self)
+    }
+}
+
+enum RepositoryNextActionHintBuilder {
+    static func build(snapshot: RepositorySnapshot) -> String {
+        let readiness = snapshot.commitReadiness
+
+        if snapshot.status == .error || readiness.level == .unknown {
+            return "先看 Diagnostics，确认 Git 读取失败原因。"
+        }
+
+        if readiness.reasons.contains(.conflictedFiles) {
+            return "先解决 \(countLabel(snapshot.conflictedFileCount ?? 0, unit: "处冲突"))，再继续审查或提交。"
+        }
+
+        if readiness.reasons.contains(.branchNeedsConfirmation) {
+            return "先确认当前分支，再决定是否继续审查或提交。"
+        }
+
+        if readiness.reasons.contains(.localAhead),
+           let aheadCount = snapshot.aheadCount,
+           aheadCount > 0 {
+            return "确认准备好后 push \(countLabel(aheadCount, unit: "个本地提交"))。"
+        }
+
+        if readiness.reasons.contains(.stagedChanges) {
+            return "确认 \(countLabel(snapshot.stagedFileCount ?? 0, unit: "个已暂存改动"))后即可提交。"
+        }
+
+        if readiness.reasons.contains(.mixedStagedAndUnstagedChanges) {
+            return "先拆清已暂存和未暂存改动，再决定是否提交。"
+        }
+
+        if readiness.reasons.contains(.highRiskChanges), readiness.level == .dirty {
+            return "先收敛 \(countLabel(snapshot.changedFileCount, unit: "处高风险改动"))，并跑一次验证。"
+        }
+
+        if readiness.reasons.contains(.largeWorkingTree) {
+            let targetCount = max(snapshot.changedFileCount, snapshot.untrackedFileCount + (snapshot.unstagedFileCount ?? 0))
+            return "先收敛 \(countLabel(targetCount, unit: "处改动"))，再继续审查或提交。"
+        }
+
+        if readiness.reasons.contains(.deletedFiles), snapshot.deletedFileCount > 0 {
+            return "先检查 \(countLabel(snapshot.deletedFileCount, unit: "个删除项"))，再决定是否提交。"
+        }
+
+        if readiness.reasons.contains(.untrackedFiles), snapshot.untrackedFileCount > 0 {
+            return "先确认 \(countLabel(snapshot.untrackedFileCount, unit: "个新文件"))是否纳入提交。"
+        }
+
+        if readiness.reasons.contains(.highRiskChanges) || snapshot.risk == .medium || snapshot.risk == .high {
+            return "先看 diff 并跑一次验证，再决定是否提交。"
+        }
+
+        switch readiness.level {
+        case .idle:
+            return "当前无需操作。"
+        case .ready:
+            return "如范围确认无误，可以继续提交或分享改动。"
+        case .review:
+            if snapshot.changedFileCount > 0 {
+                return "先看 \(countLabel(snapshot.changedFileCount, unit: "处改动"))的 diff，再决定是否提交。"
+            }
+            return "先审查当前改动，再决定是否提交。"
+        case .dirty:
+            return "先整理当前改动，再继续审查或提交。"
+        case .unknown:
+            return "先看 Diagnostics，确认 Git 读取失败原因。"
+        }
+    }
+
+    private static func countLabel(_ count: Int, unit: String) -> String {
+        "\(max(count, 1)) \(unit)"
+    }
 }
 
 // MARK: - Activity timeline
