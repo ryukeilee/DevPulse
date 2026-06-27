@@ -12,11 +12,6 @@ struct SettingsView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    // Section: Scan Status
-                    scanStatusSection
-
-                    Divider()
-
                     // Section: Default scan locations
                     defaultScanLocationsSection
 
@@ -27,18 +22,8 @@ struct SettingsView: View {
 
                     Divider()
 
-                    // Section: Actions
-                    actionsSection
-
-                    Divider()
-
                     // Section: Launch At Login
                     launchAtLoginSection
-
-                    Divider()
-
-                    // Section: Widget Instructions
-                    widgetInstructionsSection
 
                     Divider()
 
@@ -69,70 +54,6 @@ struct SettingsView: View {
             proxy.scrollTo(scrollTarget, anchor: .top)
         }
         self.scrollTarget = nil
-    }
-
-    // MARK: - Scan Status
-
-    private var scanStatusSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("Scan Status", systemImage: "info.circle")
-                .font(.headline)
-
-            Group {
-                HStack {
-                    Text("Repositories found:")
-                    Spacer()
-                    Text("\(scheduler.lastResult.scanSummary.totalRepositories)")
-                        .fontWeight(.medium)
-                }
-                HStack {
-                    Text("With changes:")
-                    Spacer()
-                    Text("\(scheduler.lastResult.scanSummary.changedRepositories)")
-                        .fontWeight(.medium)
-                }
-                HStack {
-                    Text("Last scan:")
-                    Spacer()
-                    if let lastScan = scheduler.lastScanAt {
-                        Text(formattedDate(lastScan))
-                            .fontWeight(.medium)
-                    } else {
-                        Text("Never")
-                            .foregroundColor(.secondary)
-                    }
-                }
-                if scheduler.lastResult.scanSummary.errorRepositories > 0 {
-                    HStack {
-                        Text("Scan errors:")
-                        Spacer()
-                        Text("\(scheduler.lastResult.scanSummary.errorRepositories)")
-                            .fontWeight(.medium)
-                            .foregroundColor(.red)
-                    }
-                }
-                if !scheduler.gitAvailable {
-                    HStack {
-                        Image(systemName: "xmark.octagon.fill")
-                            .foregroundColor(.red)
-                        Text("Git not found. Install Xcode Command Line Tools.")
-                            .font(.caption)
-                            .foregroundColor(.red)
-                    }
-                }
-                if !scheduler.appGroupAvailable {
-                    HStack {
-                        Image(systemName: "xmark.octagon.fill")
-                            .foregroundColor(.red)
-                        Text("App Group unavailable. Check entitlements.")
-                            .font(.caption)
-                            .foregroundColor(.red)
-                    }
-                }
-            }
-            .font(.caption)
-            .padding(.leading, 20)
-        }
     }
 
     // MARK: - Default scan locations
@@ -229,31 +150,6 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Actions
-
-    private var actionsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("Actions", systemImage: "play")
-                .font(.headline)
-
-            HStack(spacing: 12) {
-                Button(action: { scheduler.rescan() }) {
-                    Label(
-                        scheduler.isScanning ? "Scanning..." : "Rescan Now",
-                        systemImage: "arrow.triangle.2.circlepath"
-                    )
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(scheduler.isScanning)
-
-                Button(action: openWidgetInstructions) {
-                    Label("Widget Instructions", systemImage: "questionmark.circle")
-                }
-                .buttonStyle(.bordered)
-            }
-        }
-    }
-
     // MARK: - Launch At Login
 
     private var launchAtLoginSection: some View {
@@ -300,30 +196,6 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Widget Instructions
-
-    private var widgetInstructionsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("How to Add Widget", systemImage: "square.text.square")
-                .font(.headline)
-
-            VStack(alignment: .leading, spacing: 6) {
-                instructionRow(number: "1", text: "Right-click on your desktop.")
-                instructionRow(number: "2", text: "Select \"Edit Widgets...\" from the context menu.")
-                instructionRow(number: "3", text: "In the widget gallery, search for \"DevPulse\".")
-                instructionRow(number: "4", text: "Choose a size (Small, Medium, or Large) and drag it onto your desktop.")
-                instructionRow(number: "5", text: "Click \"Done\" when finished.")
-            }
-            .font(.caption)
-
-            Text("The widget only requests a refresh after you run Rescan. "
-                 + "Final refresh timing is still managed by macOS.")
-                .font(.caption2)
-                .foregroundColor(.secondary)
-                .padding(.top, 4)
-        }
-    }
-
     // MARK: - Diagnostics
 
     private var diagnosticsSection: some View {
@@ -356,50 +228,10 @@ struct SettingsView: View {
             }
 
             launchAtLoginDiagnosticsSection
-            widgetDataTrustCard
-            widgetDataTrustEvidenceSection
             diagnosticsOverviewCard
             diagnosticsSnapshotFactsSection
             diagnosticsSections
             diagnosticsScanRootsSection
-
-            if let widgetSnapshot = scheduler.diagnostics.widgetSnapshot {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Widget snapshot preview")
-                        .font(.caption.weight(.semibold))
-                    Text("generated \(snapshotTimeLabel(DateFormatting.date(from: widgetSnapshot.generatedAt))) · written \(snapshotTimeLabel(widgetSnapshot.writtenAt))")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    Text("repos \(widgetSnapshot.repositories.count) · changed \(widgetSnapshot.scanSummary.changedRepositories) · files \(widgetSnapshot.scanSummary.totalChangedFiles)")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    if let firstRepo = widgetSnapshot.repositories.first {
-                        Text("\(firstRepo.name) · \(firstRepo.branch) · total \(firstRepo.changedFileCount)")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                }
-                .padding(10)
-                .background(Color.secondary.opacity(0.06))
-                .cornerRadius(8)
-            }
-
-            if !widgetTrustNextSteps.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("What to do next")
-                        .font(.caption.weight(.semibold))
-                    ForEach(widgetTrustNextSteps, id: \.self) { step in
-                        Label(step, systemImage: "arrow.right.circle")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .padding(10)
-                .background(Color.secondary.opacity(0.06))
-                .cornerRadius(8)
-            }
 
             if !scheduler.diagnostics.validationIssues.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
@@ -622,74 +454,6 @@ struct SettingsView: View {
             widgetTrust: widgetTrustAssessment,
             repositories: scheduler.lastResult.repositories
         )
-    }
-
-    private var widgetDataTrust: WidgetDataTrustModel {
-        WidgetDataTrustBuilder.build(
-            diagnostics: scheduler.diagnostics,
-            widgetTrust: widgetTrustAssessment,
-            repositories: scheduler.lastResult.repositories
-        )
-    }
-
-    private var widgetTrustNextSteps: [String] {
-        var steps: [String] = []
-
-        for step in widgetDataTrust.nextSteps where !steps.contains(step) {
-            steps.append(step)
-        }
-
-        for step in scheduler.diagnostics.nextSteps where !steps.contains(step) {
-            steps.append(step)
-        }
-
-        return Array(steps.prefix(4))
-    }
-
-    private var widgetDataTrustCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(widgetDataTrust.headline, systemImage: severitySymbol(widgetDataTrust.severity))
-                .font(.caption.weight(.semibold))
-                .foregroundColor(severityColor(widgetDataTrust.severity))
-
-            Text(widgetDataTrust.summary)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: 8) {
-                Button(action: { scheduler.scanNow() }) {
-                    Label("Refresh Data", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(scheduler.isScanning)
-
-                Button(action: { scheduler.rescan() }) {
-                    Label("Rescan Now", systemImage: "arrow.triangle.2.circlepath")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(scheduler.isScanning)
-            }
-        }
-        .padding(10)
-        .background(severityBackground(widgetDataTrust.severity))
-        .cornerRadius(8)
-    }
-
-    private var widgetDataTrustEvidenceSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Widget data trust checklist")
-                .font(.caption.weight(.semibold))
-
-            ForEach(widgetDataTrust.evidence) { item in
-                diagnosticsInsightRow(item)
-            }
-        }
-        .padding(10)
-        .background(Color.secondary.opacity(0.06))
-        .cornerRadius(8)
     }
 
     private var diagnosticsOverviewCard: some View {
@@ -1108,21 +872,6 @@ struct SettingsView: View {
         return formattedDate(date)
     }
 
-    // MARK: - Helpers
-
-    private func instructionRow(number: String, text: String) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            Text(number)
-                .font(.caption2)
-                .fontWeight(.bold)
-                .foregroundColor(.white)
-                .frame(width: 16, height: 16)
-                .background(Circle().fill(Color.accentColor))
-            Text(text)
-                .font(.caption)
-        }
-    }
-
     private func formattedDate(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateStyle = .short
@@ -1133,9 +882,5 @@ struct SettingsView: View {
     private func directoryExists(_ path: String) -> Bool {
         var isDir: ObjCBool = false
         return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
-    }
-
-    private func openWidgetInstructions() {
-        // Scroll the view? For now this is in the same view.
     }
 }

@@ -2,9 +2,7 @@
 
 DevPulse is a local-first macOS Git activity glance widget.
 
-It automatically scans Git repositories on your Mac, reads only local Git metadata, and gives you a quick view of recent activity, repository health, and commit readiness. The current main line is the native Swift app in `DevPulseNative/`.
-
-A legacy Electron prototype still exists in `src/`, but it is not the current path for development or release.
+It automatically scans Git repositories on your Mac, reads only local Git metadata, and gives you a quick view of recent activity, repository health, and commit readiness. The project now ships only the native Swift app in `DevPulseNative/`.
 
 ## Why DevPulse Exists
 

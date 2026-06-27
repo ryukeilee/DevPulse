@@ -103,8 +103,8 @@ struct RepositoryRow: View {
         HStack(alignment: .top, spacing: 10) {
             pinIndicator
 
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(repo.name)
                         .font(.system(size: 14, weight: .semibold))
                         .lineLimit(1)
@@ -112,22 +112,15 @@ struct RepositoryRow: View {
 
                     Spacer(minLength: 8)
 
-                    if let topLineSummary {
-                        Text(topLineSummary)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-
                     CommitReadinessBadge(level: repo.commitReadiness.level, compact: true)
                 }
 
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     branchLabel
 
-                    Text(bottomLineSummary)
+                    Text(repo.statusSummary)
                         .font(.caption)
-                        .foregroundStyle(bottomLineColor)
+                        .foregroundStyle(statusSummaryColor)
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
@@ -155,50 +148,7 @@ struct RepositoryRow: View {
         }
     }
 
-    private var topLineSummary: String? {
-        if repo.status == .error {
-            return nil
-        }
-        if repo.changedFileCount > 0 {
-            return repo.changedFileCount == 1 ? "1 处改动" : "\(repo.changedFileCount) 处改动"
-        }
-        if let aheadCount = repo.aheadCount, aheadCount > 0 {
-            return aheadCount == 1 ? "领先 1 个提交" : "领先 \(aheadCount) 个提交"
-        }
-        return nil
-    }
-
-    private var bottomLineSummary: String {
-        if repo.status == .error {
-            return repo.errorMessage ?? "Git 状态不可用"
-        }
-
-        if repo.commitReadiness.level == .idle {
-            return "没有本地改动"
-        }
-
-        if repo.commitReadiness.level == .ready, repo.changedFileCount == 0, let aheadCount = repo.aheadCount, aheadCount > 0 {
-            return aheadCount == 1 ? "可 Push 1 个本地提交" : "可 Push \(aheadCount) 个本地提交"
-        }
-
-        let parts = [
-            stagedSummary,
-            repo.modifiedFileCount > 0 ? "已修改 \(repo.modifiedFileCount)" : nil,
-            repo.addedFileCount > 0 ? "已新增 \(repo.addedFileCount)" : nil,
-            repo.deletedFileCount > 0 ? "已删除 \(repo.deletedFileCount)" : nil,
-            repo.untrackedFileCount > 0 ? "未跟踪 \(repo.untrackedFileCount)" : nil
-        ].compactMap { $0 }
-
-        return parts.isEmpty ? repo.commitReadiness.detail : parts.joined(separator: " · ")
-    }
-
-    private var stagedSummary: String? {
-        let stagedCount = repo.stagedFileCount ?? 0
-        guard stagedCount > 0 else { return nil }
-        return "已暂存 \(stagedCount)"
-    }
-
-    private var bottomLineColor: Color {
+    private var statusSummaryColor: Color {
         switch repo.commitReadiness.level {
         case .dirty, .unknown:
             return .red

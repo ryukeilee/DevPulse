@@ -467,6 +467,127 @@ struct CommitReadinessEngineTests {
         #expect(OverviewDiagnosticsNavigation.scrollTarget == .diagnostics)
     }
 
+    @Test func repositoryStatusSummaryKeepsStatusAndAdviceSeparated() {
+        let repo = snapshot(
+            modified: 2,
+            untracked: 1,
+            staged: 1,
+            unstaged: 1
+        )
+
+        #expect(repo.statusSummary == "3 处改动 · 已暂存 1 · 未暂存 1 · 未跟踪 1")
+        #expect(repo.nextActionHint == "先拆清已暂存和未暂存改动，再决定是否提交。")
+    }
+
+    @Test func overviewFocusPrioritizesWidgetTrustErrors() {
+        var diagnostics = DiagnosticsSnapshot()
+        diagnostics.scanRoots = ["/tmp/projects"]
+
+        let focus = OverviewFocusBuilder.build(
+            lastScanAt: Date(timeIntervalSince1970: 1_718_000_000),
+            diagnostics: diagnostics,
+            widgetTrust: WidgetDataTrustModel(
+                headline: "当前 Widget 数据不可信，建议先修复",
+                summary: "共享快照缺失，当前无法确认桌面 Widget 是否展示了最新状态。",
+                severity: .error,
+                evidence: [],
+                nextSteps: ["先执行一次 Rescan Now，确认主 App 已生成共享快照。"],
+                primaryAction: WidgetDataTrustPrimaryAction(
+                    kind: .rescan,
+                    title: "重新扫描",
+                    systemImage: "arrow.triangle.2.circlepath",
+                    helpText: "先重新发现仓库并生成共享快照。"
+                )
+            ),
+            repositories: [snapshot(modified: 1)]
+        )
+
+        #expect(focus.title == "当前 Widget 数据不可信，建议先修复")
+        #expect(focus.action.kind == .rescan)
+        #expect(focus.severity == .error)
+    }
+
+    @Test func overviewFocusRoutesBrokenRepositoryToDiagnostics() {
+        var diagnostics = DiagnosticsSnapshot()
+        diagnostics.scanRoots = ["/tmp/projects"]
+
+        let focus = OverviewFocusBuilder.build(
+            lastScanAt: Date(timeIntervalSince1970: 1_718_000_000),
+            diagnostics: diagnostics,
+            widgetTrust: WidgetDataTrustModel(
+                headline: "当前 Widget 数据可信",
+                summary: "test",
+                severity: .normal,
+                evidence: [],
+                nextSteps: [],
+                primaryAction: WidgetDataTrustPrimaryAction(
+                    kind: .refreshData,
+                    title: "刷新数据",
+                    systemImage: "arrow.clockwise",
+                    helpText: "test"
+                )
+            ),
+            repositories: [snapshot(status: .error, errorMessage: "读取失败")]
+        )
+
+        #expect(focus.title == "repo-1 状态读取失败")
+        #expect(focus.action.kind == .openDiagnostics)
+        #expect(focus.detail == "先看 Diagnostics，确认 Git 读取失败原因。")
+    }
+
+    @Test func overviewFocusUsesRepositoriesAsPrimaryActionWhenWorkExists() {
+        var diagnostics = DiagnosticsSnapshot()
+        diagnostics.scanRoots = ["/tmp/projects"]
+
+        let focus = OverviewFocusBuilder.build(
+            lastScanAt: Date(timeIntervalSince1970: 1_718_000_000),
+            diagnostics: diagnostics,
+            widgetTrust: WidgetDataTrustModel(
+                headline: "当前 Widget 数据可能过期",
+                summary: "桌面 Widget 看到的数据可能不是最新一轮扫描结果。",
+                severity: .warning,
+                evidence: [],
+                nextSteps: ["如果只看主界面，可以先处理当前仓库。"],
+                primaryAction: WidgetDataTrustPrimaryAction(
+                    kind: .refreshData,
+                    title: "刷新数据",
+                    systemImage: "arrow.clockwise",
+                    helpText: "手动重写共享快照并请求 Widget 更新时间线。"
+                )
+            ),
+            repositories: [snapshot(modified: 2)]
+        )
+
+        #expect(focus.title == "repo-1")
+        #expect(focus.action.kind == .openRepositories)
+        #expect(focus.summary == "2 处改动 · 未暂存 2")
+    }
+
+    @Test func overviewFocusSendsMissingRepositoriesToSettings() {
+        let focus = OverviewFocusBuilder.build(
+            lastScanAt: Date(timeIntervalSince1970: 1_718_000_000),
+            diagnostics: DiagnosticsSnapshot(),
+            widgetTrust: WidgetDataTrustModel(
+                headline: "当前 Widget 数据可信",
+                summary: "test",
+                severity: .normal,
+                evidence: [],
+                nextSteps: [],
+                primaryAction: WidgetDataTrustPrimaryAction(
+                    kind: .refreshData,
+                    title: "刷新数据",
+                    systemImage: "arrow.clockwise",
+                    helpText: "test"
+                )
+            ),
+            repositories: []
+        )
+
+        #expect(focus.title == "没有可用的扫描目录")
+        #expect(focus.action.kind == .openSettings)
+        #expect(focus.severity == .warning)
+    }
+
     @Test func cleanRepositoryIsClean() {
         let result = CommitReadinessEngine.assess(snapshot: snapshot(status: .clean))
 

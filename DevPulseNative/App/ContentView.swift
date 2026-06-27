@@ -7,7 +7,11 @@ struct ContentView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            StatusTab(openDiagnostics: openDiagnostics)
+            StatusTab(
+                openRepositories: openRepositories,
+                openSettings: openSettings,
+                openDiagnostics: openDiagnostics
+            )
                 .tabItem {
                     Label("Overview", systemImage: "square.grid.2x2")
                 }
@@ -32,104 +36,106 @@ struct ContentView: View {
         selectedTab = OverviewDiagnosticsNavigation.tab
         settingsScrollTarget = OverviewDiagnosticsNavigation.scrollTarget
     }
+
+    private func openRepositories() {
+        selectedTab = .repositories
+    }
+
+    private func openSettings() {
+        selectedTab = .settings
+        settingsScrollTarget = nil
+    }
 }
 
 // MARK: - Status tab (overview)
 
 struct StatusTab: View {
     @EnvironmentObject var scheduler: ScanScheduler
+    let openRepositories: () -> Void
+    let openSettings: () -> Void
     let openDiagnostics: () -> Void
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                ScanStatusView()
-                WidgetDataTrustStatusBar(openDiagnostics: openDiagnostics)
-
-                if !scheduler.warnings.isEmpty {
-                    warningsPanel
-                }
-
-                ActivityTimelineView(
-                    feed: ActivityTimelineBuilder.build(
-                        from: scheduler.lastResult.repositories,
-                        lastScanAt: scheduler.lastScanAt
-                    ),
-                    onRescan: { scheduler.rescan() }
+            VStack(alignment: .leading, spacing: 14) {
+                OverviewFocusCard(
+                    openRepositories: openRepositories,
+                    openSettings: openSettings,
+                    openDiagnostics: openDiagnostics
                 )
+
+                if let detail = scheduler.refreshDetailText {
+                    Text("\(scheduler.refreshStatusText) · \(detail)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(scheduler.refreshStatusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(20)
         }
     }
-
-    private var warningsPanel: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(scheduler.warnings, id: \.self) { warning in
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.yellow)
-                        .font(.caption)
-                    Text(warning)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(Color.yellow.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
 }
 
-private struct WidgetDataTrustStatusBar: View {
+private struct OverviewFocusCard: View {
     @EnvironmentObject var scheduler: ScanScheduler
+    let openRepositories: () -> Void
+    let openSettings: () -> Void
     let openDiagnostics: () -> Void
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Image(systemName: severitySymbol)
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(severityColor)
-                .frame(width: 22, height: 22)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: severitySymbol)
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(severityColor)
+                    .frame(width: 26, height: 26)
 
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text("Widget 数据")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                Text(focus.title)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.primary)
 
-                    Text(widgetDataTrust.headline)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(severityColor)
-                        .lineLimit(1)
-                }
+                Spacer()
+            }
 
-                Text(widgetDataTrust.summary)
+            Text(focus.summary)
+                .font(.body)
+                .foregroundStyle(.primary)
+
+            if let detail = focus.detail {
+                Text(detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-
-            Spacer(minLength: 12)
 
             Button(action: performPrimaryAction) {
-                Label(primaryButtonModel.title, systemImage: primaryButtonModel.systemImage)
+                Label(focus.action.title, systemImage: focus.action.systemImage)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(primaryButtonModel.isDisabled)
-            .help(primaryButtonModel.helpText)
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
+            .disabled(isActionDisabled)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(severityBackground)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(severityColor.opacity(0.18), lineWidth: 1)
+        )
+    }
+
+    private var focus: OverviewFocusModel {
+        OverviewFocusBuilder.build(
+            lastScanAt: scheduler.lastScanAt,
+            diagnostics: scheduler.diagnostics,
+            widgetTrust: widgetDataTrust,
+            repositories: scheduler.lastResult.repositories
         )
     }
 
@@ -150,26 +156,32 @@ private struct WidgetDataTrustStatusBar: View {
         )
     }
 
-    private var primaryButtonModel: WidgetDataTrustPrimaryButtonModel {
-        WidgetDataTrustPrimaryButtonBuilder.build(
-            action: widgetDataTrust.primaryAction,
-            isScanning: scheduler.isScanning
-        )
-    }
-
     private func performPrimaryAction() {
-        switch primaryButtonModel.actionKind {
+        switch focus.action.kind {
         case .refreshData:
             scheduler.scanNow()
         case .rescan:
             scheduler.rescan()
-        case .viewDiagnostics:
+        case .openRepositories:
+            openRepositories()
+        case .openSettings:
+            openSettings()
+        case .openDiagnostics:
             openDiagnostics()
         }
     }
 
+    private var isActionDisabled: Bool {
+        switch focus.action.kind {
+        case .refreshData, .rescan:
+            return scheduler.isScanning
+        case .openRepositories, .openSettings, .openDiagnostics:
+            return false
+        }
+    }
+
     private var severityColor: Color {
-        switch widgetDataTrust.severity {
+        switch focus.severity {
         case .normal:
             return .green
         case .warning:
@@ -180,7 +192,7 @@ private struct WidgetDataTrustStatusBar: View {
     }
 
     private var severityBackground: Color {
-        switch widgetDataTrust.severity {
+        switch focus.severity {
         case .normal:
             return Color.green.opacity(0.08)
         case .warning:
@@ -191,7 +203,7 @@ private struct WidgetDataTrustStatusBar: View {
     }
 
     private var severitySymbol: String {
-        switch widgetDataTrust.severity {
+        switch focus.severity {
         case .normal:
             return "checkmark.seal.fill"
         case .warning:

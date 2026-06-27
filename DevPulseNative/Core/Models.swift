@@ -116,6 +116,10 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
     var nextActionHint: String {
         RepositoryNextActionHintBuilder.build(snapshot: self)
     }
+
+    var statusSummary: String {
+        RepositoryStatusSummaryBuilder.build(snapshot: self)
+    }
 }
 
 enum RepositoryNextActionHintBuilder {
@@ -188,6 +192,44 @@ enum RepositoryNextActionHintBuilder {
 
     private static func countLabel(_ count: Int, unit: String) -> String {
         "\(max(count, 1)) \(unit)"
+    }
+}
+
+enum RepositoryStatusSummaryBuilder {
+    static func build(snapshot: RepositorySnapshot) -> String {
+        if snapshot.status == .error || snapshot.commitReadiness.level == .unknown {
+            return snapshot.errorMessage ?? "Git 状态不可用"
+        }
+
+        if snapshot.changedFileCount == 0,
+           let aheadCount = snapshot.aheadCount,
+           aheadCount > 0 {
+            return aheadCount == 1 ? "领先 1 个本地提交" : "领先 \(aheadCount) 个本地提交"
+        }
+
+        if snapshot.commitReadiness.level == .idle {
+            return "没有本地改动"
+        }
+
+        var parts: [String] = []
+        parts.append(snapshot.changedFileCount == 1 ? "1 处改动" : "\(snapshot.changedFileCount) 处改动")
+
+        let stagedCount = snapshot.stagedFileCount ?? 0
+        if stagedCount > 0 {
+            parts.append("已暂存 \(stagedCount)")
+        }
+
+        let unstagedCount = snapshot.unstagedFileCount
+            ?? (snapshot.modifiedFileCount + snapshot.addedFileCount + snapshot.deletedFileCount)
+        if unstagedCount > 0 {
+            parts.append("未暂存 \(unstagedCount)")
+        }
+
+        if snapshot.untrackedFileCount > 0 {
+            parts.append("未跟踪 \(snapshot.untrackedFileCount)")
+        }
+
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -1020,9 +1062,233 @@ enum SettingsScrollTarget: Hashable {
     case diagnostics
 }
 
+enum OverviewPrimaryActionKind: Equatable {
+    case refreshData
+    case rescan
+    case openRepositories
+    case openSettings
+    case openDiagnostics
+}
+
+struct OverviewPrimaryAction: Equatable {
+    let kind: OverviewPrimaryActionKind
+    let title: String
+    let systemImage: String
+}
+
+struct OverviewFocusModel: Equatable {
+    let title: String
+    let summary: String
+    let detail: String?
+    let severity: DiagnosticsSeverity
+    let action: OverviewPrimaryAction
+}
+
 enum OverviewDiagnosticsNavigation {
     static let tab: AppTab = .settings
     static let scrollTarget: SettingsScrollTarget = .diagnostics
+}
+
+enum OverviewFocusBuilder {
+    static func build(
+        lastScanAt: Date?,
+        diagnostics: DiagnosticsSnapshot,
+        widgetTrust: WidgetDataTrustModel,
+        repositories: [RepositorySnapshot]
+    ) -> OverviewFocusModel {
+        if widgetTrust.severity == .error {
+            return widgetTrustFocus(widgetTrust)
+        }
+
+        if let repo = priorityRepository(in: repositories) {
+            return repositoryFocus(repo)
+        }
+
+        if diagnostics.scanRoots.isEmpty {
+            return OverviewFocusModel(
+                title: "没有可用的扫描目录",
+                summary: "当前还没有可访问的仓库根目录，Overview 暂时不会展示仓库状态。",
+                detail: "去 Settings 添加真实仓库目录后，再执行一次刷新。",
+                severity: .warning,
+                action: OverviewPrimaryAction(
+                    kind: .openSettings,
+                    title: "打开 Settings",
+                    systemImage: "gearshape"
+                )
+            )
+        }
+
+        if repositories.isEmpty {
+            if lastScanAt == nil {
+                return OverviewFocusModel(
+                    title: "尚未开始扫描",
+                    summary: "先建立一次当前快照，Overview 才能判断哪一个仓库最值得处理。",
+                    detail: "执行一次 Rescan 后，会自动发现扫描目录里的 Git 仓库。",
+                    severity: .warning,
+                    action: OverviewPrimaryAction(
+                        kind: .rescan,
+                        title: "立即刷新",
+                        systemImage: "arrow.triangle.2.circlepath"
+                    )
+                )
+            }
+
+            return OverviewFocusModel(
+                title: "还没有发现仓库",
+                summary: "当前扫描目录里没有可读取的 Git 仓库。",
+                detail: "去 Settings 调整扫描目录，或确认目录访问权限后再刷新。",
+                severity: .warning,
+                action: OverviewPrimaryAction(
+                    kind: .openSettings,
+                    title: "检查 Settings",
+                    systemImage: "gearshape"
+                )
+            )
+        }
+
+        if widgetTrust.severity == .warning {
+            return widgetTrustFocus(widgetTrust)
+        }
+
+        let repoCountLabel = repositories.count == 1 ? "1 个仓库" : "\(repositories.count) 个仓库"
+        return OverviewFocusModel(
+            title: "当前没有需要处理的仓库",
+            summary: "\(repoCountLabel) 当前都没有待审查的本地改动。",
+            detail: "如果想逐个确认状态，可以去 Repositories 查看完整列表。",
+            severity: .normal,
+            action: OverviewPrimaryAction(
+                kind: .openRepositories,
+                title: "查看仓库列表",
+                systemImage: "list.bullet.rectangle"
+            )
+        )
+    }
+
+    private static func widgetTrustFocus(_ widgetTrust: WidgetDataTrustModel) -> OverviewFocusModel {
+        OverviewFocusModel(
+            title: widgetTrust.headline,
+            summary: widgetTrust.summary,
+            detail: widgetTrust.nextSteps.first,
+            severity: widgetTrust.severity,
+            action: OverviewPrimaryAction(
+                kind: mapActionKind(widgetTrust.primaryAction.kind),
+                title: widgetTrust.primaryAction.title,
+                systemImage: widgetTrust.primaryAction.systemImage
+            )
+        )
+    }
+
+    private static func repositoryFocus(_ repo: RepositorySnapshot) -> OverviewFocusModel {
+        if repo.status == .error || repo.commitReadiness.level == .unknown {
+            return OverviewFocusModel(
+                title: "\(repo.name) 状态读取失败",
+                summary: repo.statusSummary,
+                detail: repo.nextActionHint,
+                severity: .error,
+                action: OverviewPrimaryAction(
+                    kind: .openDiagnostics,
+                    title: "查看诊断",
+                    systemImage: "stethoscope"
+                )
+            )
+        }
+
+        return OverviewFocusModel(
+            title: repo.name,
+            summary: repo.statusSummary,
+            detail: repo.nextActionHint,
+            severity: severity(for: repo.commitReadiness.level),
+            action: OverviewPrimaryAction(
+                kind: .openRepositories,
+                title: "查看仓库列表",
+                systemImage: "list.bullet.rectangle"
+            )
+        )
+    }
+
+    private static func priorityRepository(in repositories: [RepositorySnapshot]) -> RepositorySnapshot? {
+        if let brokenRepo = repositories.first(where: { $0.status == .error || $0.commitReadiness.level == .unknown }) {
+            return brokenRepo
+        }
+
+        return repositories.sorted(by: repositoryPriority(_:_:)).first {
+            $0.commitReadiness.level != .idle || (($0.aheadCount ?? 0) > 0)
+        }
+    }
+
+    private static func repositoryPriority(_ lhs: RepositorySnapshot, _ rhs: RepositorySnapshot) -> Bool {
+        let lhsReadinessPriority = readinessPriority(lhs.commitReadiness.level)
+        let rhsReadinessPriority = readinessPriority(rhs.commitReadiness.level)
+        if lhsReadinessPriority != rhsReadinessPriority {
+            return lhsReadinessPriority < rhsReadinessPriority
+        }
+
+        if lhs.changedFileCount != rhs.changedFileCount {
+            return lhs.changedFileCount > rhs.changedFileCount
+        }
+
+        if lhs.risk != rhs.risk {
+            return lhs.risk > rhs.risk
+        }
+
+        if let lhsDate = isoDate(lhs.lastChangedAt), let rhsDate = isoDate(rhs.lastChangedAt), lhsDate != rhsDate {
+            return lhsDate > rhsDate
+        }
+
+        if lhs.lastChangedAt != nil {
+            return true
+        }
+
+        if rhs.lastChangedAt != nil {
+            return false
+        }
+
+        return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+    }
+
+    private static func mapActionKind(_ kind: WidgetDataTrustPrimaryActionKind) -> OverviewPrimaryActionKind {
+        switch kind {
+        case .refreshData:
+            return .refreshData
+        case .rescan:
+            return .rescan
+        case .viewDiagnostics:
+            return .openDiagnostics
+        }
+    }
+
+    private static func severity(for level: CommitReadinessLevel) -> DiagnosticsSeverity {
+        switch level {
+        case .ready:
+            return .normal
+        case .review, .idle:
+            return .warning
+        case .dirty, .unknown:
+            return .error
+        }
+    }
+
+    private static func readinessPriority(_ level: CommitReadinessLevel) -> Int {
+        switch level {
+        case .unknown:
+            return 0
+        case .dirty:
+            return 1
+        case .review:
+            return 2
+        case .ready:
+            return 3
+        case .idle:
+            return 4
+        }
+    }
+
+    private static func isoDate(_ string: String?) -> Date? {
+        guard let string else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: string) ?? ISO8601DateFormatter().date(from: string)
+    }
 }
 
 enum DiagnosticsOverviewBuilder {
