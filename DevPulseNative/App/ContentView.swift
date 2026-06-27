@@ -2,29 +2,35 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var scheduler: ScanScheduler
-    @State private var selectedTab = 0
+    @State private var selectedTab: AppTab = .overview
+    @State private var settingsScrollTarget: SettingsScrollTarget?
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            StatusTab()
+            StatusTab(openDiagnostics: openDiagnostics)
                 .tabItem {
                     Label("Overview", systemImage: "square.grid.2x2")
                 }
-                .tag(0)
+                .tag(AppTab.overview)
 
             RepositoryListView()
                 .tabItem {
                     Label("Repositories", systemImage: "list.bullet.rectangle")
                 }
-                .tag(1)
+                .tag(AppTab.repositories)
 
-            SettingsView()
+            SettingsView(scrollTarget: $settingsScrollTarget)
                 .tabItem {
                     Label("Settings", systemImage: "gearshape")
                 }
-                .tag(2)
+                .tag(AppTab.settings)
         }
         .environmentObject(scheduler)
+    }
+
+    private func openDiagnostics() {
+        selectedTab = OverviewDiagnosticsNavigation.tab
+        settingsScrollTarget = OverviewDiagnosticsNavigation.scrollTarget
     }
 }
 
@@ -32,12 +38,13 @@ struct ContentView: View {
 
 struct StatusTab: View {
     @EnvironmentObject var scheduler: ScanScheduler
+    let openDiagnostics: () -> Void
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 ScanStatusView()
-                WidgetDataTrustStatusBar()
+                WidgetDataTrustStatusBar(openDiagnostics: openDiagnostics)
 
                 if !scheduler.warnings.isEmpty {
                     warningsPanel
@@ -77,6 +84,7 @@ struct StatusTab: View {
 
 private struct WidgetDataTrustStatusBar: View {
     @EnvironmentObject var scheduler: ScanScheduler
+    let openDiagnostics: () -> Void
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -105,13 +113,13 @@ private struct WidgetDataTrustStatusBar: View {
 
             Spacer(minLength: 12)
 
-            Button(action: { scheduler.scanNow() }) {
-                Label(scheduler.isScanning ? "刷新中…" : "刷新数据", systemImage: "arrow.clockwise")
+            Button(action: performPrimaryAction) {
+                Label(primaryButtonModel.title, systemImage: primaryButtonModel.systemImage)
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .disabled(scheduler.isScanning)
-            .help(primaryNextStep ?? "刷新共享快照并请求 Widget 更新时间线。")
+            .disabled(primaryButtonModel.isDisabled)
+            .help(primaryButtonModel.helpText)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -142,8 +150,22 @@ private struct WidgetDataTrustStatusBar: View {
         )
     }
 
-    private var primaryNextStep: String? {
-        widgetDataTrust.nextSteps.first
+    private var primaryButtonModel: WidgetDataTrustPrimaryButtonModel {
+        WidgetDataTrustPrimaryButtonBuilder.build(
+            action: widgetDataTrust.primaryAction,
+            isScanning: scheduler.isScanning
+        )
+    }
+
+    private func performPrimaryAction() {
+        switch primaryButtonModel.actionKind {
+        case .refreshData:
+            scheduler.scanNow()
+        case .rescan:
+            scheduler.rescan()
+        case .viewDiagnostics:
+            openDiagnostics()
+        }
     }
 
     private var severityColor: Color {

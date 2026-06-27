@@ -4,54 +4,71 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject var scheduler: ScanScheduler
     @EnvironmentObject var launchAtLoginController: LaunchAtLoginController
+    @Binding var scrollTarget: SettingsScrollTarget?
     @State private var newCustomPath: String = ""
     @State private var builtInToggles: [ScanLocationToggle] = ScanLocationProvider.builtInToggles()
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                // Section: Scan Status
-                scanStatusSection
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    // Section: Scan Status
+                    scanStatusSection
 
-                Divider()
+                    Divider()
 
-                // Section: Default scan locations
-                defaultScanLocationsSection
+                    // Section: Default scan locations
+                    defaultScanLocationsSection
 
-                Divider()
+                    Divider()
 
-                // Section: Custom scan directories
-                customScanDirectoriesSection
+                    // Section: Custom scan directories
+                    customScanDirectoriesSection
 
-                Divider()
+                    Divider()
 
-                // Section: Actions
-                actionsSection
+                    // Section: Actions
+                    actionsSection
 
-                Divider()
+                    Divider()
 
-                // Section: Launch At Login
-                launchAtLoginSection
+                    // Section: Launch At Login
+                    launchAtLoginSection
 
-                Divider()
+                    Divider()
 
-                // Section: Widget Instructions
-                widgetInstructionsSection
+                    // Section: Widget Instructions
+                    widgetInstructionsSection
 
-                Divider()
+                    Divider()
 
-                // Section: Diagnostics
-                diagnosticsSection
-            }
-            .padding(20)
-            .onAppear {
-                refreshBuiltInToggles()
-                launchAtLoginController.refreshStatus()
-            }
-            .onChange(of: scheduler.scanDirectories) { _, _ in
-                refreshBuiltInToggles()
+                    // Section: Diagnostics
+                    diagnosticsSection
+                        .id(SettingsScrollTarget.diagnostics)
+                }
+                .padding(20)
+                .onAppear {
+                    refreshBuiltInToggles()
+                    launchAtLoginController.refreshStatus()
+                    scrollToTargetIfNeeded(using: proxy)
+                }
+                .onChange(of: scheduler.scanDirectories) { _, _ in
+                    refreshBuiltInToggles()
+                }
+                .onChange(of: scrollTarget) { _, _ in
+                    scrollToTargetIfNeeded(using: proxy)
+                }
             }
         }
+    }
+
+    private func scrollToTargetIfNeeded(using proxy: ScrollViewProxy) {
+        guard let scrollTarget else { return }
+
+        withAnimation(.easeInOut(duration: 0.2)) {
+            proxy.scrollTo(scrollTarget, anchor: .top)
+        }
+        self.scrollTarget = nil
     }
 
     // MARK: - Scan Status

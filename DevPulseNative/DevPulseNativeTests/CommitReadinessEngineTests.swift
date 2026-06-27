@@ -334,6 +334,7 @@ struct CommitReadinessEngineTests {
         #expect(trust.severity == .normal)
         #expect(trust.headline == "当前 Widget 数据可信")
         #expect(trust.nextSteps.first == "当前可以信任 Widget 数据；如果桌面没有立即变化，等待 macOS 刷新时间线即可。")
+        #expect(trust.primaryAction.kind == .refreshData)
     }
 
     @Test func widgetDataTrustBuilderExplainsMissingSnapshotRecovery() {
@@ -359,6 +360,7 @@ struct CommitReadinessEngineTests {
         #expect(trust.headline == "当前 Widget 数据不可信，建议先修复")
         #expect(trust.summary.contains("共享快照还没有生成"))
         #expect(trust.nextSteps.first?.contains("Rescan Now") == true)
+        #expect(trust.primaryAction.kind == .rescan)
     }
 
     @Test func widgetDataTrustBuilderFlagsStaleButReadableData() {
@@ -385,6 +387,84 @@ struct CommitReadinessEngineTests {
         #expect(trust.severity == .warning)
         #expect(trust.headline == "当前 Widget 数据可能过期")
         #expect(trust.nextSteps.first?.contains("Refresh Data") == true)
+        #expect(trust.primaryAction.kind == .refreshData)
+    }
+
+    @Test func widgetDataTrustBuilderRoutesUnknownTrustToDiagnostics() {
+        var diagnostics = DiagnosticsSnapshot()
+        diagnostics.appGroupAvailable = true
+        diagnostics.snapshotExists = true
+        diagnostics.snapshotReadable = true
+        diagnostics.snapshotWritable = true
+        diagnostics.snapshotDecodable = true
+
+        let trust = WidgetDataTrustBuilder.build(
+            diagnostics: diagnostics,
+            widgetTrust: SnapshotTrustAssessment(
+                state: .unknown,
+                title: "状态未知",
+                detail: "无法确认数据是否最新",
+                basis: "Widget 缺少时间戳"
+            ),
+            repositories: []
+        )
+
+        #expect(trust.severity == .warning)
+        #expect(trust.primaryAction.kind == .viewDiagnostics)
+        #expect(trust.primaryAction.title == "查看诊断")
+    }
+
+    @Test func widgetPrimaryButtonShowsRescanAndDisablesWhileScanning() {
+        let action = WidgetDataTrustPrimaryAction(
+            kind: .rescan,
+            title: "重新扫描",
+            systemImage: "arrow.triangle.2.circlepath",
+            helpText: "先重新发现仓库并生成共享快照。"
+        )
+
+        let idleButton = WidgetDataTrustPrimaryButtonBuilder.build(action: action, isScanning: false)
+        let scanningButton = WidgetDataTrustPrimaryButtonBuilder.build(action: action, isScanning: true)
+
+        #expect(idleButton.title == "重新扫描")
+        #expect(idleButton.actionKind == .rescan)
+        #expect(idleButton.isDisabled == false)
+        #expect(scanningButton.title == "扫描中…")
+        #expect(scanningButton.isDisabled)
+    }
+
+    @Test func widgetPrimaryButtonKeepsDiagnosticsAvailableDuringScanning() {
+        let action = WidgetDataTrustPrimaryAction(
+            kind: .viewDiagnostics,
+            title: "查看诊断",
+            systemImage: "stethoscope",
+            helpText: "先看 Diagnostics，确认 generatedAt / writtenAt、共享快照和 Widget 读取结果。"
+        )
+
+        let button = WidgetDataTrustPrimaryButtonBuilder.build(action: action, isScanning: true)
+
+        #expect(button.title == "查看诊断")
+        #expect(button.actionKind == .viewDiagnostics)
+        #expect(button.isDisabled == false)
+    }
+
+    @Test func widgetPrimaryButtonShowsRefreshingStateForRefreshAction() {
+        let action = WidgetDataTrustPrimaryAction(
+            kind: .refreshData,
+            title: "刷新数据",
+            systemImage: "arrow.clockwise",
+            helpText: "手动重写共享快照并请求 Widget 更新时间线。"
+        )
+
+        let button = WidgetDataTrustPrimaryButtonBuilder.build(action: action, isScanning: true)
+
+        #expect(button.title == "刷新中…")
+        #expect(button.actionKind == .refreshData)
+        #expect(button.isDisabled)
+    }
+
+    @Test func overviewDiagnosticsNavigationTargetsSettingsDiagnostics() {
+        #expect(OverviewDiagnosticsNavigation.tab == .settings)
+        #expect(OverviewDiagnosticsNavigation.scrollTarget == .diagnostics)
     }
 
     @Test func cleanRepositoryIsClean() {

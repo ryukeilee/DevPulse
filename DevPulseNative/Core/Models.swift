@@ -874,6 +874,78 @@ struct WidgetDataTrustModel: Equatable {
     let severity: DiagnosticsSeverity
     let evidence: [DiagnosticsStatusItem]
     let nextSteps: [String]
+    let primaryAction: WidgetDataTrustPrimaryAction
+}
+
+enum WidgetDataTrustPrimaryActionKind: Equatable {
+    case refreshData
+    case rescan
+    case viewDiagnostics
+}
+
+struct WidgetDataTrustPrimaryAction: Equatable {
+    let kind: WidgetDataTrustPrimaryActionKind
+    let title: String
+    let systemImage: String
+    let helpText: String
+
+    var requiresScanning: Bool {
+        switch kind {
+        case .refreshData, .rescan:
+            return true
+        case .viewDiagnostics:
+            return false
+        }
+    }
+}
+
+struct WidgetDataTrustPrimaryButtonModel: Equatable {
+    let title: String
+    let systemImage: String
+    let helpText: String
+    let isDisabled: Bool
+    let actionKind: WidgetDataTrustPrimaryActionKind
+}
+
+enum WidgetDataTrustPrimaryButtonBuilder {
+    static func build(
+        action: WidgetDataTrustPrimaryAction,
+        isScanning: Bool
+    ) -> WidgetDataTrustPrimaryButtonModel {
+        let title: String
+
+        switch action.kind {
+        case .refreshData:
+            title = isScanning ? "刷新中…" : action.title
+        case .rescan:
+            title = isScanning ? "扫描中…" : action.title
+        case .viewDiagnostics:
+            title = action.title
+        }
+
+        return WidgetDataTrustPrimaryButtonModel(
+            title: title,
+            systemImage: action.systemImage,
+            helpText: action.helpText,
+            isDisabled: action.requiresScanning && isScanning,
+            actionKind: action.kind
+        )
+    }
+}
+
+enum AppTab: Int, Equatable {
+    case overview = 0
+    case repositories = 1
+    case settings = 2
+}
+
+enum SettingsScrollTarget: Hashable {
+    case diagnostics
+}
+
+enum OverviewDiagnosticsNavigation {
+    static let tab: AppTab = .settings
+    static let scrollTarget: SettingsScrollTarget = .diagnostics
 }
 
 enum DiagnosticsOverviewBuilder {
@@ -1142,7 +1214,8 @@ enum WidgetDataTrustBuilder {
             summary: summary,
             severity: severity,
             evidence: evidence,
-            nextSteps: nextSteps
+            nextSteps: nextSteps,
+            primaryAction: primaryAction(diagnostics: diagnostics, widgetTrust: widgetTrust)
         )
     }
 
@@ -1371,6 +1444,98 @@ enum WidgetDataTrustBuilder {
                 "如果仍无法确认，再检查 Diagnostics 中的共享快照与 Widget 读取结果。",
                 "必要时清理构建目录并重建 App 与 Widget。"
             ]
+        }
+    }
+
+    private static func primaryAction(
+        diagnostics: DiagnosticsSnapshot,
+        widgetTrust: SnapshotTrustAssessment
+    ) -> WidgetDataTrustPrimaryAction {
+        if !diagnostics.appGroupAvailable {
+            return WidgetDataTrustPrimaryAction(
+                kind: .viewDiagnostics,
+                title: "查看诊断",
+                systemImage: "stethoscope",
+                helpText: "先看 Diagnostics，确认 App Group、签名和共享容器路径。"
+            )
+        }
+
+        if !diagnostics.snapshotExists {
+            return WidgetDataTrustPrimaryAction(
+                kind: .rescan,
+                title: "重新扫描",
+                systemImage: "arrow.triangle.2.circlepath",
+                helpText: "先重新发现仓库并生成共享快照。"
+            )
+        }
+
+        if !diagnostics.snapshotReadable || diagnostics.sharedDataReadError != nil {
+            return WidgetDataTrustPrimaryAction(
+                kind: .refreshData,
+                title: "刷新数据",
+                systemImage: "arrow.clockwise",
+                helpText: "重试读取共享快照，并确认主 App 能读回最新数据。"
+            )
+        }
+
+        if !diagnostics.snapshotWritable || diagnostics.sharedDataWriteError != nil {
+            return WidgetDataTrustPrimaryAction(
+                kind: .refreshData,
+                title: "刷新数据",
+                systemImage: "arrow.clockwise",
+                helpText: "重写共享快照并再次请求 Widget 更新时间线。"
+            )
+        }
+
+        if !diagnostics.snapshotDecodable {
+            return WidgetDataTrustPrimaryAction(
+                kind: .refreshData,
+                title: "刷新数据",
+                systemImage: "arrow.clockwise",
+                helpText: "让当前版本的 App 重写共享快照，恢复可解码状态。"
+            )
+        }
+
+        if let widgetSnapshotReadError = diagnostics.widgetSnapshotReadError, !widgetSnapshotReadError.isEmpty {
+            return WidgetDataTrustPrimaryAction(
+                kind: .refreshData,
+                title: "刷新数据",
+                systemImage: "arrow.clockwise",
+                helpText: "先重写共享快照，再确认 Widget reload 和读取状态。"
+            )
+        }
+
+        if !diagnostics.validationIssues.isEmpty {
+            return WidgetDataTrustPrimaryAction(
+                kind: .refreshData,
+                title: "刷新数据",
+                systemImage: "arrow.clockwise",
+                helpText: "先刷新链路，再确认 shared write、widget snapshot 和 reload requested 是否恢复一致。"
+            )
+        }
+
+        switch widgetTrust.state {
+        case .fresh:
+            return WidgetDataTrustPrimaryAction(
+                kind: .refreshData,
+                title: "刷新数据",
+                systemImage: "arrow.clockwise",
+                helpText: "手动重写共享快照并请求 Widget 更新时间线。"
+            )
+        case .stale, .expired:
+            return WidgetDataTrustPrimaryAction(
+                kind: .refreshData,
+                title: "刷新数据",
+                systemImage: "arrow.clockwise",
+                helpText: "共享链路正常，但当前数据已经过旧，先刷新再判断。"
+            )
+        case .unknown, .failed:
+            return WidgetDataTrustPrimaryAction(
+                kind: .viewDiagnostics,
+                title: "查看诊断",
+                systemImage: "stethoscope",
+                helpText: "先看 Diagnostics，确认 generatedAt / writtenAt、共享快照和 Widget 读取结果。"
+            )
         }
     }
 
