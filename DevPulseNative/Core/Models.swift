@@ -1096,14 +1096,6 @@ enum OverviewFocusBuilder {
         widgetTrust: WidgetDataTrustModel,
         repositories: [RepositorySnapshot]
     ) -> OverviewFocusModel {
-        if widgetTrust.severity == .error {
-            return widgetTrustFocus(widgetTrust)
-        }
-
-        if let repo = priorityRepository(in: repositories) {
-            return repositoryFocus(repo)
-        }
-
         if diagnostics.scanRoots.isEmpty {
             return OverviewFocusModel(
                 title: "没有可用的扫描目录",
@@ -1144,6 +1136,14 @@ enum OverviewFocusBuilder {
                     systemImage: "gearshape"
                 )
             )
+        }
+
+        if widgetTrust.severity == .error {
+            return widgetTrustFocus(widgetTrust)
+        }
+
+        if let repo = priorityRepository(in: repositories) {
+            return repositoryFocus(repo)
         }
 
         if widgetTrust.severity == .warning {
@@ -1544,13 +1544,21 @@ enum WidgetDataTrustBuilder {
     ) -> WidgetDataTrustModel {
         let evidence = buildEvidence(diagnostics: diagnostics, widgetTrust: widgetTrust)
         let severity = overallSeverity(diagnostics: diagnostics, widgetTrust: widgetTrust)
-        let headline = headline(for: severity, widgetTrust: widgetTrust)
+        let headline = headline(
+            diagnostics: diagnostics,
+            severity: severity,
+            widgetTrust: widgetTrust
+        )
         let summary = summary(
             diagnostics: diagnostics,
             widgetTrust: widgetTrust,
             repositories: repositories
         )
-        let nextSteps = nextSteps(diagnostics: diagnostics, widgetTrust: widgetTrust)
+        let nextSteps = nextSteps(
+            diagnostics: diagnostics,
+            widgetTrust: widgetTrust,
+            repositories: repositories
+        )
 
         return WidgetDataTrustModel(
             headline: headline,
@@ -1558,7 +1566,11 @@ enum WidgetDataTrustBuilder {
             severity: severity,
             evidence: evidence,
             nextSteps: nextSteps,
-            primaryAction: primaryAction(diagnostics: diagnostics, widgetTrust: widgetTrust)
+            primaryAction: primaryAction(
+                diagnostics: diagnostics,
+                widgetTrust: widgetTrust,
+                repositories: repositories
+            )
         )
     }
 
@@ -1657,7 +1669,8 @@ enum WidgetDataTrustBuilder {
     }
 
     private static func headline(
-        for severity: DiagnosticsSeverity,
+        diagnostics: DiagnosticsSnapshot,
+        severity: DiagnosticsSeverity,
         widgetTrust: SnapshotTrustAssessment
     ) -> String {
         switch severity {
@@ -1673,6 +1686,9 @@ enum WidgetDataTrustBuilder {
                 return "当前 Widget 数据基本可信"
             }
         case .error:
+            if !diagnostics.snapshotExists {
+                return "Widget 还没有可用快照"
+            }
             return "当前 Widget 数据不可信，建议先修复"
         }
     }
@@ -1693,7 +1709,10 @@ enum WidgetDataTrustBuilder {
                 return "主 App 还拿不到共享容器，Widget 无法和 App 对齐同一份数据。"
             }
             if !diagnostics.snapshotExists {
-                return "共享快照还没有生成，Widget 现在没有可验证的数据来源。"
+                if repositories.isEmpty {
+                    return "共享快照还没有生成，Widget 现在没有可验证的数据来源。"
+                }
+                return "主界面已经拿到扫描结果，但还没有写出 Widget 可读快照。先刷新数据，把当前结果共享给 Widget。"
             }
             if !diagnostics.snapshotReadable || diagnostics.sharedDataReadError != nil {
                 return "主 App 读不回共享快照，当前无法确认 Widget 正在显示什么数据。"
@@ -1714,7 +1733,8 @@ enum WidgetDataTrustBuilder {
 
     private static func nextSteps(
         diagnostics: DiagnosticsSnapshot,
-        widgetTrust: SnapshotTrustAssessment
+        widgetTrust: SnapshotTrustAssessment,
+        repositories: [RepositorySnapshot]
     ) -> [String] {
         if !diagnostics.appGroupAvailable {
             return [
@@ -1725,10 +1745,17 @@ enum WidgetDataTrustBuilder {
         }
 
         if !diagnostics.snapshotExists {
+            if repositories.isEmpty {
+                return [
+                    "先执行一次 Rescan Now，让主 App 重新发现仓库并生成共享快照。",
+                    "如果还是缺失，检查扫描目录是否指向真实仓库根目录。",
+                    "若目录正常但快照仍未生成，再检查 App Group / Signing。"
+                ]
+            }
             return [
-                "先执行一次 Rescan Now，让主 App 重新发现仓库并生成共享快照。",
-                "如果还是缺失，检查扫描目录是否指向真实仓库根目录。",
-                "若目录正常但快照仍未生成，再检查 App Group / Signing。"
+                "先执行 Refresh Data，把当前扫描结果写入共享快照。",
+                "如果仍未生成，再检查 Diagnostics 里的 shared write、widget snapshot 和 App Group 状态。",
+                "如仍异常，再执行一次重新扫描确认仓库结果能否稳定写入。"
             ]
         }
 
@@ -1792,7 +1819,8 @@ enum WidgetDataTrustBuilder {
 
     private static func primaryAction(
         diagnostics: DiagnosticsSnapshot,
-        widgetTrust: SnapshotTrustAssessment
+        widgetTrust: SnapshotTrustAssessment,
+        repositories: [RepositorySnapshot]
     ) -> WidgetDataTrustPrimaryAction {
         if !diagnostics.appGroupAvailable {
             return WidgetDataTrustPrimaryAction(
@@ -1804,6 +1832,14 @@ enum WidgetDataTrustBuilder {
         }
 
         if !diagnostics.snapshotExists {
+            if !repositories.isEmpty {
+                return WidgetDataTrustPrimaryAction(
+                    kind: .refreshData,
+                    title: "刷新数据",
+                    systemImage: "arrow.clockwise",
+                    helpText: "先把当前扫描结果写入共享快照，再确认 Widget 能否读到。"
+                )
+            }
             return WidgetDataTrustPrimaryAction(
                 kind: .rescan,
                 title: "重新扫描",

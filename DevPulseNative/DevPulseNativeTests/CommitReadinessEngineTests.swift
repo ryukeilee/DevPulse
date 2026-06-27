@@ -357,10 +357,36 @@ struct CommitReadinessEngineTests {
         )
 
         #expect(trust.severity == .error)
-        #expect(trust.headline == "当前 Widget 数据不可信，建议先修复")
+        #expect(trust.headline == "Widget 还没有可用快照")
         #expect(trust.summary.contains("共享快照还没有生成"))
         #expect(trust.nextSteps.first?.contains("Rescan Now") == true)
         #expect(trust.primaryAction.kind == .rescan)
+    }
+
+    @Test func widgetDataTrustBuilderUsesRefreshWhenResultsExistButSnapshotMissing() {
+        var diagnostics = DiagnosticsSnapshot()
+        diagnostics.appGroupAvailable = true
+        diagnostics.snapshotExists = false
+        diagnostics.snapshotReadable = false
+        diagnostics.snapshotWritable = true
+        diagnostics.snapshotDecodable = false
+
+        let trust = WidgetDataTrustBuilder.build(
+            diagnostics: diagnostics,
+            widgetTrust: SnapshotTrustAssessment(
+                state: .unknown,
+                title: "状态未知",
+                detail: "无法确认数据是否最新",
+                basis: "共享快照缺失"
+            ),
+            repositories: [snapshot(modified: 1)]
+        )
+
+        #expect(trust.severity == .error)
+        #expect(trust.headline == "Widget 还没有可用快照")
+        #expect(trust.summary.contains("主界面已经拿到扫描结果"))
+        #expect(trust.nextSteps.first?.contains("Refresh Data") == true)
+        #expect(trust.primaryAction.kind == .refreshData)
     }
 
     @Test func widgetDataTrustBuilderFlagsStaleButReadableData() {
@@ -505,6 +531,84 @@ struct CommitReadinessEngineTests {
         #expect(focus.title == "当前 Widget 数据不可信，建议先修复")
         #expect(focus.action.kind == .rescan)
         #expect(focus.severity == .error)
+    }
+
+    @Test func overviewFocusPrioritizesMissingScanRootsBeforeWidgetErrors() {
+        let focus = OverviewFocusBuilder.build(
+            lastScanAt: Date(timeIntervalSince1970: 1_718_000_000),
+            diagnostics: DiagnosticsSnapshot(),
+            widgetTrust: WidgetDataTrustModel(
+                headline: "Widget 还没有可用快照",
+                summary: "共享快照缺失。",
+                severity: .error,
+                evidence: [],
+                nextSteps: ["先执行一次 Rescan Now。"],
+                primaryAction: WidgetDataTrustPrimaryAction(
+                    kind: .rescan,
+                    title: "重新扫描",
+                    systemImage: "arrow.triangle.2.circlepath",
+                    helpText: "test"
+                )
+            ),
+            repositories: []
+        )
+
+        #expect(focus.title == "没有可用的扫描目录")
+        #expect(focus.action.kind == .openSettings)
+    }
+
+    @Test func overviewFocusPrioritizesFirstScanBeforeWidgetErrors() {
+        var diagnostics = DiagnosticsSnapshot()
+        diagnostics.scanRoots = ["/tmp/projects"]
+
+        let focus = OverviewFocusBuilder.build(
+            lastScanAt: nil,
+            diagnostics: diagnostics,
+            widgetTrust: WidgetDataTrustModel(
+                headline: "Widget 还没有可用快照",
+                summary: "共享快照缺失。",
+                severity: .error,
+                evidence: [],
+                nextSteps: ["先执行一次 Rescan Now。"],
+                primaryAction: WidgetDataTrustPrimaryAction(
+                    kind: .rescan,
+                    title: "重新扫描",
+                    systemImage: "arrow.triangle.2.circlepath",
+                    helpText: "test"
+                )
+            ),
+            repositories: []
+        )
+
+        #expect(focus.title == "尚未开始扫描")
+        #expect(focus.action.kind == .rescan)
+    }
+
+    @Test func overviewFocusPrioritizesRepositoryDiscoveryBeforeWidgetErrors() {
+        var diagnostics = DiagnosticsSnapshot()
+        diagnostics.scanRoots = ["/tmp/projects"]
+
+        let focus = OverviewFocusBuilder.build(
+            lastScanAt: Date(timeIntervalSince1970: 1_718_000_000),
+            diagnostics: diagnostics,
+            widgetTrust: WidgetDataTrustModel(
+                headline: "Widget 还没有可用快照",
+                summary: "共享快照缺失。",
+                severity: .error,
+                evidence: [],
+                nextSteps: ["先执行一次 Rescan Now。"],
+                primaryAction: WidgetDataTrustPrimaryAction(
+                    kind: .rescan,
+                    title: "重新扫描",
+                    systemImage: "arrow.triangle.2.circlepath",
+                    helpText: "test"
+                )
+            ),
+            repositories: []
+        )
+
+        #expect(focus.title == "还没有发现仓库")
+        #expect(focus.action.kind == .openSettings)
     }
 
     @Test func overviewFocusRoutesBrokenRepositoryToDiagnostics() {
