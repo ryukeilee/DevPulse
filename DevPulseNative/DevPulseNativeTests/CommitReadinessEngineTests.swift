@@ -227,7 +227,7 @@ struct CommitReadinessEngineTests {
         #expect(overview.sections.first?.severity == .normal)
     }
 
-    @Test func diagnosticsOverviewFlagsMissingSnapshotFile() {
+    @Test func diagnosticsOverviewTreatsInitialMissingSnapshotAsSetupStep() {
         var diagnostics = DiagnosticsSnapshot()
         diagnostics.appGroupAvailable = true
         diagnostics.appGroupContainerPath = "/tmp/group.local.devpulse"
@@ -244,6 +244,30 @@ struct CommitReadinessEngineTests {
                 basis: "共享快照缺失"
             ),
             repositories: []
+        )
+
+        #expect(overview.severity == .warning)
+        #expect(overview.headline == "共享数据链路")
+        #expect(overview.sections.first?.items.contains(where: { $0.title == "数据文件" && $0.severity == .warning }) == true)
+    }
+
+    @Test func diagnosticsOverviewFlagsMissingSnapshotAfterRepositoriesExist() {
+        var diagnostics = DiagnosticsSnapshot()
+        diagnostics.appGroupAvailable = true
+        diagnostics.appGroupContainerPath = "/tmp/group.local.devpulse"
+        diagnostics.snapshotExists = false
+        diagnostics.snapshotFilePath = "/tmp/group.local.devpulse/repositories.json"
+
+        let overview = DiagnosticsOverviewBuilder.build(
+            diagnostics: diagnostics,
+            refreshTrust: freshTrust(),
+            widgetTrust: SnapshotTrustAssessment(
+                state: .unknown,
+                title: "状态未知",
+                detail: "无法确认共享快照是否最新",
+                basis: "共享快照缺失"
+            ),
+            repositories: [snapshot(modified: 1)]
         )
 
         #expect(overview.severity == .error)
@@ -335,9 +359,10 @@ struct CommitReadinessEngineTests {
         #expect(trust.headline == "当前 Widget 数据可信")
         #expect(trust.nextSteps.first == "当前可以信任 Widget 数据；如果桌面没有立即变化，等待 macOS 刷新时间线即可。")
         #expect(trust.primaryAction.kind == .refreshData)
+        #expect(trust.primaryAction.title == "Refresh Data")
     }
 
-    @Test func widgetDataTrustBuilderExplainsMissingSnapshotRecovery() {
+    @Test func widgetDataTrustBuilderTreatsInitialMissingSnapshotAsSetupStep() {
         var diagnostics = DiagnosticsSnapshot()
         diagnostics.appGroupAvailable = true
         diagnostics.snapshotExists = false
@@ -356,11 +381,28 @@ struct CommitReadinessEngineTests {
             repositories: []
         )
 
-        #expect(trust.severity == .error)
-        #expect(trust.headline == "Widget 还没有可用快照")
-        #expect(trust.summary.contains("共享快照还没有生成"))
+        #expect(trust.severity == .warning)
+        #expect(trust.headline == "Widget 尚未生成快照")
+        #expect(trust.summary.contains("首次启动"))
         #expect(trust.nextSteps.first?.contains("Rescan Now") == true)
         #expect(trust.primaryAction.kind == .rescan)
+        #expect(trust.primaryAction.title == "Rescan Now")
+    }
+
+    @Test func missingSharedSnapshotUsesContainerWritableState() {
+        #expect(AppGroupStore.resolveSnapshotWritable(
+            snapshotExists: false,
+            fileWritable: false,
+            containerWritable: true
+        ))
+    }
+
+    @Test func existingSharedSnapshotUsesFileWritableState() {
+        #expect(AppGroupStore.resolveSnapshotWritable(
+            snapshotExists: true,
+            fileWritable: false,
+            containerWritable: true
+        ) == false)
     }
 
     @Test func widgetDataTrustBuilderUsesRefreshWhenResultsExistButSnapshotMissing() {
@@ -387,6 +429,7 @@ struct CommitReadinessEngineTests {
         #expect(trust.summary.contains("主界面已经拿到扫描结果"))
         #expect(trust.nextSteps.first?.contains("Refresh Data") == true)
         #expect(trust.primaryAction.kind == .refreshData)
+        #expect(trust.primaryAction.title == "Refresh Data")
     }
 
     @Test func widgetDataTrustBuilderFlagsStaleButReadableData() {
@@ -414,6 +457,7 @@ struct CommitReadinessEngineTests {
         #expect(trust.headline == "当前 Widget 数据可能过期")
         #expect(trust.nextSteps.first?.contains("Refresh Data") == true)
         #expect(trust.primaryAction.kind == .refreshData)
+        #expect(trust.primaryAction.title == "Refresh Data")
     }
 
     @Test func widgetDataTrustBuilderRoutesUnknownTrustToDiagnostics() {
@@ -443,7 +487,7 @@ struct CommitReadinessEngineTests {
     @Test func widgetPrimaryButtonShowsRescanAndDisablesWhileScanning() {
         let action = WidgetDataTrustPrimaryAction(
             kind: .rescan,
-            title: "重新扫描",
+            title: "Rescan Now",
             systemImage: "arrow.triangle.2.circlepath",
             helpText: "先重新发现仓库并生成共享快照。"
         )
@@ -451,7 +495,7 @@ struct CommitReadinessEngineTests {
         let idleButton = WidgetDataTrustPrimaryButtonBuilder.build(action: action, isScanning: false)
         let scanningButton = WidgetDataTrustPrimaryButtonBuilder.build(action: action, isScanning: true)
 
-        #expect(idleButton.title == "重新扫描")
+        #expect(idleButton.title == "Rescan Now")
         #expect(idleButton.actionKind == .rescan)
         #expect(idleButton.isDisabled == false)
         #expect(scanningButton.title == "扫描中…")
@@ -476,7 +520,7 @@ struct CommitReadinessEngineTests {
     @Test func widgetPrimaryButtonShowsRefreshingStateForRefreshAction() {
         let action = WidgetDataTrustPrimaryAction(
             kind: .refreshData,
-            title: "刷新数据",
+            title: "Refresh Data",
             systemImage: "arrow.clockwise",
             helpText: "手动重写共享快照并请求 Widget 更新时间线。"
         )
@@ -582,6 +626,7 @@ struct CommitReadinessEngineTests {
 
         #expect(focus.title == "尚未开始扫描")
         #expect(focus.action.kind == .rescan)
+        #expect(focus.action.title == "Rescan Now")
     }
 
     @Test func overviewFocusPrioritizesRepositoryDiscoveryBeforeWidgetErrors() {

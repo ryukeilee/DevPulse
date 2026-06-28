@@ -57,7 +57,7 @@ struct ScanStatusView: View {
                             } else {
                                 Image(systemName: "arrow.triangle.2.circlepath")
                             }
-                            Text(scheduler.isScanning ? "刷新中…" : "立即刷新")
+                            Text(scheduler.isScanning ? "Scanning..." : "Rescan Now")
                         }
                     }
                     .disabled(scheduler.isScanning)

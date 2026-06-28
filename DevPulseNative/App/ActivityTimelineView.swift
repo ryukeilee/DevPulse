@@ -13,8 +13,8 @@ struct ActivityTimelineView: View {
                 emptyState(
                     icon: "magnifyingglass",
                     title: "尚未开始扫描",
-                    detail: "点击“立即刷新”，DevPulse 会先扫描默认目录并尝试发现本机 Git 仓库。",
-                    actionTitle: "立即刷新",
+                    detail: "执行 Rescan Now，DevPulse 会先扫描默认目录并尝试发现本机 Git 仓库。",
+                    actionTitle: "Rescan Now",
                     action: onRescan
                 )
             case .noRepositories:
@@ -22,7 +22,7 @@ struct ActivityTimelineView: View {
                     icon: "tray",
                     title: "未发现 Git 仓库",
                     detail: "检查 Settings 里的扫描目录；如果默认目录里没有仓库，可手动添加其他目录后重新刷新。",
-                    actionTitle: "立即刷新",
+                    actionTitle: "Rescan Now",
                     action: onRescan
                 )
             case .allClean:

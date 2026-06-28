@@ -33,6 +33,7 @@ struct RepositoryDiscoveryExperienceTests {
 
         #expect(state.title == "尚未开始扫描")
         #expect(state.detail.contains("默认目录"))
+        #expect(state.detail.contains("Rescan Now"))
     }
 
     @Test func repositoryEmptyStateExplainsMissingRoots() {

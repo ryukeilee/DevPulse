@@ -56,11 +56,23 @@ enum AppGroupStore {
     }
 
     static var snapshotWritable: Bool {
-        if let path = snapshotPath {
-            return FileManager.default.isWritableFile(atPath: path)
-        }
         guard let containerPath else { return false }
-        return FileManager.default.isWritableFile(atPath: containerPath)
+        let snapshotExists = snapshotPath.map(FileManager.default.fileExists(atPath:)) ?? false
+        let fileWritable = snapshotPath.map(FileManager.default.isWritableFile(atPath:)) ?? false
+        let containerWritable = FileManager.default.isWritableFile(atPath: containerPath)
+        return resolveSnapshotWritable(
+            snapshotExists: snapshotExists,
+            fileWritable: fileWritable,
+            containerWritable: containerWritable
+        )
+    }
+
+    static func resolveSnapshotWritable(
+        snapshotExists: Bool,
+        fileWritable: Bool,
+        containerWritable: Bool
+    ) -> Bool {
+        snapshotExists ? fileWritable : containerWritable
     }
 
     static func inspect() -> AppGroupStoreInspection {

@@ -595,7 +595,7 @@ enum RepositoryEmptyStateBuilder {
         if lastScanAt == nil {
             return RepositoryEmptyState(
                 title: "尚未开始扫描",
-                detail: "点击“立即刷新”，DevPulse 会先扫描默认目录并尝试发现本机 Git 仓库。",
+                detail: "执行 Rescan Now，DevPulse 会先扫描默认目录并尝试发现本机 Git 仓库。",
                 systemImage: "magnifyingglass"
             )
         }
@@ -1119,7 +1119,7 @@ enum OverviewFocusBuilder {
                     severity: .warning,
                     action: OverviewPrimaryAction(
                         kind: .rescan,
-                        title: "立即刷新",
+                        title: "Rescan Now",
                         systemImage: "arrow.triangle.2.circlepath"
                     )
                 )
@@ -1298,7 +1298,10 @@ enum DiagnosticsOverviewBuilder {
         widgetTrust: SnapshotTrustAssessment,
         repositories: [RepositorySnapshot]
     ) -> DiagnosticsOverviewModel {
-        let sharedDataSection = sharedDataSection(diagnostics: diagnostics)
+        let sharedDataSection = sharedDataSection(
+            diagnostics: diagnostics,
+            repositories: repositories
+        )
         let widgetSection = widgetSection(diagnostics: diagnostics, widgetTrust: widgetTrust)
         let scanSection = scanSection(
             diagnostics: diagnostics,
@@ -1325,9 +1328,18 @@ enum DiagnosticsOverviewBuilder {
         )
     }
 
-    private static func sharedDataSection(diagnostics: DiagnosticsSnapshot) -> DiagnosticsSectionModel {
+    private static func sharedDataSection(
+        diagnostics: DiagnosticsSnapshot,
+        repositories: [RepositorySnapshot]
+    ) -> DiagnosticsSectionModel {
         let appGroupSeverity: DiagnosticsSeverity = diagnostics.appGroupAvailable ? .normal : .error
-        let fileSeverity: DiagnosticsSeverity = diagnostics.snapshotExists ? .normal : .error
+        let isInitialSnapshotMissing = isInitialSnapshotMissing(
+            diagnostics: diagnostics,
+            repositories: repositories
+        )
+        let fileSeverity: DiagnosticsSeverity = diagnostics.snapshotExists
+            ? .normal
+            : (isInitialSnapshotMissing ? .warning : .error)
         let readSeverity: DiagnosticsSeverity
         if diagnostics.sharedDataReadError != nil {
             readSeverity = .error
@@ -1518,6 +1530,19 @@ enum DiagnosticsOverviewBuilder {
         }
     }
 
+    private static func isInitialSnapshotMissing(
+        diagnostics: DiagnosticsSnapshot,
+        repositories: [RepositorySnapshot]
+    ) -> Bool {
+        diagnostics.appGroupAvailable
+            && !diagnostics.snapshotExists
+            && repositories.isEmpty
+            && diagnostics.sharedDataReadError == nil
+            && diagnostics.sharedDataWriteError == nil
+            && diagnostics.lastSharedWriteAt == nil
+            && diagnostics.sharedDataSnapshot == nil
+    }
+
     private static func maxSeverity(_ severities: [DiagnosticsSeverity]) -> DiagnosticsSeverity {
         if severities.contains(.error) {
             return .error
@@ -1542,12 +1567,21 @@ enum WidgetDataTrustBuilder {
         widgetTrust: SnapshotTrustAssessment,
         repositories: [RepositorySnapshot]
     ) -> WidgetDataTrustModel {
-        let evidence = buildEvidence(diagnostics: diagnostics, widgetTrust: widgetTrust)
-        let severity = overallSeverity(diagnostics: diagnostics, widgetTrust: widgetTrust)
+        let evidence = buildEvidence(
+            diagnostics: diagnostics,
+            widgetTrust: widgetTrust,
+            repositories: repositories
+        )
+        let severity = overallSeverity(
+            diagnostics: diagnostics,
+            widgetTrust: widgetTrust,
+            repositories: repositories
+        )
         let headline = headline(
             diagnostics: diagnostics,
             severity: severity,
-            widgetTrust: widgetTrust
+            widgetTrust: widgetTrust,
+            repositories: repositories
         )
         let summary = summary(
             diagnostics: diagnostics,
@@ -1576,12 +1610,17 @@ enum WidgetDataTrustBuilder {
 
     private static func buildEvidence(
         diagnostics: DiagnosticsSnapshot,
-        widgetTrust: SnapshotTrustAssessment
+        widgetTrust: SnapshotTrustAssessment,
+        repositories: [RepositorySnapshot]
     ) -> [DiagnosticsStatusItem] {
-        let snapshotExistsSeverity: DiagnosticsSeverity = diagnostics.snapshotExists ? .normal : .error
-        let snapshotReadableSeverity: DiagnosticsSeverity = diagnostics.snapshotReadable ? .normal : .error
+        let isInitialSnapshotMissing = isInitialSnapshotMissing(
+            diagnostics: diagnostics,
+            repositories: repositories
+        )
+        let snapshotExistsSeverity: DiagnosticsSeverity = diagnostics.snapshotExists ? .normal : (isInitialSnapshotMissing ? .warning : .error)
+        let snapshotReadableSeverity: DiagnosticsSeverity = diagnostics.snapshotReadable ? .normal : (isInitialSnapshotMissing ? .warning : .error)
         let snapshotWritableSeverity: DiagnosticsSeverity = diagnostics.snapshotWritable ? .normal : .error
-        let snapshotDecodableSeverity: DiagnosticsSeverity = diagnostics.snapshotDecodable ? .normal : .error
+        let snapshotDecodableSeverity: DiagnosticsSeverity = diagnostics.snapshotDecodable ? .normal : (isInitialSnapshotMissing ? .warning : .error)
         let freshnessSeverity = severity(for: widgetTrust.state)
         let consistencySeverity = diagnostics.validationIssues.isEmpty ? DiagnosticsSeverity.normal : .error
 
@@ -1646,13 +1685,19 @@ enum WidgetDataTrustBuilder {
 
     private static func overallSeverity(
         diagnostics: DiagnosticsSnapshot,
-        widgetTrust: SnapshotTrustAssessment
+        widgetTrust: SnapshotTrustAssessment,
+        repositories: [RepositorySnapshot]
     ) -> DiagnosticsSeverity {
+        let isInitialSnapshotMissing = isInitialSnapshotMissing(
+            diagnostics: diagnostics,
+            repositories: repositories
+        )
+
         if !diagnostics.appGroupAvailable
-            || !diagnostics.snapshotExists
-            || !diagnostics.snapshotReadable
+            || (!diagnostics.snapshotExists && !isInitialSnapshotMissing)
+            || (!diagnostics.snapshotReadable && !isInitialSnapshotMissing)
             || !diagnostics.snapshotWritable
-            || !diagnostics.snapshotDecodable
+            || (!diagnostics.snapshotDecodable && !isInitialSnapshotMissing)
             || diagnostics.sharedDataReadError != nil
             || diagnostics.sharedDataWriteError != nil
             || diagnostics.widgetSnapshotReadError != nil
@@ -1671,12 +1716,19 @@ enum WidgetDataTrustBuilder {
     private static func headline(
         diagnostics: DiagnosticsSnapshot,
         severity: DiagnosticsSeverity,
-        widgetTrust: SnapshotTrustAssessment
+        widgetTrust: SnapshotTrustAssessment,
+        repositories: [RepositorySnapshot]
     ) -> String {
         switch severity {
         case .normal:
             return "当前 Widget 数据可信"
         case .warning:
+            if isInitialSnapshotMissing(
+                diagnostics: diagnostics,
+                repositories: repositories
+            ) {
+                return "Widget 尚未生成快照"
+            }
             switch widgetTrust.state {
             case .stale, .expired:
                 return "当前 Widget 数据可能过期"
@@ -1698,11 +1750,21 @@ enum WidgetDataTrustBuilder {
         widgetTrust: SnapshotTrustAssessment,
         repositories: [RepositorySnapshot]
     ) -> String {
-        switch overallSeverity(diagnostics: diagnostics, widgetTrust: widgetTrust) {
+        switch overallSeverity(
+            diagnostics: diagnostics,
+            widgetTrust: widgetTrust,
+            repositories: repositories
+        ) {
         case .normal:
             let repoSummary = repositories.isEmpty ? "当前快照里还没有仓库" : "当前快照包含 \(repositories.count) 个仓库"
             return "\(repoSummary)，且共享快照存在、可读、可写、可解码，Widget 看到的数据仍在可信时间窗内。"
         case .warning:
+            if isInitialSnapshotMissing(
+                diagnostics: diagnostics,
+                repositories: repositories
+            ) {
+                return "共享快照还没有生成，Widget 会提示先执行 Rescan Now；这是首次启动或清空快照后的正常待初始化状态。"
+            }
             return widgetTrust.detail + "。共享链路基本正常，但你应先刷新后再判断 Widget 里的仓库状态。"
         case .error:
             if !diagnostics.appGroupAvailable {
@@ -1835,14 +1897,14 @@ enum WidgetDataTrustBuilder {
             if !repositories.isEmpty {
                 return WidgetDataTrustPrimaryAction(
                     kind: .refreshData,
-                    title: "刷新数据",
+                    title: "Refresh Data",
                     systemImage: "arrow.clockwise",
                     helpText: "先把当前扫描结果写入共享快照，再确认 Widget 能否读到。"
                 )
             }
             return WidgetDataTrustPrimaryAction(
                 kind: .rescan,
-                title: "重新扫描",
+                title: "Rescan Now",
                 systemImage: "arrow.triangle.2.circlepath",
                 helpText: "先重新发现仓库并生成共享快照。"
             )
@@ -1851,7 +1913,7 @@ enum WidgetDataTrustBuilder {
         if !diagnostics.snapshotReadable || diagnostics.sharedDataReadError != nil {
             return WidgetDataTrustPrimaryAction(
                 kind: .refreshData,
-                title: "刷新数据",
+                title: "Refresh Data",
                 systemImage: "arrow.clockwise",
                 helpText: "重试读取共享快照，并确认主 App 能读回最新数据。"
             )
@@ -1860,7 +1922,7 @@ enum WidgetDataTrustBuilder {
         if !diagnostics.snapshotWritable || diagnostics.sharedDataWriteError != nil {
             return WidgetDataTrustPrimaryAction(
                 kind: .refreshData,
-                title: "刷新数据",
+                title: "Refresh Data",
                 systemImage: "arrow.clockwise",
                 helpText: "重写共享快照并再次请求 Widget 更新时间线。"
             )
@@ -1869,7 +1931,7 @@ enum WidgetDataTrustBuilder {
         if !diagnostics.snapshotDecodable {
             return WidgetDataTrustPrimaryAction(
                 kind: .refreshData,
-                title: "刷新数据",
+                title: "Refresh Data",
                 systemImage: "arrow.clockwise",
                 helpText: "让当前版本的 App 重写共享快照，恢复可解码状态。"
             )
@@ -1878,7 +1940,7 @@ enum WidgetDataTrustBuilder {
         if let widgetSnapshotReadError = diagnostics.widgetSnapshotReadError, !widgetSnapshotReadError.isEmpty {
             return WidgetDataTrustPrimaryAction(
                 kind: .refreshData,
-                title: "刷新数据",
+                title: "Refresh Data",
                 systemImage: "arrow.clockwise",
                 helpText: "先重写共享快照，再确认 Widget reload 和读取状态。"
             )
@@ -1887,7 +1949,7 @@ enum WidgetDataTrustBuilder {
         if !diagnostics.validationIssues.isEmpty {
             return WidgetDataTrustPrimaryAction(
                 kind: .refreshData,
-                title: "刷新数据",
+                title: "Refresh Data",
                 systemImage: "arrow.clockwise",
                 helpText: "先刷新链路，再确认 shared write、widget snapshot 和 reload requested 是否恢复一致。"
             )
@@ -1897,14 +1959,14 @@ enum WidgetDataTrustBuilder {
         case .fresh:
             return WidgetDataTrustPrimaryAction(
                 kind: .refreshData,
-                title: "刷新数据",
+                title: "Refresh Data",
                 systemImage: "arrow.clockwise",
                 helpText: "手动重写共享快照并请求 Widget 更新时间线。"
             )
         case .stale, .expired:
             return WidgetDataTrustPrimaryAction(
                 kind: .refreshData,
-                title: "刷新数据",
+                title: "Refresh Data",
                 systemImage: "arrow.clockwise",
                 helpText: "共享链路正常，但当前数据已经过旧，先刷新再判断。"
             )
@@ -1927,6 +1989,19 @@ enum WidgetDataTrustBuilder {
         case .failed:
             return .error
         }
+    }
+
+    private static func isInitialSnapshotMissing(
+        diagnostics: DiagnosticsSnapshot,
+        repositories: [RepositorySnapshot]
+    ) -> Bool {
+        diagnostics.appGroupAvailable
+            && !diagnostics.snapshotExists
+            && repositories.isEmpty
+            && diagnostics.sharedDataReadError == nil
+            && diagnostics.sharedDataWriteError == nil
+            && diagnostics.lastSharedWriteAt == nil
+            && diagnostics.sharedDataSnapshot == nil
     }
 
     private static func formattedDate(_ date: Date) -> String {
