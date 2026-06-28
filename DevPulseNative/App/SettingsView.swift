@@ -227,8 +227,8 @@ struct SettingsView: View {
                 .cornerRadius(8)
             }
 
+            diagnosticsTopSummaryStrip
             launchAtLoginDiagnosticsSection
-            diagnosticsOverviewCard
             diagnosticsSnapshotFactsSection
             diagnosticsSections
             diagnosticsScanRootsSection
@@ -249,8 +249,14 @@ struct SettingsView: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("Current repositories")
-                    .font(.caption.weight(.semibold))
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Current repositories")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Text(diagnosticsRepositorySummary)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
 
                 if scheduler.lastResult.repositories.isEmpty {
                     Text("No repositories in the latest snapshot.")
@@ -259,7 +265,7 @@ struct SettingsView: View {
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(scheduler.lastResult.repositories) { repo in
-                            diagnosticsRepositoryRow(repo)
+                            diagnosticsRepositoryCompactRow(repo)
                         }
                     }
                 }
@@ -269,28 +275,82 @@ struct SettingsView: View {
             .cornerRadius(8)
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("Recent events")
-                    .font(.caption.weight(.semibold))
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Recent events")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Text(diagnosticsEventSummary)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
 
                 if scheduler.diagnosticEvents.isEmpty {
                     Text("No diagnostic events yet.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 6) {
-                            ForEach(Array(scheduler.diagnosticEvents.reversed())) { event in
-                                diagnosticsEventRow(event)
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(diagnosticsEventPreview) { event in
+                            diagnosticsEventSummaryRow(event)
+                        }
+
+                        if scheduler.diagnosticEvents.count > diagnosticsEventPreview.count {
+                            DisclosureGroup("Event log") {
+                                ScrollView {
+                                    LazyVStack(alignment: .leading, spacing: 6) {
+                                        ForEach(Array(scheduler.diagnosticEvents.reversed())) { event in
+                                            diagnosticsEventRow(event)
+                                        }
+                                    }
+                                }
+                                .frame(maxHeight: 160)
                             }
+                            .font(.caption)
                         }
                     }
-                    .frame(maxHeight: 220)
                 }
             }
             .padding(10)
             .background(Color.secondary.opacity(0.06))
             .cornerRadius(8)
         }
+    }
+
+    private var diagnosticsTopSummaryStrip: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Label(diagnosticsOverview.headline, systemImage: severitySymbol(diagnosticsOverview.severity))
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(severityColor(diagnosticsOverview.severity))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(diagnosticsTopSummaryHint)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+
+            HStack(spacing: 6) {
+                diagnosticsInlineStatusPill(
+                    title: "Shared",
+                    value: diagnosticsOverview.sections.first(where: { $0.id == "shared-data" })?.summary ?? "Unavailable",
+                    severity: diagnosticsOverview.sections.first(where: { $0.id == "shared-data" })?.severity ?? .warning
+                )
+                diagnosticsInlineStatusPill(
+                    title: "Widget",
+                    value: diagnosticsOverview.sections.first(where: { $0.id == "widget-state" })?.summary ?? "Unavailable",
+                    severity: diagnosticsOverview.sections.first(where: { $0.id == "widget-state" })?.severity ?? .warning
+                )
+                diagnosticsInlineStatusPill(
+                    title: "Events",
+                    value: diagnosticsEventHeadline,
+                    severity: diagnosticsEventSeverity
+                )
+            }
+        }
+        .padding(8)
+        .background(severityBackground(diagnosticsOverview.severity))
+        .cornerRadius(8)
     }
 
     private var diagnosticsScanRootsSection: some View {
@@ -456,26 +516,52 @@ struct SettingsView: View {
         )
     }
 
-    private var diagnosticsOverviewCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label(diagnosticsOverview.headline, systemImage: severitySymbol(diagnosticsOverview.severity))
-                .font(.caption.weight(.semibold))
-                .foregroundColor(severityColor(diagnosticsOverview.severity))
-            Text(diagnosticsOverview.summary)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .lineLimit(3)
-        }
-        .padding(10)
-        .background(severityBackground(diagnosticsOverview.severity))
-        .cornerRadius(8)
-    }
-
     private var diagnosticsSnapshotFactsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Snapshot facts")
+            HStack(alignment: .firstTextBaseline) {
+                Text("Snapshot facts")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text(snapshotFactsUpdatedLabel)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            Text(snapshotFactsSummary)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .lineLimit(2)
+
+            HStack(alignment: .top, spacing: 8) {
+                diagnosticsCompactBadge(
+                    title: "Chain",
+                    value: snapshotChainSummary,
+                    severity: snapshotChainSeverity
+                )
+                diagnosticsCompactBadge(
+                    title: "Snapshot",
+                    value: snapshotReadableSummary,
+                    severity: snapshotReadableSeverity
+                )
+                diagnosticsCompactBadge(
+                    title: "Consistency",
+                    value: snapshotConsistencySummary,
+                    severity: snapshotConsistencySeverity
+                )
+            }
+
+            Text("Detailed evidence")
                 .font(.caption.weight(.semibold))
-            diagnosticsStatusGrid
+            Text("Container paths, snapshot file paths, raw timestamps, and read/write evidence are kept here for deeper troubleshooting.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
+            DisclosureGroup("Show raw diagnostics details") {
+                VStack(alignment: .leading, spacing: 8) {
+                    diagnosticsStatusGrid
+                }
+                .padding(.top, 8)
+            }
+            .font(.caption)
         }
         .padding(10)
         .background(Color.secondary.opacity(0.06))
@@ -494,27 +580,38 @@ struct SettingsView: View {
                     .foregroundColor(.secondary)
             }
 
-            diagnosticsInsightRow(
-                DiagnosticsStatusItem(
-                    id: "launch-at-login-system-status",
-                    title: "System status",
-                    value: launchAtLoginStatusLabel,
-                    detail: launchAtLoginController.diagnostics.detail,
-                    nextStep: launchAtLoginController.diagnostics.nextStep,
-                    severity: launchAtLoginSeverity
-                )
-            )
+            Text(launchAtLoginController.diagnostics.detail)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .lineLimit(2)
 
-            diagnosticsInsightRow(
-                DiagnosticsStatusItem(
-                    id: "launch-at-login-last-action",
-                    title: "Last action",
-                    value: launchAtLoginOperationLabel,
-                    detail: launchAtLoginOperationDetail,
-                    nextStep: launchAtLoginController.lastError == nil ? nil : "切换失败时不会读取仓库内容，只需检查系统登录项授权。",
-                    severity: launchAtLoginOperationSeverity
-                )
-            )
+            DisclosureGroup("Details") {
+                VStack(alignment: .leading, spacing: 8) {
+                    diagnosticsInsightRow(
+                        DiagnosticsStatusItem(
+                            id: "launch-at-login-system-status",
+                            title: "System status",
+                            value: launchAtLoginStatusLabel,
+                            detail: launchAtLoginController.diagnostics.detail,
+                            nextStep: launchAtLoginController.diagnostics.nextStep,
+                            severity: launchAtLoginSeverity
+                        )
+                    )
+
+                    diagnosticsInsightRow(
+                        DiagnosticsStatusItem(
+                            id: "launch-at-login-last-action",
+                            title: "Last action",
+                            value: launchAtLoginOperationLabel,
+                            detail: launchAtLoginOperationDetail,
+                            nextStep: launchAtLoginController.lastError == nil ? nil : "切换失败时不会读取仓库内容，只需检查系统登录项授权。",
+                            severity: launchAtLoginOperationSeverity
+                        )
+                    )
+                }
+                .padding(.top, 6)
+            }
+            .font(.caption)
         }
         .padding(10)
         .background(severityBackground(launchAtLoginSeverity))
@@ -699,13 +796,105 @@ struct SettingsView: View {
                     .multilineTextAlignment(.trailing)
             }
 
-            ForEach(section.items) { item in
-                diagnosticsInsightRow(item)
+            if let timeHint = diagnosticsSectionTimeHint(section) {
+                Label(timeHint, systemImage: "clock")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
             }
+
+            DisclosureGroup("Details") {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(section.items) { item in
+                        diagnosticsInsightRow(item)
+                    }
+                }
+                .padding(.top, 6)
+            }
+            .font(.caption)
         }
         .padding(10)
         .background(Color.secondary.opacity(0.06))
         .cornerRadius(8)
+    }
+
+    private func diagnosticsCompactBadge(title: String, value: String, severity: DiagnosticsSeverity) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundColor(severityColor(severity))
+            Text(value)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .lineLimit(3)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(Color.white.opacity(0.35))
+        .cornerRadius(6)
+    }
+
+    private func diagnosticsInlineStatusPill(title: String, value: String, severity: DiagnosticsSeverity) -> some View {
+        HStack(spacing: 4) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundColor(severityColor(severity))
+            Text(value)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.3))
+        .cornerRadius(6)
+    }
+
+    private func diagnosticsStatusSummaryRow(_ item: DiagnosticsStatusItem) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(item.title)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .frame(width: 110, alignment: .leading)
+            Text(item.value)
+                .font(.caption.weight(.semibold))
+                .foregroundColor(severityColor(item.severity))
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func diagnosticsSectionTimeHint(_ section: DiagnosticsSectionModel) -> String? {
+        switch section.id {
+        case "shared-data":
+            var parts: [String] = []
+
+            if let writeAt = scheduler.diagnostics.lastSharedWriteAt {
+                parts.append("最近写入 \(snapshotTimeLabel(writeAt))")
+            }
+            if let readAt = scheduler.diagnostics.sharedDataReadAt {
+                parts.append("最近读回 \(snapshotTimeLabel(readAt))")
+            }
+
+            return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        case "widget-state":
+            var parts: [String] = []
+
+            if let readAt = scheduler.diagnostics.widgetSnapshotReadAt {
+                parts.append("最近读取 \(snapshotTimeLabel(readAt))")
+            }
+            if let reloadAt = scheduler.diagnostics.lastReloadRequestedAt {
+                parts.append("最近 reload \(snapshotTimeLabel(reloadAt))")
+            }
+
+            return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        case "scan-state":
+            if let lastScanAt = scheduler.lastScanAt {
+                return "最近刷新 \(snapshotTimeLabel(lastScanAt))"
+            }
+            return nil
+        default:
+            return nil
+        }
     }
 
     private func diagnosticsInsightRow(_ item: DiagnosticsStatusItem) -> some View {
@@ -730,6 +919,57 @@ struct SettingsView: View {
                     .font(.caption2)
                     .foregroundColor(severityColor(item.severity))
                     .lineLimit(3)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var diagnosticsRepositorySummary: String {
+        let repositories = scheduler.lastResult.repositories
+        guard !repositories.isEmpty else { return "0 repos" }
+
+        let changedCount = repositories.filter {
+            $0.status != .clean || $0.changedFileCount > 0 || ($0.aheadCount ?? 0) > 0
+        }.count
+
+        return changedCount == 0
+            ? "\(repositories.count) repos · all clean"
+            : "\(repositories.count) repos · \(changedCount) active"
+    }
+
+    private func diagnosticsRepositoryCompactRow(_ repo: RepositorySnapshot) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(repo.name)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                    diagnosticsRepositoryBranchLabel(repo)
+                }
+
+                Text(repo.path)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Text("\(repo.statusSummary) · \(diagnosticsRepositoryActionSummary(repo))")
+                    .font(.caption2)
+                    .foregroundColor(diagnosticsRepositoryStatusColor(repo))
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 8)
+
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("提交 \(snapshotTimeLabel(repo.lastChangedAt))")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                Text("扫描 \(snapshotTimeLabel(repo.lastScannedAt))")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
             }
         }
         .padding(.vertical, 2)
@@ -769,16 +1009,13 @@ struct SettingsView: View {
     }
 
     private func diagnosticsRepositoryRow(_ repo: RepositorySnapshot) -> some View {
-        let receipt = repo.commitReadiness.reviewReceipt
-
         return VStack(alignment: .leading, spacing: 4) {
-            HStack {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(repo.name)
                     .font(.caption.weight(.semibold))
+
                 Spacer()
-                Text(repo.branch)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                diagnosticsRepositoryBranchLabel(repo)
             }
 
             Text(repo.path)
@@ -787,44 +1024,98 @@ struct SettingsView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
 
-            Text("staged \(repo.stagedFileCount ?? 0) · unstaged \(repo.unstagedFileCount ?? (repo.modifiedFileCount + repo.addedFileCount + repo.deletedFileCount)) · untracked \(repo.untrackedFileCount) · total \(repo.changedFileCount)")
+            Text("状态摘要 · \(repo.statusSummary)")
                 .font(.caption2)
-                .foregroundColor(.secondary)
+                .foregroundColor(diagnosticsRepositoryStatusColor(repo))
 
-            Text("readiness \(repo.commitReadiness.shortLabel) · \(receipt.summary)")
+            Text("建议动作 · \(repo.nextActionHint)")
                 .font(.caption2)
-                .foregroundColor(repo.commitReadiness.level == .unknown ? .red : .secondary)
-
-            Text("review receipt · \(receipt.nextStep)")
-                .font(.caption2)
-                .foregroundColor(repo.commitReadiness.level == .unknown ? .red : .secondary)
-
-            Text(receipt.basisSummary)
-                .font(.caption2)
-                .foregroundColor(.secondary)
+                .foregroundColor(diagnosticsRepositoryActionColor(repo))
 
             HStack(spacing: 8) {
-                Text("status \(repo.status.rawValue)")
-                if let lastChangedAt = repo.lastChangedAt {
-                    Text("last commit \(snapshotTimeLabel(DateFormatting.date(from: lastChangedAt)))")
-                }
+                Text("最近提交 · \(snapshotTimeLabel(repo.lastChangedAt))")
+                Text("扫描时间 · \(snapshotTimeLabel(repo.lastScannedAt))")
             }
             .font(.caption2)
-            .foregroundColor(repo.commitReadiness.level == .unknown ? .red : .secondary)
-
-            Text("scan \(snapshotTimeLabel(DateFormatting.date(from: repo.lastScannedAt)))")
-                .font(.caption2)
-                .foregroundColor(.secondary)
-
-            if let errorMessage = repo.errorMessage, !errorMessage.isEmpty {
-                Text(errorMessage)
-                    .font(.caption2)
-                    .foregroundColor(.red)
-            }
+            .foregroundColor(.secondary)
         }
         .padding(8)
         .background(Color.white.opacity(0.35))
         .cornerRadius(6)
+    }
+
+    private func diagnosticsRepositoryBranchLabel(_ repo: RepositorySnapshot) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: diagnosticsRepositoryBranchIconName(repo))
+                .font(.system(size: 10, weight: .medium))
+            Text(repo.branch)
+                .lineLimit(1)
+        }
+        .font(.caption2)
+        .foregroundStyle(diagnosticsRepositoryBranchColor(repo))
+        .padding(.horizontal, 7)
+        .frame(height: 20)
+        .background(
+            Capsule()
+                .fill(diagnosticsRepositoryBranchColor(repo).opacity(diagnosticsRepositoryBranchFillOpacity(repo)))
+        )
+    }
+
+    private func diagnosticsRepositoryStatusColor(_ repo: RepositorySnapshot) -> Color {
+        switch repo.commitReadiness.level {
+        case .dirty, .unknown:
+            return .red
+        case .ready:
+            return .green
+        case .idle, .review:
+            return .secondary
+        }
+    }
+
+    private func diagnosticsRepositoryActionColor(_ repo: RepositorySnapshot) -> Color {
+        switch repo.commitReadiness.level {
+        case .unknown:
+            return .red
+        case .dirty, .review:
+            return .orange
+        case .ready:
+            return .green
+        case .idle:
+            return .secondary
+        }
+    }
+
+    private func diagnosticsRepositoryBranchIconName(_ repo: RepositorySnapshot) -> String {
+        switch repo.commitReadiness.level {
+        case .dirty, .unknown:
+            return "exclamationmark.triangle.fill"
+        case .ready:
+            return "checkmark.circle.fill"
+        case .idle, .review:
+            return "arrow.triangle.branch"
+        }
+    }
+
+    private func diagnosticsRepositoryBranchColor(_ repo: RepositorySnapshot) -> Color {
+        switch repo.commitReadiness.level {
+        case .dirty, .unknown:
+            return .red
+        case .ready:
+            return .green
+        case .idle, .review:
+            return .secondary
+        }
+    }
+
+    private func diagnosticsRepositoryBranchFillOpacity(_ repo: RepositorySnapshot) -> Double {
+        switch repo.commitReadiness.level {
+        case .dirty, .unknown:
+            return 0.14
+        case .ready:
+            return 0.12
+        case .idle, .review:
+            return 0.08
+        }
     }
 
     private func diagnosticsEventRow(_ event: DiagnosticEvent) -> some View {
@@ -841,6 +1132,168 @@ struct SettingsView: View {
                     .foregroundColor(.secondary)
             }
         }
+    }
+
+    private var diagnosticsEventPreview: [DiagnosticEvent] {
+        Array(scheduler.diagnosticEvents.reversed().prefix(3))
+    }
+
+    private var diagnosticsEventSummary: String {
+        scheduler.diagnosticEvents.isEmpty ? "No events" : "\(scheduler.diagnosticEvents.count) recorded"
+    }
+
+    private var diagnosticsEventHeadline: String {
+        guard let latest = scheduler.diagnosticEvents.last else { return "No recent events" }
+        return latest.message
+    }
+
+    private var diagnosticsTopSummaryHint: String {
+        diagnosticsOverview.summary
+            .replacingOccurrences(of: "。", with: "")
+            .replacingOccurrences(of: "，", with: " · ")
+    }
+
+    private var diagnosticsEventSeverity: DiagnosticsSeverity {
+        if scheduler.diagnosticEvents.contains(where: {
+            $0.kind == .validationFailed
+                || $0.kind == .sharedDataWriteFailed
+                || $0.kind == .sharedDataReadFailed
+                || $0.kind == .scanFailed
+        }) {
+            return .error
+        }
+        return .normal
+    }
+
+    private func diagnosticsEventSummaryRow(_ event: DiagnosticEvent) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(event.kind.rawValue)
+                .font(.caption2.weight(.semibold))
+                .foregroundColor(diagnosticsEventColor(event))
+            Text(event.message)
+                .font(.caption2)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            Text(snapshotTimeLabel(DateFormatting.date(from: event.timestamp)))
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private func diagnosticsEventColor(_ event: DiagnosticEvent) -> Color {
+        switch event.kind {
+        case .validationFailed, .sharedDataWriteFailed, .sharedDataReadFailed, .scanFailed:
+            return .red
+        default:
+            return .secondary
+        }
+    }
+
+    private var snapshotFactsSummary: String {
+        "\(snapshotChainSummary) · \(snapshotReadableSummary) · \(snapshotConsistencySummary)"
+    }
+
+    private func diagnosticsRepositoryActionSummary(_ repo: RepositorySnapshot) -> String {
+        let readiness = repo.commitReadiness
+
+        if repo.status == .error || readiness.level == .unknown {
+            return "看 Diagnostics"
+        }
+        if readiness.reasons.contains(.conflictedFiles) {
+            return "先解冲突"
+        }
+        if readiness.reasons.contains(.branchNeedsConfirmation) {
+            return "确认分支"
+        }
+        if readiness.reasons.contains(.localAhead), (repo.aheadCount ?? 0) > 0 {
+            return "准备好就 push"
+        }
+        if readiness.reasons.contains(.stagedChanges) {
+            return "可提交"
+        }
+        if readiness.reasons.contains(.mixedStagedAndUnstagedChanges) {
+            return "先整理暂存"
+        }
+        if readiness.reasons.contains(.highRiskChanges), readiness.level == .dirty {
+            return "先收敛并验证"
+        }
+        if readiness.reasons.contains(.largeWorkingTree) {
+            return "先收敛改动"
+        }
+        if readiness.reasons.contains(.deletedFiles), repo.deletedFileCount > 0 {
+            return "检查删除项"
+        }
+        if readiness.reasons.contains(.untrackedFiles), repo.untrackedFileCount > 0 {
+            return "确认新文件"
+        }
+        if readiness.reasons.contains(.highRiskChanges) || repo.risk == .medium || repo.risk == .high {
+            return "先看 diff 并验证"
+        }
+
+        switch readiness.level {
+        case .idle:
+            return "无需操作"
+        case .ready:
+            return "可提交或分享"
+        case .review:
+            return "先看 diff"
+        case .dirty:
+            return "先整理改动"
+        case .unknown:
+            return "看 Diagnostics"
+        }
+    }
+
+    private var snapshotFactsUpdatedLabel: String {
+        if let lastWrittenAt = scheduler.diagnostics.lastWrittenAt {
+            return "最近更新 \(snapshotTimeLabel(lastWrittenAt))"
+        }
+        if let lastGeneratedAt = scheduler.diagnostics.lastGeneratedAt {
+            return "最近更新 \(snapshotTimeLabel(lastGeneratedAt))"
+        }
+        if let lastScanAt = scheduler.lastScanAt {
+            return "最近更新 \(snapshotTimeLabel(lastScanAt))"
+        }
+        return "未更新"
+    }
+
+    private var snapshotChainSummary: String {
+        snapshotChainSeverity == .normal ? "链路正常" : "链路异常"
+    }
+
+    private var snapshotChainSeverity: DiagnosticsSeverity {
+        if !scheduler.appGroupAvailable || sharedWriteStatus == "Failed" || sharedReadStatus == "Failed" {
+            return .error
+        }
+        if sharedWriteStatus == "Pending" || sharedReadStatus == "Pending" {
+            return .warning
+        }
+        return .normal
+    }
+
+    private var snapshotReadableSummary: String {
+        if scheduler.diagnostics.snapshotDecodable {
+            return "快照可读"
+        }
+        if scheduler.diagnostics.snapshotReadable {
+            return "快照可访问"
+        }
+        return "快照不可读"
+    }
+
+    private var snapshotReadableSeverity: DiagnosticsSeverity {
+        if !scheduler.diagnostics.snapshotReadable || !scheduler.diagnostics.snapshotDecodable {
+            return .error
+        }
+        return .normal
+    }
+
+    private var snapshotConsistencySummary: String {
+        scheduler.diagnostics.validationIssues.isEmpty ? "数据一致" : "数据不一致"
+    }
+
+    private var snapshotConsistencySeverity: DiagnosticsSeverity {
+        scheduler.diagnostics.validationIssues.isEmpty ? .normal : .error
     }
 
     private func refreshBuiltInToggles() {
