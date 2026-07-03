@@ -1063,6 +1063,7 @@ struct CommitReadinessEngineTests {
             scanRoots: [root.path]
         )
         #expect(firstScan.data.scanSummary.totalRepositories == 1)
+        #expect(normalizeRepositoryPaths(firstScan.discoveredRepositoryPaths) == normalizeRepositoryPaths([firstRepo.path]))
 
         let secondRepo = root.appendingPathComponent("second-repo")
         try createCommittedRepository(at: secondRepo)
@@ -1079,6 +1080,311 @@ struct CommitReadinessEngineTests {
             forceRepositoryDiscovery: true
         )
         #expect(forcedScan.data.scanSummary.totalRepositories == 2)
+    }
+
+    @Test func gitScannerReusesKnownRepositoryPathsBetweenAutomaticScans() async throws {
+        let root = try temporaryDirectory(named: "scanner-known-paths")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let firstRepo = root.appendingPathComponent("first-repo")
+        try createCommittedRepository(at: firstRepo)
+
+        let firstScan = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path]
+        )
+        #expect(firstScan.data.scanSummary.totalRepositories == 1)
+
+        let secondRepo = root.appendingPathComponent("second-repo")
+        try createCommittedRepository(at: secondRepo)
+
+        let reusedKnownPathsScan = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            knownRepositoryPaths: firstScan.data.repositories.map(\.path)
+        )
+        #expect(reusedKnownPathsScan.data.scanSummary.totalRepositories == 1)
+        #expect(normalizeRepositoryPaths(reusedKnownPathsScan.discoveredRepositoryPaths) == normalizeRepositoryPaths([firstRepo.path]))
+
+        let rediscoveredScan = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            knownRepositoryPaths: firstScan.data.repositories.map(\.path),
+            forceRepositoryDiscovery: true
+        )
+        #expect(rediscoveredScan.data.scanSummary.totalRepositories == 2)
+        #expect(
+            normalizeRepositoryPaths(rediscoveredScan.discoveredRepositoryPaths)
+                == normalizeRepositoryPaths([firstRepo.path, secondRepo.path])
+        )
+    }
+
+    @Test func schedulerPolicySkipsRediscoveryInsideCooldown() {
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+
+        #expect(
+            ScanSchedulerPolicy.shouldRediscoverRepositories(
+                forceRepositoryDiscovery: false,
+                knownRepositoryPaths: ["/tmp/repo-a"],
+                lastRepositoryDiscoveryAt: now.addingTimeInterval(-10 * 60),
+                now: now
+            ) == false
+        )
+    }
+
+    @Test func schedulerPolicyRediscoveriesAfterCooldownExpires() {
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+
+        #expect(
+            ScanSchedulerPolicy.shouldRediscoverRepositories(
+                forceRepositoryDiscovery: false,
+                knownRepositoryPaths: ["/tmp/repo-a"],
+                lastRepositoryDiscoveryAt: now.addingTimeInterval(-61 * 60),
+                now: now
+            ) == true
+        )
+    }
+
+    @Test func schedulerPolicyRediscoveriesWhenScanRootsChangeInsideCooldown() {
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+
+        #expect(
+            ScanSchedulerPolicy.shouldRediscoverRepositories(
+                forceRepositoryDiscovery: false,
+                knownRepositoryPaths: ["/tmp/repo-a"],
+                lastRepositoryDiscoveryAt: now.addingTimeInterval(-10 * 60),
+                currentScanRootsSignature: ScanSchedulerPolicy.scanRootsSignature(["/tmp/root-a", "/tmp/root-b"]),
+                lastScanRootsSignature: ScanSchedulerPolicy.scanRootsSignature(["/tmp/root-a"]),
+                now: now
+            ) == true
+        )
+    }
+
+    @Test func schedulerPolicyThrottlesWidgetReloadForUnchangedAutomaticScan() {
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+        let snapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-07-03T00:00:00Z",
+            writtenAt: "2026-07-03T00:00:00Z",
+            scanSummary: ScanSummary(
+                totalRepositories: 1,
+                changedRepositories: 1,
+                totalChangedFiles: 2,
+                errorRepositories: 0
+            ),
+            repositories: [
+                RepositorySnapshot(
+                    id: "repo-1",
+                    name: "repo-1",
+                    path: "/tmp/repo-1",
+                    branch: "main",
+                    status: .changed,
+                    modifiedFileCount: 2,
+                    addedFileCount: 0,
+                    deletedFileCount: 0,
+                    untrackedFileCount: 0,
+                    stagedFileCount: 0,
+                    unstagedFileCount: 2,
+                    conflictedFileCount: 0,
+                    aheadCount: 0,
+                    changedFileCount: 2,
+                    changedFilesPreview: ["README.md"],
+                    risk: .low,
+                    lastScannedAt: "2026-07-03T00:00:00Z",
+                    lastChangedAt: nil,
+                    errorMessage: nil,
+                    isPinned: false
+                )
+            ]
+        )
+
+        #expect(
+            ScanSchedulerPolicy.shouldRequestWidgetReload(
+                previousSnapshot: snapshot,
+                nextSnapshot: snapshot.withWrittenAt("2026-07-03T00:05:00Z"),
+                lastReloadRequestedAt: now.addingTimeInterval(-5 * 60),
+                reason: "scan",
+                now: now
+            ) == false
+        )
+    }
+
+    @Test func schedulerPolicyIgnoresVolatileScanTimestampsForWidgetReloadThrottle() {
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+        let summary = ScanSummary(
+            totalRepositories: 1,
+            changedRepositories: 1,
+            totalChangedFiles: 2,
+            errorRepositories: 0
+        )
+        let previous = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-07-03T00:00:00Z",
+            writtenAt: "2026-07-03T00:00:00Z",
+            scanSummary: summary,
+            repositories: [
+                snapshot(
+                    modified: 2,
+                    unstaged: 2,
+                    lastScannedAt: "2026-07-03T00:00:00Z"
+                )
+            ]
+        )
+        let next = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-07-03T00:05:00Z",
+            writtenAt: "2026-07-03T00:05:00Z",
+            scanSummary: summary,
+            repositories: [
+                snapshot(
+                    modified: 2,
+                    unstaged: 2,
+                    lastScannedAt: "2026-07-03T00:05:00Z"
+                )
+            ]
+        )
+
+        #expect(
+            ScanSchedulerPolicy.shouldRequestWidgetReload(
+                previousSnapshot: previous,
+                nextSnapshot: next,
+                lastReloadRequestedAt: now.addingTimeInterval(-5 * 60),
+                reason: "scan",
+                now: now
+            ) == false
+        )
+    }
+
+    @Test func schedulerPolicyReloadsWhenRepositoryContentChangesInsideThrottleWindow() {
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+        let summary = ScanSummary(
+            totalRepositories: 1,
+            changedRepositories: 1,
+            totalChangedFiles: 1,
+            errorRepositories: 0
+        )
+        let previous = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-07-03T00:00:00Z",
+            writtenAt: "2026-07-03T00:00:00Z",
+            scanSummary: summary,
+            repositories: [
+                snapshot(
+                    modified: 1,
+                    unstaged: 1,
+                    branch: "main",
+                    lastScannedAt: "2026-07-03T00:00:00Z"
+                )
+            ]
+        )
+        let next = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-07-03T00:05:00Z",
+            writtenAt: "2026-07-03T00:05:00Z",
+            scanSummary: summary,
+            repositories: [
+                snapshot(
+                    modified: 1,
+                    unstaged: 1,
+                    branch: "feature",
+                    lastScannedAt: "2026-07-03T00:05:00Z"
+                )
+            ]
+        )
+
+        #expect(
+            ScanSchedulerPolicy.shouldRequestWidgetReload(
+                previousSnapshot: previous,
+                nextSnapshot: next,
+                lastReloadRequestedAt: now.addingTimeInterval(-5 * 60),
+                reason: "scan",
+                now: now
+            ) == true
+        )
+    }
+
+    @Test func schedulerPolicyKeepsImmediateWidgetReloadForRealChanges() {
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+        let previous = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-07-03T00:00:00Z",
+            writtenAt: "2026-07-03T00:00:00Z",
+            scanSummary: ScanSummary(
+                totalRepositories: 1,
+                changedRepositories: 0,
+                totalChangedFiles: 0,
+                errorRepositories: 0
+            ),
+            repositories: [
+                RepositorySnapshot(
+                    id: "repo-1",
+                    name: "repo-1",
+                    path: "/tmp/repo-1",
+                    branch: "main",
+                    status: .clean,
+                    modifiedFileCount: 0,
+                    addedFileCount: 0,
+                    deletedFileCount: 0,
+                    untrackedFileCount: 0,
+                    stagedFileCount: 0,
+                    unstagedFileCount: 0,
+                    conflictedFileCount: 0,
+                    aheadCount: 0,
+                    changedFileCount: 0,
+                    changedFilesPreview: [],
+                    risk: .low,
+                    lastScannedAt: "2026-07-03T00:00:00Z",
+                    lastChangedAt: nil,
+                    errorMessage: nil,
+                    isPinned: false
+                )
+            ]
+        )
+        let next = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-07-03T00:05:00Z",
+            writtenAt: "2026-07-03T00:05:00Z",
+            scanSummary: ScanSummary(
+                totalRepositories: 1,
+                changedRepositories: 1,
+                totalChangedFiles: 1,
+                errorRepositories: 0
+            ),
+            repositories: [
+                RepositorySnapshot(
+                    id: "repo-1",
+                    name: "repo-1",
+                    path: "/tmp/repo-1",
+                    branch: "main",
+                    status: .changed,
+                    modifiedFileCount: 1,
+                    addedFileCount: 0,
+                    deletedFileCount: 0,
+                    untrackedFileCount: 0,
+                    stagedFileCount: 0,
+                    unstagedFileCount: 1,
+                    conflictedFileCount: 0,
+                    aheadCount: 0,
+                    changedFileCount: 1,
+                    changedFilesPreview: ["README.md"],
+                    risk: .low,
+                    lastScannedAt: "2026-07-03T00:05:00Z",
+                    lastChangedAt: nil,
+                    errorMessage: nil,
+                    isPinned: false
+                )
+            ]
+        )
+
+        #expect(
+            ScanSchedulerPolicy.shouldRequestWidgetReload(
+                previousSnapshot: previous,
+                nextSnapshot: next,
+                lastReloadRequestedAt: now.addingTimeInterval(-5 * 60),
+                reason: "scan",
+                now: now
+            ) == true
+        )
     }
 
     private func snapshot(
@@ -1151,6 +1457,10 @@ struct CommitReadinessEngineTests {
             .appendingPathComponent("DevPulseTests-\(name)-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
+    }
+
+    private func normalizeRepositoryPaths(_ paths: [String]) -> [String] {
+        paths.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
     }
 
     private func createCommittedRepository(at url: URL) throws {

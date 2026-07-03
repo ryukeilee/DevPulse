@@ -14,6 +14,101 @@ private enum PowerState {
     case onBattery
 }
 
+enum ScanSchedulerPolicy {
+    static let repositoryRediscoveryInterval: TimeInterval = 60 * 60
+    static let widgetReloadThrottleInterval: TimeInterval = 15 * 60
+
+    static func shouldRediscoverRepositories(
+        forceRepositoryDiscovery: Bool,
+        knownRepositoryPaths: [String],
+        lastRepositoryDiscoveryAt: Date?,
+        currentScanRootsSignature: String = "",
+        lastScanRootsSignature: String? = "",
+        now: Date = Date()
+    ) -> Bool {
+        if forceRepositoryDiscovery || knownRepositoryPaths.isEmpty {
+            return true
+        }
+
+        guard lastScanRootsSignature == currentScanRootsSignature else {
+            return true
+        }
+
+        guard let lastRepositoryDiscoveryAt else {
+            return true
+        }
+
+        return now.timeIntervalSince(lastRepositoryDiscoveryAt) >= repositoryRediscoveryInterval
+    }
+
+    static func scanRootsSignature(_ scanRoots: [String]) -> String {
+        scanRoots
+            .map(ScanLocationProvider.expandTilde)
+            .sorted()
+            .joined(separator: "\n")
+    }
+
+    static func shouldRequestWidgetReload(
+        previousSnapshot: AppGroupData,
+        nextSnapshot: AppGroupData,
+        lastReloadRequestedAt: Date?,
+        reason: String,
+        now: Date = Date()
+    ) -> Bool {
+        guard reason == "scan" else {
+            return true
+        }
+
+        if hasMeaningfulSnapshotChanges(previousSnapshot: previousSnapshot, nextSnapshot: nextSnapshot) {
+            return true
+        }
+
+        guard let lastReloadRequestedAt else {
+            return true
+        }
+
+        return now.timeIntervalSince(lastReloadRequestedAt) >= widgetReloadThrottleInterval
+    }
+
+    static func hasMeaningfulSnapshotChanges(
+        previousSnapshot: AppGroupData,
+        nextSnapshot: AppGroupData
+    ) -> Bool {
+        guard previousSnapshot.scanSummary == nextSnapshot.scanSummary,
+              previousSnapshot.repositories.count == nextSnapshot.repositories.count else {
+            return true
+        }
+
+        return zip(previousSnapshot.repositories, nextSnapshot.repositories)
+            .contains { !isMeaningfullySameRepository(previous: $0, next: $1) }
+    }
+
+    private static func isMeaningfullySameRepository(
+        previous: RepositorySnapshot,
+        next: RepositorySnapshot
+    ) -> Bool {
+        previous.id == next.id
+            && previous.name == next.name
+            && previous.path == next.path
+            && previous.branch == next.branch
+            && previous.status == next.status
+            && previous.modifiedFileCount == next.modifiedFileCount
+            && previous.addedFileCount == next.addedFileCount
+            && previous.deletedFileCount == next.deletedFileCount
+            && previous.untrackedFileCount == next.untrackedFileCount
+            && previous.stagedFileCount == next.stagedFileCount
+            && previous.unstagedFileCount == next.unstagedFileCount
+            && previous.conflictedFileCount == next.conflictedFileCount
+            && previous.aheadCount == next.aheadCount
+            && previous.changedFileCount == next.changedFileCount
+            && previous.changedFilesPreview == next.changedFilesPreview
+            && previous.risk == next.risk
+            && previous.lastChangedAt == next.lastChangedAt
+            && previous.errorMessage == next.errorMessage
+            && previous.isPinned == next.isPinned
+    }
+}
+
 /// Manages background scan scheduling with low-power safeguards.
 ///
 /// Key behaviors:
@@ -47,6 +142,9 @@ final class ScanScheduler: ObservableObject {
     private let scanDirectoriesKey = "scan_directories_json"
     private let pinnedKey = "pinned_repo_ids"
     private let lastScanIntervalKey = "last_scan_interval"
+    private let lastRepositoryDiscoveryAtKey = "last_repository_discovery_at"
+    private let lastDiscoveredRepositoryPathsKey = "last_discovered_repository_paths"
+    private let lastRepositoryDiscoveryScanRootsKey = "last_repository_discovery_scan_roots"
 
     // MARK: - Adaptive interval constants
 
@@ -147,13 +245,23 @@ final class ScanScheduler: ObservableObject {
         diagnostics.snapshotDecodable = false
         let currentConfig = config
         let currentScanRoots = scanRoots()
+        let knownRepositoryPaths = lastDiscoveredRepositoryPaths
+        let currentScanRootsSignature = ScanSchedulerPolicy.scanRootsSignature(currentScanRoots.roots)
+        let shouldRediscoverRepositories = ScanSchedulerPolicy.shouldRediscoverRepositories(
+            forceRepositoryDiscovery: forceRepositoryDiscovery,
+            knownRepositoryPaths: knownRepositoryPaths,
+            lastRepositoryDiscoveryAt: lastRepositoryDiscoveryAt,
+            currentScanRootsSignature: currentScanRootsSignature,
+            lastScanRootsSignature: lastRepositoryDiscoveryScanRootsSignature
+        )
         recordEvent(.scanStarted, "Scan started")
 
         Task.detached(priority: .userInitiated) {
             let result = await GitRepositoryScanner.scan(
                 config: currentConfig,
                 scanRoots: currentScanRoots.roots,
-                forceRepositoryDiscovery: forceRepositoryDiscovery
+                knownRepositoryPaths: knownRepositoryPaths,
+                forceRepositoryDiscovery: shouldRediscoverRepositories
             )
 
             await MainActor.run {
@@ -176,8 +284,9 @@ final class ScanScheduler: ObservableObject {
                     return
                 }
 
+                let previousSnapshot = self.lastResult
                 let pinned = self.applyPins(result.data)
-                let hadChanges = self.hadChanges(before: self.lastResult, after: pinned)
+                let hadChanges = self.hadChanges(before: previousSnapshot, after: pinned)
                 let combinedWarnings = self.summarizeWarnings(
                     result.warnings,
                     accessWarning: currentScanRoots.warning
@@ -192,6 +301,11 @@ final class ScanScheduler: ObservableObject {
                 self.refreshFailureMessage = nil
                 self.scanRootAccessWarning = currentScanRoots.warning
                 self.diagnostics.validationIssues = combinedWarnings.isEmpty ? [] : combinedWarnings
+                self.lastDiscoveredRepositoryPaths = result.discoveredRepositoryPaths
+                if shouldRediscoverRepositories {
+                    self.lastRepositoryDiscoveryAt = Date()
+                    self.lastRepositoryDiscoveryScanRootsSignature = currentScanRootsSignature
+                }
 
                 if combinedWarnings.isEmpty {
                     self.recordEvent(
@@ -212,7 +326,7 @@ final class ScanScheduler: ObservableObject {
                     self.consecutiveNoChanges += 1
                 }
                 self.updateScanInterval()
-                self.syncSharedSnapshot(from: pinned, reason: "scan")
+                self.syncSharedSnapshot(from: pinned, previousSnapshot: previousSnapshot, reason: "scan")
             }
         }
     }
@@ -403,9 +517,14 @@ final class ScanScheduler: ObservableObject {
         }
     }
 
-    private func syncSharedSnapshot(from snapshot: AppGroupData, reason: String) {
+    private func syncSharedSnapshot(
+        from snapshot: AppGroupData,
+        previousSnapshot: AppGroupData? = nil,
+        reason: String
+    ) {
         let writtenAt = DateFormatting.nowISO()
         let snapshotToWrite = snapshot.withWrittenAt(writtenAt)
+        let previousSnapshot = previousSnapshot ?? lastResult
         var verifiedSnapshot: AppGroupData?
 
         switch AppGroupStore.write(snapshotToWrite) {
@@ -447,9 +566,16 @@ final class ScanScheduler: ObservableObject {
         setWidgetReadableSnapshot(verifiedSnapshot, readAt: diagnostics.sharedDataReadAt ?? Date())
         validateConsistency(expected: snapshotToWrite, shared: verifiedSnapshot, widget: diagnostics.widgetSnapshot, reason: reason)
         lastResult = applyPins(verifiedSnapshot)
-        diagnostics.lastReloadRequestedAt = Date()
-        recordEvent(.widgetReloadRequested, "Widget reload requested (\(reason))")
-        AppGroupStore.reloadWidgets()
+        if ScanSchedulerPolicy.shouldRequestWidgetReload(
+            previousSnapshot: previousSnapshot,
+            nextSnapshot: lastResult,
+            lastReloadRequestedAt: diagnostics.lastReloadRequestedAt,
+            reason: reason
+        ) {
+            diagnostics.lastReloadRequestedAt = Date()
+            recordEvent(.widgetReloadRequested, "Widget reload requested (\(reason))")
+            AppGroupStore.reloadWidgets()
+        }
     }
 
     private func markSharedSnapshotSyncFailure(_ reason: String) {
@@ -878,6 +1004,39 @@ final class ScanScheduler: ObservableObject {
             return false
         case .stale, .expired, .unknown:
             return true
+        }
+    }
+
+    private var lastRepositoryDiscoveryAt: Date? {
+        get {
+            UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+                .object(forKey: lastRepositoryDiscoveryAtKey) as? Date
+        }
+        set {
+            UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+                .set(newValue, forKey: lastRepositoryDiscoveryAtKey)
+        }
+    }
+
+    private var lastDiscoveredRepositoryPaths: [String] {
+        get {
+            UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+                .stringArray(forKey: lastDiscoveredRepositoryPathsKey) ?? []
+        }
+        set {
+            UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+                .set(newValue, forKey: lastDiscoveredRepositoryPathsKey)
+        }
+    }
+
+    private var lastRepositoryDiscoveryScanRootsSignature: String? {
+        get {
+            UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+                .string(forKey: lastRepositoryDiscoveryScanRootsKey)
+        }
+        set {
+            UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+                .set(newValue, forKey: lastRepositoryDiscoveryScanRootsKey)
         }
     }
 

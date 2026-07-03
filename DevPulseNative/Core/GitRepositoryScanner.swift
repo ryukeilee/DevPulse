@@ -105,7 +105,8 @@ enum GitRepositoryScanner {
     /// Returns the scan result and an array of warning strings.
     static func scan(config: ScanConfig = .default,
                      scanRoots: [String]? = nil,
-                     forceRepositoryDiscovery: Bool = false) async -> (data: AppGroupData, warnings: [String]) {
+                     knownRepositoryPaths: [String]? = nil,
+                     forceRepositoryDiscovery: Bool = false) async -> (data: AppGroupData, warnings: [String], discoveredRepositoryPaths: [String]) {
         let startTime = Date()
         var warnings: [String] = []
 
@@ -113,6 +114,7 @@ enum GitRepositoryScanner {
         let discoveredPaths = await discoverRepositories(
             config: config,
             scanRoots: scanRoots,
+            knownRepositoryPaths: knownRepositoryPaths,
             forceRefresh: forceRepositoryDiscovery,
             warnings: &warnings
         )
@@ -166,19 +168,29 @@ enum GitRepositoryScanner {
             repositories: sorted
         )
 
-        return (result, warnings)
+        return (result, warnings, discoveredPaths)
     }
 
     // MARK: - Repository discovery
 
     private static func discoverRepositories(config: ScanConfig,
                                              scanRoots: [String]?,
+                                             knownRepositoryPaths: [String]?,
                                              forceRefresh: Bool,
                                              warnings: inout [String]) async -> [String] {
         var discovered = Set<String>()
         let allPaths = scanRoots ?? Array(config.enabledBuiltInPaths) + config.customPaths
         let normalizedRoots = allPaths.map(ScanLocationProvider.expandTilde)
         let cacheKey = discoveryCacheKey(for: normalizedRoots)
+
+        if !forceRefresh,
+           let knownRepositoryPaths,
+           let reusedPaths = reusableKnownRepositoryPaths(
+               knownRepositoryPaths,
+               limitedTo: normalizedRoots
+           ) {
+            return reusedPaths
+        }
 
         if forceRefresh {
             await discoveryCache.removeValue(for: cacheKey)
@@ -208,6 +220,36 @@ enum GitRepositoryScanner {
         let sorted = Array(discovered).sorted()
         await discoveryCache.store(paths: sorted, for: cacheKey, ttl: discoveryCacheTTL)
         return sorted
+    }
+
+    private static func reusableKnownRepositoryPaths(
+        _ knownRepositoryPaths: [String],
+        limitedTo scanRoots: [String]
+    ) -> [String]? {
+        let normalizedRoots = scanRoots.map(ScanLocationProvider.expandTilde)
+        let filtered = Set(
+            knownRepositoryPaths
+                .map(ScanLocationProvider.expandTilde)
+                .filter { path in
+                    guard FileManager.default.fileExists(atPath: path) else {
+                        return false
+                    }
+
+                    if normalizedRoots.isEmpty {
+                        return true
+                    }
+
+                    return normalizedRoots.contains { root in
+                        path == root || path.hasPrefix(root + "/")
+                    }
+                }
+        )
+
+        guard !filtered.isEmpty else {
+            return nil
+        }
+
+        return Array(filtered).sorted()
     }
 
     private static func walkDirectory(_ directory: String,
