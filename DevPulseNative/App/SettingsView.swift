@@ -201,7 +201,7 @@ struct SettingsView: View {
     private var diagnosticsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Label("Diagnostics", systemImage: "stethoscope")
+                Label("Widget Data Status", systemImage: "square.grid.2x2")
                     .font(.headline)
                 Spacer()
                 Button(action: { scheduler.scanNow() }) {
@@ -214,25 +214,69 @@ struct SettingsView: View {
                 .disabled(scheduler.isScanning)
             }
 
-            if let accessWarning = scheduler.scanRootAccessWarning {
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.red)
-                    Text(accessWarning)
-                        .font(.caption)
-                        .foregroundColor(.red)
+            widgetStatusSummarySection
+
+            DisclosureGroup("Advanced Diagnostics") {
+                VStack(alignment: .leading, spacing: 12) {
+                    if let accessWarning = scheduler.scanRootAccessWarning {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(.red)
+                            Text(accessWarning)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                        }
+                        .padding(10)
+                        .background(Color.red.opacity(0.08))
+                        .cornerRadius(8)
+                    }
+
+                    diagnosticsTopSummaryStrip
+                    diagnosticsSnapshotFactsSection
+                    diagnosticsSections
+                    diagnosticsScanRootsSection
+                    diagnosticsConsistencyIssuesSection
+                    diagnosticsRepositoriesSection
+                    diagnosticsEventsSection
                 }
-                .padding(10)
-                .background(Color.red.opacity(0.08))
-                .cornerRadius(8)
+                .padding(.top, 8)
+            }
+            .font(.caption)
+        }
+    }
+
+    private var widgetStatusSummarySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Label(diagnosticsOverview.sections.first(where: { $0.id == "widget-state" })?.title ?? "Widget 状态",
+                      systemImage: severitySymbol(widgetSummarySeverity))
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(severityColor(widgetSummarySeverity))
+                Spacer()
+                if let timeHint = diagnosticsSectionTimeHint(widgetSummarySectionModel) {
+                    Text(timeHint)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
             }
 
-            diagnosticsTopSummaryStrip
-            launchAtLoginDiagnosticsSection
-            diagnosticsSnapshotFactsSection
-            diagnosticsSections
-            diagnosticsScanRootsSection
+            Text(widgetSummarySectionModel.summary)
+                .font(.caption)
+                .foregroundColor(.primary)
+                .fixedSize(horizontal: false, vertical: true)
 
+            ForEach(widgetSummaryHighlights) { item in
+                diagnosticsStatusSummaryRow(item)
+            }
+        }
+        .padding(10)
+        .background(severityBackground(widgetSummarySeverity))
+        .cornerRadius(8)
+    }
+
+    private var diagnosticsConsistencyIssuesSection: some View {
+        Group {
             if !scheduler.diagnostics.validationIssues.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Consistency issues")
@@ -247,73 +291,77 @@ struct SettingsView: View {
                 .background(Color.red.opacity(0.08))
                 .cornerRadius(8)
             }
+        }
+    }
 
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Current repositories")
-                        .font(.caption.weight(.semibold))
-                    Spacer()
-                    Text(diagnosticsRepositorySummary)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
+    private var diagnosticsRepositoriesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Current repositories")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text(diagnosticsRepositorySummary)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
 
-                if scheduler.lastResult.repositories.isEmpty {
-                    Text("No repositories in the latest snapshot.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                } else {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(scheduler.lastResult.repositories) { repo in
-                            diagnosticsRepositoryCompactRow(repo)
-                        }
+            if scheduler.lastResult.repositories.isEmpty {
+                Text("No repositories in the latest snapshot.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(scheduler.lastResult.repositories) { repo in
+                        diagnosticsRepositoryCompactRow(repo)
                     }
                 }
             }
-            .padding(10)
-            .background(Color.secondary.opacity(0.06))
-            .cornerRadius(8)
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.06))
+        .cornerRadius(8)
+    }
 
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Recent events")
-                        .font(.caption.weight(.semibold))
-                    Spacer()
-                    Text(diagnosticsEventSummary)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
+    private var diagnosticsEventsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Recent events")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text(diagnosticsEventSummary)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
 
-                if scheduler.diagnosticEvents.isEmpty {
-                    Text("No diagnostic events yet.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                } else {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(diagnosticsEventPreview) { event in
-                            diagnosticsEventSummaryRow(event)
-                        }
+            if scheduler.diagnosticEvents.isEmpty {
+                Text("No diagnostic events yet.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(diagnosticsEventPreview) { event in
+                        diagnosticsEventSummaryRow(event)
+                    }
 
-                        if scheduler.diagnosticEvents.count > diagnosticsEventPreview.count {
-                            DisclosureGroup("Event log") {
-                                ScrollView {
-                                    LazyVStack(alignment: .leading, spacing: 6) {
-                                        ForEach(Array(scheduler.diagnosticEvents.reversed())) { event in
-                                            diagnosticsEventRow(event)
-                                        }
+                    if scheduler.diagnosticEvents.count > diagnosticsEventPreview.count {
+                        DisclosureGroup("Event log") {
+                            ScrollView {
+                                LazyVStack(alignment: .leading, spacing: 6) {
+                                    ForEach(Array(scheduler.diagnosticEvents.reversed())) { event in
+                                        diagnosticsEventRow(event)
                                     }
                                 }
-                                .frame(maxHeight: 160)
                             }
-                            .font(.caption)
+                            .frame(maxHeight: 160)
                         }
+                        .font(.caption)
                     }
                 }
             }
-            .padding(10)
-            .background(Color.secondary.opacity(0.06))
-            .cornerRadius(8)
         }
+        .padding(10)
+        .background(Color.secondary.opacity(0.06))
+        .cornerRadius(8)
     }
 
     private var diagnosticsTopSummaryStrip: some View {
@@ -516,6 +564,27 @@ struct SettingsView: View {
         )
     }
 
+    private var widgetSummarySectionModel: DiagnosticsSectionModel {
+        diagnosticsOverview.sections.first(where: { $0.id == "widget-state" })
+            ?? DiagnosticsSectionModel(
+                id: "widget-state",
+                title: "Widget 状态",
+                summary: "Widget 状态暂不可用。",
+                severity: .warning,
+                items: []
+            )
+    }
+
+    private var widgetSummarySeverity: DiagnosticsSeverity {
+        widgetSummarySectionModel.severity
+    }
+
+    private var widgetSummaryHighlights: [DiagnosticsStatusItem] {
+        widgetSummarySectionModel.items.filter {
+            $0.id == "widget-trust" || $0.id == "validation"
+        }
+    }
+
     private var diagnosticsSnapshotFactsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
@@ -565,56 +634,6 @@ struct SettingsView: View {
         }
         .padding(10)
         .background(Color.secondary.opacity(0.06))
-        .cornerRadius(8)
-    }
-
-    private var launchAtLoginDiagnosticsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Label("Launch at login", systemImage: severitySymbol(launchAtLoginSeverity))
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(severityColor(launchAtLoginSeverity))
-                Spacer()
-                Text(launchAtLoginStatusLabel)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-
-            Text(launchAtLoginController.diagnostics.detail)
-                .font(.caption2)
-                .foregroundColor(.secondary)
-                .lineLimit(2)
-
-            DisclosureGroup("Details") {
-                VStack(alignment: .leading, spacing: 8) {
-                    diagnosticsInsightRow(
-                        DiagnosticsStatusItem(
-                            id: "launch-at-login-system-status",
-                            title: "System status",
-                            value: launchAtLoginStatusLabel,
-                            detail: launchAtLoginController.diagnostics.detail,
-                            nextStep: launchAtLoginController.diagnostics.nextStep,
-                            severity: launchAtLoginSeverity
-                        )
-                    )
-
-                    diagnosticsInsightRow(
-                        DiagnosticsStatusItem(
-                            id: "launch-at-login-last-action",
-                            title: "Last action",
-                            value: launchAtLoginOperationLabel,
-                            detail: launchAtLoginOperationDetail,
-                            nextStep: launchAtLoginController.lastError == nil ? nil : "切换失败时不会读取仓库内容，只需检查系统登录项授权。",
-                            severity: launchAtLoginOperationSeverity
-                        )
-                    )
-                }
-                .padding(.top, 6)
-            }
-            .font(.caption)
-        }
-        .padding(10)
-        .background(severityBackground(launchAtLoginSeverity))
         .cornerRadius(8)
     }
 
