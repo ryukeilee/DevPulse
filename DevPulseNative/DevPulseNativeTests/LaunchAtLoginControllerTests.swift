@@ -3,6 +3,17 @@ import Testing
 @testable import DevPulse
 
 struct LaunchAtLoginControllerTests {
+    @Test func appCommandParserRecognizesSelfCheckFlag() {
+        #expect(AppCommand(arguments: ["DevPulse", "--self-check"]) == .selfCheck)
+    }
+
+    @Test func appCommandParserWrapsLaunchAtLoginCommand() {
+        #expect(
+            AppCommand(arguments: ["DevPulse", "--launch-at-login-status"])
+                == .launchAtLogin(.status)
+        )
+    }
+
     @Test func commandParserRecognizesStatusFlag() {
         #expect(LaunchAtLoginCommand(arguments: ["DevPulse", "--launch-at-login-status"]) == .status)
     }

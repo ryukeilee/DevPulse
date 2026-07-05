@@ -10,7 +10,7 @@ struct DevPulseApp: App {
     @State private var mainWindow: NSWindow?
 
     init() {
-        let startupCommand = LaunchAtLoginCommand(arguments: ProcessInfo.processInfo.arguments)
+        let startupCommand = AppCommand(arguments: ProcessInfo.processInfo.arguments)
         let scheduler = ScanScheduler(commandMode: startupCommand != nil)
         let launchAtLoginController = LaunchAtLoginController()
         if startupCommand == nil && !Self.isRunningTests {
@@ -89,13 +89,24 @@ struct DevPulseApp: App {
 
 final class StartupCommandDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        guard let command = LaunchAtLoginCommand(arguments: ProcessInfo.processInfo.arguments) else { return }
+        guard let command = AppCommand(arguments: ProcessInfo.processInfo.arguments) else { return }
 
         Task { @MainActor in
-            let controller = LaunchAtLoginController()
-            print(controller.run(command: command))
+            switch command {
+            case .launchAtLogin(let launchAtLoginCommand):
+                let controller = LaunchAtLoginController()
+                print(controller.run(command: launchAtLoginCommand))
+                fflush(stdout)
+                Darwin.exit(EXIT_SUCCESS)
+            case .selfCheck:
+                let scheduler = ScanScheduler()
+                let report = await scheduler.runSelfCheck()
+                print(report.renderedOutput)
+                fflush(stdout)
+                Darwin.exit(report.success ? EXIT_SUCCESS : EXIT_FAILURE)
+            }
+
             fflush(stdout)
-            NSApp.terminate(nil)
         }
     }
 }

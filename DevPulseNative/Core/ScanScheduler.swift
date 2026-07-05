@@ -109,6 +109,65 @@ enum ScanSchedulerPolicy {
     }
 }
 
+struct ScanSelfCheckReport {
+    let success: Bool
+    let refreshPhase: RefreshPhase
+    let generatedAt: String?
+    let writtenAt: String?
+    let reloadRequestedAt: Date?
+    let sharedReadError: String?
+    let sharedWriteError: String?
+    let widgetSnapshotReadError: String?
+    let validationIssues: [String]
+    let repositoryCount: Int
+
+    var renderedOutput: String {
+        var lines = [
+            "self_check.result=\(success ? "pass" : "fail")",
+            "self_check.refresh_phase=\(label(for: refreshPhase))",
+            "self_check.repository_count=\(repositoryCount)",
+            "self_check.validation=\(validationIssues.isEmpty ? "pass" : "mismatch")"
+        ]
+
+        if let generatedAt {
+            lines.append("self_check.generated_at=\(generatedAt)")
+        }
+        if let writtenAt {
+            lines.append("self_check.written_at=\(writtenAt)")
+        }
+        if let reloadRequestedAt {
+            lines.append("self_check.reload_requested_at=\(DateFormatting.displayString(from: reloadRequestedAt))")
+        }
+        if let sharedReadError, !sharedReadError.isEmpty {
+            lines.append("self_check.shared_read_error=\(sharedReadError)")
+        }
+        if let sharedWriteError, !sharedWriteError.isEmpty {
+            lines.append("self_check.shared_write_error=\(sharedWriteError)")
+        }
+        if let widgetSnapshotReadError, !widgetSnapshotReadError.isEmpty {
+            lines.append("self_check.widget_snapshot_error=\(widgetSnapshotReadError)")
+        }
+        if !validationIssues.isEmpty {
+            lines.append("self_check.validation_issues=\(validationIssues.joined(separator: " | "))")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func label(for refreshPhase: RefreshPhase) -> String {
+        switch refreshPhase {
+        case .idle:
+            return "idle"
+        case .refreshing:
+            return "refreshing"
+        case .success:
+            return "success"
+        case .failure:
+            return "failure"
+        }
+    }
+}
+
 /// Manages background scan scheduling with low-power safeguards.
 ///
 /// Key behaviors:
@@ -336,6 +395,77 @@ final class ScanScheduler: ObservableObject {
         consecutiveNoChanges = 0
         updateScanInterval()
         scanNow(forceRepositoryDiscovery: true)
+    }
+
+    func runSelfCheck() async -> ScanSelfCheckReport {
+        gitAvailable = ProcessRunner.isGitAvailable()
+        guard gitAvailable else {
+            failRefresh("Git 不可用")
+            return makeSelfCheckReport()
+        }
+
+        syncStoreInspection()
+        appGroupAvailable = AppGroupStore.isAvailable
+        diagnostics.validationIssues = []
+        diagnostics.sharedDataWriteError = nil
+        diagnostics.sharedDataReadError = nil
+        diagnostics.widgetSnapshotReadError = nil
+        diagnostics.snapshotDecodable = false
+        isScanning = true
+        refreshPhase = .refreshing
+        refreshFailureMessage = nil
+        warnings = []
+
+        let currentConfig = config
+        let currentScanRoots = scanRoots()
+        let result = await GitRepositoryScanner.scan(
+            config: currentConfig,
+            scanRoots: currentScanRoots.roots,
+            knownRepositoryPaths: nil,
+            forceRepositoryDiscovery: true
+        )
+
+        if let failureMessage = scanFailureMessage(
+            for: result.data,
+            scanRoots: currentScanRoots
+        ) {
+            let combinedWarnings = summarizeWarnings(
+                result.warnings,
+                accessWarning: currentScanRoots.warning
+            )
+
+            isScanning = false
+            refreshPhase = .failure
+            refreshFailureMessage = failureMessage
+            scanRootAccessWarning = currentScanRoots.warning
+            warnings = [failureMessage] + combinedWarnings.filter { $0 != failureMessage }
+            diagnostics.validationIssues = warnings
+            diagnostics.nextSteps = suggestedNextSteps(from: warnings)
+            recordEvent(.scanFailed, "Self-check failed: \(failureMessage)")
+            return makeSelfCheckReport()
+        }
+
+        let previousSnapshot = lastResult
+        let pinned = applyPins(result.data)
+        let combinedWarnings = summarizeWarnings(
+            result.warnings,
+            accessWarning: currentScanRoots.warning
+        )
+
+        lastResult = pinned
+        lastScanAt = DateFormatting.date(from: pinned.generatedAt) ?? Date()
+        diagnostics.lastScanAt = lastScanAt
+        warnings = combinedWarnings
+        isScanning = false
+        refreshPhase = .success
+        refreshFailureMessage = nil
+        scanRootAccessWarning = currentScanRoots.warning
+        diagnostics.validationIssues = combinedWarnings.isEmpty ? [] : combinedWarnings
+
+        syncSharedSnapshot(from: pinned, previousSnapshot: previousSnapshot, reason: "self-check")
+        recordEvent(.scanSucceeded, "Self-check refreshed \(pinned.scanSummary.totalRepositories) repos")
+
+        return makeSelfCheckReport()
     }
 
     // MARK: - Background scheduling
@@ -1068,5 +1198,24 @@ final class ScanScheduler: ObservableObject {
         }
 
         return steps
+    }
+
+    private func makeSelfCheckReport() -> ScanSelfCheckReport {
+        ScanSelfCheckReport(
+            success: refreshPhase == .success
+                && diagnostics.validationIssues.isEmpty
+                && diagnostics.sharedDataWriteError == nil
+                && diagnostics.sharedDataReadError == nil
+                && diagnostics.widgetSnapshotReadError == nil,
+            refreshPhase: refreshPhase,
+            generatedAt: diagnostics.lastGeneratedAt,
+            writtenAt: diagnostics.lastWrittenAt,
+            reloadRequestedAt: diagnostics.lastReloadRequestedAt,
+            sharedReadError: diagnostics.sharedDataReadError,
+            sharedWriteError: diagnostics.sharedDataWriteError,
+            widgetSnapshotReadError: diagnostics.widgetSnapshotReadError,
+            validationIssues: diagnostics.validationIssues,
+            repositoryCount: lastResult.repositories.count
+        )
     }
 }

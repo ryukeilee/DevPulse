@@ -34,4 +34,12 @@ enum DateFormatting {
         return formatter.date(from: iso8601String)
             ?? ISO8601DateFormatter().date(from: iso8601String)
     }
+
+    static func displayString(from date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss Z"
+        return formatter.string(from: date)
+    }
 }

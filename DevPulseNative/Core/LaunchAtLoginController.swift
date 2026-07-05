@@ -1,6 +1,25 @@
 import Foundation
 import ServiceManagement
 
+enum AppCommand: Equatable {
+    case launchAtLogin(LaunchAtLoginCommand)
+    case selfCheck
+
+    init?(arguments: [String]) {
+        if arguments.contains("--self-check") {
+            self = .selfCheck
+            return
+        }
+
+        if let launchAtLoginCommand = LaunchAtLoginCommand(arguments: arguments) {
+            self = .launchAtLogin(launchAtLoginCommand)
+            return
+        }
+
+        return nil
+    }
+}
+
 struct LaunchAtLoginPendingRequest: Codable, Equatable {
     let requestedEnabled: Bool
     let recordedAt: Date
