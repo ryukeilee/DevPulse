@@ -39,6 +39,17 @@ Use repository verification entry points before inventing ad hoc commands.
 
 When the task touches installation, signing, launch, snapshot generation, or the app/widget runtime contract, prefer `./scripts/install-and-self-check.sh` if the environment is authorized and a signing identity is available.
 
+For local install or Widget acceptance on a machine without an Xcode Developer account session, prefer this order:
+
+- `./scripts/install-and-self-check.sh`
+- `./scripts/verify-widgetkit.sh`
+- `pluginkit -vm -A -D -i local.devpulse.app.widget`
+- `/Applications/DevPulse.app/Contents/MacOS/DevPulse --self-check`
+- targeted `log show` checks for `amfid`, `taskgated-helper`, `chronod`, and `runningboardd`
+
+Treat `codesign --verify` as necessary but not sufficient for Widget launch.
+If logs show `No matching profile found` or `no eligible provisioning profiles found`, record that as an Apple provisioning-profile blocker for the current machine instead of continuing to modify app logic.
+
 For small logic changes, run the narrowest relevant verifier first, then the broader build/test command if risk justifies it.
 
 ## Project Facts That Matter During Changes
@@ -60,6 +71,7 @@ Keep changes tightly scoped to the active goal.
 - Keep repository scanning read-only.
 - Preserve App Group sharing between app and widget unless the task is specifically about that contract.
 - Do not change signing, Team configuration, bundle identifiers, or entitlements as incidental cleanup.
+- Do not add account identifiers, team identifiers, certificate hashes, provisioning UUIDs, or other machine-specific signing values to docs unless the task explicitly requires them.
 - Do not introduce broad formatting churn or unrelated file moves.
 
 ## Testing Guidance

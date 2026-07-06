@@ -111,6 +111,49 @@ Free Apple ID and ad-hoc signing can work for local testing, but they may be fra
 - clean build
 - reinstall the app
 
+## Local install without a Developer account
+
+If this Mac has only a local signing identity and does not have an Xcode Developer account session, use local install as a downgrade path instead of treating Widget launch as a code bug.
+
+Recommended local acceptance flow:
+
+```sh
+./scripts/install-and-self-check.sh
+./scripts/verify-widgetkit.sh
+pluginkit -vm -A -D -i local.devpulse.app.widget
+/Applications/DevPulse.app/Contents/MacOS/DevPulse --self-check
+```
+
+What this proves:
+
+- the host app builds locally
+- the app and widget are signed with the same local identity
+- the app is installed to `/Applications/DevPulse.app`
+- the app launches
+- `self_check.result=pass`
+- `self_check.validation=pass`
+- the widget target is embedded and wired correctly
+
+What this does not prove:
+
+- that WidgetKit will accept and launch the widget on a machine with no matching provisioning profile
+
+If `pluginkit -i local.devpulse.app.widget` returns no match, or `chronod` keeps logging that it cannot find `local.devpulse.app.widget`, treat that as a runtime blocker outside the business logic first.
+
+Useful log patterns:
+
+- `Unknown extension process`
+- `Unable to find local.devpulse.app.widget extension directly`
+- `No matching profile found`
+- `Disallowing local.devpulse.app.widget because no eligible provisioning profiles found`
+
+If `amfid` or `taskgated-helper` reports `No matching profile found` for either:
+
+- `/Applications/DevPulse.app/Contents/MacOS/DevPulse`
+- `/Applications/DevPulse.app/Contents/PlugIns/DevPulseWidgetExtension.appex/Contents/MacOS/DevPulseWidgetExtension`
+
+then stop changing app code. Record the failure as an Apple provisioning-profile blocker for this machine.
+
 ## What the app diagnostics should look like
 
 In the Settings tab, the Diagnostics section should eventually show:

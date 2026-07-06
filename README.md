@@ -81,7 +81,7 @@ Changed files are shown as basenames only.
 
 - macOS 14 or later
 - Xcode 16 or later
-- a local Apple development Team selected in Xcode for both targets
+- the same signing setup for both targets
 
 ### Open The Project
 
@@ -91,15 +91,15 @@ Open the native project:
 open DevPulseNative/DevPulseNative.xcodeproj
 ```
 
-### Choose Signing Team
+### Choose Signing Setup
 
 In Xcode:
 
 1. Select the `DevPulse` target.
 2. Open `Signing & Capabilities`.
-3. Pick your own Team.
-4. Repeat the same step for `DevPulseWidgetExtension`.
-5. Keep both targets on the same Team.
+3. Pick the same signing setup for both the app and `DevPulseWidgetExtension`.
+4. If you do have a Developer account session, keep both targets on the same Team.
+5. If you do not have a Developer account session, you can still use the local-install downgrade path below.
 6. Make sure both targets keep the same App Group: `group.local.devpulse`.
 
 ### Run A Debug Build
@@ -118,7 +118,22 @@ xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -co
 
 ### Install A Local Debug Build
 
-For a local `/Applications` install, build the native app, sign the host app and widget extension with the same Apple Development identity and App Group entitlements, then copy the bundle:
+If you only need a local `/Applications` install, prefer the repository script:
+
+```sh
+./scripts/install-and-self-check.sh
+```
+
+This script:
+
+- builds the app without Xcode-managed signing
+- signs the host app and widget with the same local identity
+- installs the latest build to `/Applications/DevPulse.app`
+- launches the app
+- runs the headless self-check
+- verifies shared snapshot generation
+
+The manual equivalent is:
 
 ```sh
 xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug -derivedDataPath /tmp/devpulse-build -destination platform=macOS CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
@@ -131,6 +146,33 @@ open -n /Applications/DevPulse.app
 ```
 
 If you ran tests immediately before installing and the build product contains `DevPulseTests.xctest` inside `DevPulse.app/Contents/PlugIns/`, remove that test bundle from the build product before signing the app for installation.
+
+### Local Acceptance Without A Developer Account
+
+On a machine with no Xcode Developer account session, treat Widget launch as a separate runtime check instead of assuming local signing is enough.
+
+Recommended acceptance sequence:
+
+```sh
+./scripts/install-and-self-check.sh
+./scripts/verify-widgetkit.sh
+pluginkit -vm -A -D -i local.devpulse.app.widget
+/Applications/DevPulse.app/Contents/MacOS/DevPulse --self-check
+```
+
+Interpret the results this way:
+
+- if `install-and-self-check` passes and `self_check.validation=pass`, the host app and shared snapshot path are locally healthy
+- if `pluginkit` shows the widget, WidgetKit discovery succeeded on this machine
+- if the widget still fails and logs show `No matching profile found`, treat it as an Apple provisioning-profile blocker for that machine
+
+Useful runtime log check:
+
+```sh
+log show --last 10m --style compact --predicate 'process == "amfid" OR process == "taskgated-helper" OR process == "chronod"'
+```
+
+If the logs say the app or widget was disallowed because no eligible provisioning profiles were found, stop changing app code and treat that as an external signing limitation.
 
 ### Verify The Widget Wiring
 
