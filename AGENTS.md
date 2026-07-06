@@ -1,23 +1,83 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
-This repository contains the native Swift/Xcode app and widget extension in `DevPulseNative/`.
+## Current Scope
+DevPulse is currently a local-first native macOS app plus WidgetKit extension. The product scope in this repository is the Swift/Xcode app under `DevPulseNative/`; there is no web app, backend, cloud sync, GitHub API, AI integration, or Git write path here.
 
-Within `DevPulseNative/`, keep app code in `App/`, shared models and scan logic in `Core/`, reusable helpers in `Utilities/`, and Widget code in `Widget/`. Scripts live in `scripts/`. Avoid committing Xcode user data, DerivedData, or build output from this directory.
+Preserve these boundaries unless the task explicitly changes product scope:
+- read local Git metadata only
+- show changed file basenames only
+- do not read repository file contents unless the task requires it
+- do not add commit, push, sync, or remote API behavior
 
-## Build, Test, and Development Commands
-- `xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug -destination platform=macOS build` builds the native macOS app and Widget extension.
+## Project Structure
+Primary code lives in `DevPulseNative/`.
 
-## Coding Style & Naming Conventions
-Use Swift conventions already established in `DevPulseNative/`. Keep types and views focused, preserve existing naming, and avoid unrelated structural rewrites while working on the native app or widget.
+- `App/`: SwiftUI app entry and screens
+- `Core/`: repository scanning, models, sorting, readiness, shared snapshot logic
+- `Utilities/`: reusable helpers
+- `Widget/`: WidgetKit extension
+- `DevPulseNativeTests/`: focused native tests
 
-## Testing Guidelines
-For native Swift changes, prefer focused tests in `DevPulseNative/DevPulseNativeTests/` and run the shared `DevPulse` scheme with code signing disabled for CLI verification.
+Support files:
 
-## Commit & Pull Request Guidelines
-Recent commits use short, imperative subjects, often with a conventional prefix such as `feat:` or `fix:`. Keep commits narrowly scoped and explain behavior changes, not implementation trivia. Pull requests should summarize the user-visible impact, list verification steps, and include screenshots or screen recordings for UI changes.
+- `scripts/verify-widgetkit.sh`: build plus Widget/App Group wiring checks
+- `scripts/verify-activity-timeline.sh`: timeline model verification harness
+- `scripts/install-and-self-check.sh`: signed local install plus runtime self-check
+- `scripts/secret-scan.sh`: staged or tracked secret scan
+- `scripts/generate-icon.mjs`: local icon asset generator
+- `docs/widgetkit-troubleshooting.md`: WidgetKit/signing troubleshooting reference
 
-## Security & Configuration Tips
-Do not commit real secrets, credentials, or private keys. Use `.env.example` for documented placeholders and keep local overrides untracked. The native app reads local Git metadata only, so avoid adding code that opens repository file contents unless the change is explicitly required.
+Avoid committing DerivedData, build products, installed app bundles, or Xcode user state.
 
-When preparing a public release, double-check for local signing identities, Team IDs, Xcode workspace user state, and any build artifacts before pushing.
+## Build And Verification
+Use repository verification entry points before inventing ad hoc commands.
+
+- Build: `xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug -destination platform=macOS CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build`
+- Tests: `xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug -derivedDataPath /tmp/devpulse-build -destination platform=macOS CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test`
+- Widget wiring: `./scripts/verify-widgetkit.sh`
+- Activity timeline logic: `./scripts/verify-activity-timeline.sh`
+
+When the task touches installation, signing, launch, snapshot generation, or the app/widget runtime contract, prefer `./scripts/install-and-self-check.sh` if the environment is authorized and a signing identity is available.
+
+For small logic changes, run the narrowest relevant verifier first, then the broader build/test command if risk justifies it.
+
+## Project Facts That Matter During Changes
+Current native targets and identifiers:
+
+- app scheme: `DevPulse`
+- app bundle id: `local.devpulse.app`
+- widget bundle id: `local.devpulse.app.widget`
+- shared App Group: `group.local.devpulse`
+- test target bundle id: `local.devpulse.DevPulseTests`
+- deployment target: macOS 14.0
+
+This project builds a host app, a widget extension, and native tests from one Xcode project. Changes affecting bundle IDs, entitlements, `Info.plist`, widget embedding, or shared snapshot format are high-risk and should be verified explicitly.
+
+## Change Boundaries
+Keep changes tightly scoped to the active goal.
+
+- Preserve existing SwiftUI structure and naming unless the task requires a refactor.
+- Keep repository scanning read-only.
+- Preserve App Group sharing between app and widget unless the task is specifically about that contract.
+- Do not change signing, Team configuration, bundle identifiers, or entitlements as incidental cleanup.
+- Do not introduce broad formatting churn or unrelated file moves.
+
+## Testing Guidance
+Prefer focused coverage in `DevPulseNative/DevPulseNativeTests/` when changing scan logic, readiness rules, repository discovery, or launch-at-login behavior.
+
+If a change affects widget rendering or shared snapshot consumption, verify both:
+- native build or tests
+- `scripts/verify-widgetkit.sh` and/or `scripts/verify-activity-timeline.sh`, depending on the touched path
+
+If real runtime behavior cannot be fully proven in CLI, state what was verified and what still needs manual confirmation in the installed app or widget.
+
+## Security And Privacy
+Do not commit secrets, signing material, or private keys. Keep `.env.example` as placeholder-only documentation.
+
+DevPulse's privacy boundary is part of the product contract:
+- no file-content reads unless explicitly required
+- no secret harvesting
+- no network or cloud integration added implicitly
+- no Git write operations
+
+Before commit or release-oriented work, run `./scripts/secret-scan.sh staged` when relevant.
