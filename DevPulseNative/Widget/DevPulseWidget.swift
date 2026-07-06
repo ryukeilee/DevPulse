@@ -210,7 +210,6 @@ struct DevPulseWidgetEntryView: View {
         .containerBackground(for: .widget) {
             WidgetPanelBackground()
         }
-        .clipShape(ContainerRelativeShape())
     }
 }
 
@@ -233,46 +232,21 @@ private enum WidgetPalette {
 private struct WidgetPanelBackground: View {
     var body: some View {
         ContainerRelativeShape()
-            .fill(WidgetPalette.base)
-            .overlay {
-                ContainerRelativeShape()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.32, green: 0.08, blue: 0.07).opacity(0.95),
-                                Color(red: 0.18, green: 0.08, blue: 0.09).opacity(0.90),
-                                Color(red: 0.08, green: 0.07, blue: 0.08).opacity(0.98)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-            }
-            .overlay {
-                ContainerRelativeShape()
-                    .fill(
-                        RadialGradient(
-                            colors: [
-                                WidgetPalette.accent.opacity(0.26),
-                                WidgetPalette.accentSoft.opacity(0.11),
-                                Color.clear
-                            ],
-                            center: UnitPoint(x: 0.20, y: 0.12),
-                            startRadius: 2,
-                            endRadius: 220
-                        )
-                    )
-                    .blendMode(.screen)
-            }
-            .overlay {
+            .fill(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.26, green: 0.09, blue: 0.08),
+                        Color(red: 0.15, green: 0.08, blue: 0.09),
+                        WidgetPalette.base
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .overlay(
                 ContainerRelativeShape()
                     .stroke(WidgetPalette.stroke, lineWidth: 0.6)
-            }
-            .overlay {
-                ContainerRelativeShape()
-                    .inset(by: 8)
-                    .stroke(WidgetPalette.subtleStroke, lineWidth: 0.5)
-            }
+            )
     }
 }
 
