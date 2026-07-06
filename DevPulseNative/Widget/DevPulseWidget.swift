@@ -192,23 +192,56 @@ struct WidgetEntry: TimelineEntry {
 
 struct DevPulseWidgetEntryView: View {
     @Environment(\.widgetFamily) private var widgetFamily
+    @Environment(\.widgetRenderingMode) private var renderingMode
+    @Environment(\.showsWidgetContainerBackground) private var showsContainerBackground
     let entry: WidgetEntry
 
     var body: some View {
         Group {
-            switch widgetFamily {
-            case .systemSmall:
-                SmallGlanceWidgetView(entry: entry)
-            case .systemMedium:
-                MediumGlanceWidgetView(entry: entry)
-            case .systemLarge:
-                LargeGlanceWidgetView(entry: entry)
-            default:
-                SmallGlanceWidgetView(entry: entry)
+            if useSystemFallback {
+                fallbackContent
+            } else {
+                themedContent
             }
         }
         .containerBackground(for: .widget) {
-            WidgetPanelBackground()
+            if useSystemFallback {
+                Color.clear
+            } else {
+                WidgetPanelBackground()
+            }
+        }
+    }
+
+    private var useSystemFallback: Bool {
+        renderingMode != .fullColor || !showsContainerBackground
+    }
+
+    @ViewBuilder
+    private var themedContent: some View {
+        switch widgetFamily {
+        case .systemSmall:
+            SmallGlanceWidgetView(entry: entry)
+        case .systemMedium:
+            MediumGlanceWidgetView(entry: entry)
+        case .systemLarge:
+            LargeGlanceWidgetView(entry: entry)
+        default:
+            SmallGlanceWidgetView(entry: entry)
+        }
+    }
+
+    @ViewBuilder
+    private var fallbackContent: some View {
+        switch widgetFamily {
+        case .systemSmall:
+            SimpleSmallGlanceWidgetView(entry: entry)
+        case .systemMedium:
+            SimpleMediumGlanceWidgetView(entry: entry)
+        case .systemLarge:
+            SimpleLargeGlanceWidgetView(entry: entry)
+        default:
+            SimpleSmallGlanceWidgetView(entry: entry)
         }
     }
 }
@@ -1328,6 +1361,293 @@ private struct WidgetReadinessBadge: View {
             return "exclamationmark.triangle.fill"
         case .unknown:
             return "exclamationmark.triangle.fill"
+        }
+    }
+}
+
+private struct SimpleWidgetChromeHeader: View {
+    let trailingText: String?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "terminal")
+                .font(.caption2.weight(.semibold))
+            Text("DevPulse")
+                .font(.caption.weight(.semibold))
+            Spacer(minLength: 0)
+            if let trailingText {
+                Text(trailingText)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+        .foregroundStyle(.secondary)
+    }
+}
+
+private struct SimpleWidgetStateBlock: View {
+    let title: String
+    let detail: String?
+    let icon: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(title, systemImage: icon)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+
+            if let detail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct SimpleWidgetRepositoryRow: View {
+    let item: ActivityTimelineItem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(item.repoName)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+
+                Spacer(minLength: 6)
+
+                Text(item.widgetChangeCountLabel)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            HStack(spacing: 6) {
+                Text(statusLabel)
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(statusTint.opacity(0.14)))
+                    .foregroundStyle(statusTint)
+
+                Text(item.branch.isEmpty ? "detached" : item.branch)
+                    .font(.caption2)
+                    .lineLimit(1)
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 4)
+
+                Text(item.activityLabel)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    private var statusLabel: String {
+        switch item.status {
+        case .clean:
+            return "Clean"
+        case .changed:
+            return "Dirty"
+        case .error:
+            return "Error"
+        }
+    }
+
+    private var statusTint: Color {
+        switch item.status {
+        case .clean:
+            return .green
+        case .changed:
+            return .orange
+        case .error:
+            return .red
+        }
+    }
+}
+
+private struct SimpleSmallGlanceWidgetView: View {
+    let entry: WidgetEntry
+
+    private var prioritizedItems: [ActivityTimelineItem] {
+        WidgetRepositoryPriorityBuilder.build(from: entry.snapshot)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SimpleWidgetChromeHeader(trailingText: nil)
+
+            content
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(12)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let state = fallbackState {
+            SimpleWidgetStateBlock(title: state.title, detail: state.detail, icon: state.icon)
+        } else if let item = prioritizedItems.first {
+            SimpleWidgetRepositoryRow(item: item)
+        } else {
+            SimpleWidgetStateBlock(title: "没有找到仓库", detail: "检查扫描目录后重新刷新", icon: "folder")
+        }
+    }
+
+    private var fallbackState: (title: String, detail: String?, icon: String)? {
+        switch entry.loadState {
+        case .placeholder:
+            return ("正在读取共享快照", nil, "clock")
+        case .noSnapshot:
+            return ("尚未生成快照", "打开 DevPulse 执行 Refresh Data 或 Rescan Now", "arrow.triangle.2.circlepath")
+        case .loadFailed:
+            return (entry.loadFailure?.title ?? "共享快照读取失败", entry.loadFailure?.detail, entry.loadFailure?.icon ?? "exclamationmark.triangle.fill")
+        case .ready:
+            switch entry.trustAssessment?.state {
+            case .stale, .expired:
+                return ("数据可能已过期", entry.trustAssessment?.detail, "clock.badge.exclamationmark")
+            case .unknown, .failed, .none:
+                return ("状态未知", "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照", "questionmark.circle")
+            case .fresh:
+                return nil
+            }
+        }
+    }
+}
+
+private struct SimpleMediumGlanceWidgetView: View {
+    let entry: WidgetEntry
+
+    private var prioritizedItems: [ActivityTimelineItem] {
+        WidgetRepositoryPriorityBuilder.build(from: entry.snapshot)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SimpleWidgetChromeHeader(trailingText: mediumTrailingText)
+
+            content
+
+            Text(entry.footerText)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(12)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let state = fallbackState {
+            SimpleWidgetStateBlock(title: state.title, detail: state.detail, icon: state.icon)
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(prioritizedItems.prefix(2).enumerated()), id: \.element.id) { index, item in
+                    SimpleWidgetRepositoryRow(item: item)
+                    if index == 0 && prioritizedItems.count > 1 {
+                        Divider()
+                    }
+                }
+            }
+        }
+    }
+
+    private var mediumTrailingText: String? {
+        guard case .ready = entry.loadState else { return nil }
+        return entry.trustAssessment?.state == .fresh ? nil : entry.trustAssessment?.title
+    }
+
+    private var fallbackState: (title: String, detail: String?, icon: String)? {
+        switch entry.loadState {
+        case .placeholder:
+            return ("正在读取共享快照", nil, "clock")
+        case .noSnapshot:
+            return ("尚未生成快照", "打开 DevPulse 执行 Refresh Data 或 Rescan Now", "arrow.triangle.2.circlepath")
+        case .loadFailed:
+            return (entry.loadFailure?.title ?? "共享快照读取失败", entry.loadFailure?.detail, entry.loadFailure?.icon ?? "exclamationmark.triangle.fill")
+        case .ready:
+            switch entry.trustAssessment?.state {
+            case .stale, .expired:
+                return ("数据可能已过期", entry.trustAssessment?.detail, "clock.badge.exclamationmark")
+            case .unknown, .failed, .none:
+                return ("状态未知", "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照", "questionmark.circle")
+            case .fresh:
+                return prioritizedItems.isEmpty ? ("没有找到仓库", "检查扫描目录后重新刷新", "folder") : nil
+            }
+        }
+    }
+}
+
+private struct SimpleLargeGlanceWidgetView: View {
+    let entry: WidgetEntry
+
+    private var prioritizedItems: [ActivityTimelineItem] {
+        WidgetRepositoryPriorityBuilder.build(from: entry.snapshot)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SimpleWidgetChromeHeader(trailingText: largeTrailingText)
+
+            content
+
+            Spacer(minLength: 0)
+
+            Text(entry.footerText)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(14)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let state = fallbackState {
+            SimpleWidgetStateBlock(title: state.title, detail: state.detail, icon: state.icon)
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(prioritizedItems.prefix(3).enumerated()), id: \.element.id) { index, item in
+                    SimpleWidgetRepositoryRow(item: item)
+                    if index < min(prioritizedItems.count, 3) - 1 {
+                        Divider()
+                    }
+                }
+            }
+        }
+    }
+
+    private var largeTrailingText: String? {
+        guard case .ready = entry.loadState else { return nil }
+        return entry.trustAssessment?.state == .fresh ? nil : entry.trustAssessment?.title
+    }
+
+    private var fallbackState: (title: String, detail: String?, icon: String)? {
+        switch entry.loadState {
+        case .placeholder:
+            return ("正在读取共享快照", nil, "clock")
+        case .noSnapshot:
+            return ("尚未生成快照", "打开 DevPulse 执行 Refresh Data 或 Rescan Now", "arrow.triangle.2.circlepath")
+        case .loadFailed:
+            return (entry.loadFailure?.title ?? "共享快照读取失败", entry.loadFailure?.detail, entry.loadFailure?.icon ?? "exclamationmark.triangle.fill")
+        case .ready:
+            switch entry.trustAssessment?.state {
+            case .stale, .expired:
+                return ("数据可能已过期", entry.trustAssessment?.detail, "clock.badge.exclamationmark")
+            case .unknown, .failed, .none:
+                return ("状态未知", "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照", "questionmark.circle")
+            case .fresh:
+                return prioritizedItems.isEmpty ? ("没有找到仓库", "检查扫描目录后重新刷新", "folder") : nil
+            }
         }
     }
 }
