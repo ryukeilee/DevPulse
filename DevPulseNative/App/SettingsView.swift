@@ -187,7 +187,7 @@ struct SettingsView: View {
             }
 
             if launchAtLoginController.status == .requiresApproval || launchAtLoginController.status == .notFound {
-                Button("Open Login Items in System Settings") {
+                Button("打开系统设置中的登录项") {
                     launchAtLoginController.openSystemSettings()
                 }
                 .buttonStyle(.bordered)
@@ -201,12 +201,12 @@ struct SettingsView: View {
     private var diagnosticsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Label("Widget Data Status", systemImage: "square.grid.2x2")
+                Label("状态诊断", systemImage: "stethoscope")
                     .font(.headline)
                 Spacer()
                 Button(action: { scheduler.scanNow() }) {
                     Label(
-                        scheduler.isScanning ? "Refreshing..." : "Refresh Data",
+                        scheduler.isScanning ? "刷新中…" : "刷新数据",
                         systemImage: "arrow.triangle.2.circlepath"
                     )
                 }
@@ -214,9 +214,7 @@ struct SettingsView: View {
                 .disabled(scheduler.isScanning)
             }
 
-            widgetStatusSummarySection
-
-            DisclosureGroup("Advanced Diagnostics") {
+            DisclosureGroup("查看诊断明细") {
                 VStack(alignment: .leading, spacing: 12) {
                     if let accessWarning = scheduler.scanRootAccessWarning {
                         HStack(alignment: .top, spacing: 8) {
@@ -232,10 +230,9 @@ struct SettingsView: View {
                     }
 
                     diagnosticsTopSummaryStrip
-                    diagnosticsSnapshotFactsSection
                     diagnosticsSections
+                    diagnosticsSnapshotFactsSection
                     diagnosticsScanRootsSection
-                    diagnosticsConsistencyIssuesSection
                     diagnosticsRepositoriesSection
                     diagnosticsEventsSection
                 }
@@ -245,59 +242,10 @@ struct SettingsView: View {
         }
     }
 
-    private var widgetStatusSummarySection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Label(diagnosticsOverview.sections.first(where: { $0.id == "widget-state" })?.title ?? "Widget 状态",
-                      systemImage: severitySymbol(widgetSummarySeverity))
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(severityColor(widgetSummarySeverity))
-                Spacer()
-                if let timeHint = diagnosticsSectionTimeHint(widgetSummarySectionModel) {
-                    Text(timeHint)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                }
-            }
-
-            Text(widgetSummarySectionModel.summary)
-                .font(.caption)
-                .foregroundColor(.primary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            ForEach(widgetSummaryHighlights) { item in
-                diagnosticsStatusSummaryRow(item)
-            }
-        }
-        .padding(10)
-        .background(severityBackground(widgetSummarySeverity))
-        .cornerRadius(8)
-    }
-
-    private var diagnosticsConsistencyIssuesSection: some View {
-        Group {
-            if !scheduler.diagnostics.validationIssues.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Consistency issues")
-                        .font(.caption.weight(.semibold))
-                    ForEach(scheduler.diagnostics.validationIssues, id: \.self) { issue in
-                        Label(issue, systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundColor(.red)
-                    }
-                }
-                .padding(10)
-                .background(Color.red.opacity(0.08))
-                .cornerRadius(8)
-            }
-        }
-    }
-
     private var diagnosticsRepositoriesSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Current repositories")
+                Text("当前仓库")
                     .font(.caption.weight(.semibold))
                 Spacer()
                 Text(diagnosticsRepositorySummary)
@@ -306,7 +254,7 @@ struct SettingsView: View {
             }
 
             if scheduler.lastResult.repositories.isEmpty {
-                Text("No repositories in the latest snapshot.")
+                Text("最近一次快照里还没有仓库。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else {
@@ -325,7 +273,7 @@ struct SettingsView: View {
     private var diagnosticsEventsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Recent events")
+                Text("最近事件")
                     .font(.caption.weight(.semibold))
                 Spacer()
                 Text(diagnosticsEventSummary)
@@ -334,7 +282,7 @@ struct SettingsView: View {
             }
 
             if scheduler.diagnosticEvents.isEmpty {
-                Text("No diagnostic events yet.")
+                Text("还没有诊断事件。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else {
@@ -344,7 +292,7 @@ struct SettingsView: View {
                     }
 
                     if scheduler.diagnosticEvents.count > diagnosticsEventPreview.count {
-                        DisclosureGroup("Event log") {
+                        DisclosureGroup("查看完整事件日志") {
                             ScrollView {
                                 LazyVStack(alignment: .leading, spacing: 6) {
                                     ForEach(Array(scheduler.diagnosticEvents.reversed())) { event in
@@ -380,19 +328,19 @@ struct SettingsView: View {
 
             HStack(spacing: 6) {
                 diagnosticsInlineStatusPill(
-                    title: "Shared",
-                    value: diagnosticsOverview.sections.first(where: { $0.id == "shared-data" })?.summary ?? "Unavailable",
+                    title: "共享链路",
+                    value: diagnosticsOverview.sections.first(where: { $0.id == "shared-data" })?.summary ?? "暂不可用",
                     severity: diagnosticsOverview.sections.first(where: { $0.id == "shared-data" })?.severity ?? .warning
                 )
                 diagnosticsInlineStatusPill(
                     title: "Widget",
-                    value: diagnosticsOverview.sections.first(where: { $0.id == "widget-state" })?.summary ?? "Unavailable",
+                    value: diagnosticsOverview.sections.first(where: { $0.id == "widget-state" })?.summary ?? "暂不可用",
                     severity: diagnosticsOverview.sections.first(where: { $0.id == "widget-state" })?.severity ?? .warning
                 )
                 diagnosticsInlineStatusPill(
-                    title: "Events",
-                    value: diagnosticsEventHeadline,
-                    severity: diagnosticsEventSeverity
+                    title: "扫描状态",
+                    value: diagnosticsOverview.sections.first(where: { $0.id == "scan-state" })?.summary ?? "暂不可用",
+                    severity: diagnosticsOverview.sections.first(where: { $0.id == "scan-state" })?.severity ?? .warning
                 )
             }
         }
@@ -403,11 +351,11 @@ struct SettingsView: View {
 
     private var diagnosticsScanRootsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Scan roots")
+            Text("扫描根目录")
                 .font(.caption.weight(.semibold))
 
             if scheduler.diagnostics.scanRoots.isEmpty {
-                Text("No accessible scan roots.")
+                Text("当前没有可访问的扫描根目录。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else {
@@ -441,127 +389,127 @@ struct SettingsView: View {
             diagnosticsRow(
                 title: "App Bundle",
                 value: scheduler.diagnostics.appBundleIdentifier,
-                detail: "Main app bundle identifier.",
+                detail: "主 App 的 bundle identifier。",
                 isError: false
             )
             diagnosticsRow(
                 title: "Widget Bundle",
                 value: scheduler.diagnostics.widgetBundleIdentifier,
-                detail: "Widget extension bundle identifier.",
+                detail: "Widget Extension 的 bundle identifier。",
                 isError: false
             )
             diagnosticsRow(
                 title: "App Group",
                 value: scheduler.diagnostics.appGroupIdentifier,
-                detail: scheduler.diagnostics.appGroupContainerPath ?? "App Group container unavailable.",
+                detail: scheduler.diagnostics.appGroupContainerPath ?? "当前拿不到 App Group 容器路径。",
                 isError: !scheduler.appGroupAvailable
             )
             diagnosticsRow(
-                title: "Container",
-                value: scheduler.diagnostics.appGroupContainerPath ?? "Unavailable",
-                detail: scheduler.diagnostics.appGroupAvailable ? "App Group container path." : "Check entitlements and signing.",
+                title: "共享容器",
+                value: scheduler.diagnostics.appGroupContainerPath ?? "不可用",
+                detail: scheduler.diagnostics.appGroupAvailable ? "当前解析到的 App Group 容器路径。" : "检查 entitlement 与签名配置。",
                 isError: !scheduler.appGroupAvailable
             )
             diagnosticsRow(
-                title: "Snapshot file",
-                value: scheduler.diagnostics.snapshotFilePath ?? "Unavailable",
-                detail: scheduler.diagnostics.snapshotExists ? "Shared repositories.json exists." : "Shared repositories.json is missing.",
+                title: "快照文件",
+                value: scheduler.diagnostics.snapshotFilePath ?? "不可用",
+                detail: scheduler.diagnostics.snapshotExists ? "共享 `repositories.json` 已存在。" : "共享 `repositories.json` 缺失。",
                 isError: !scheduler.diagnostics.snapshotExists
             )
             diagnosticsRow(
-                title: "Snapshot exists",
-                value: scheduler.diagnostics.snapshotExists ? "Yes" : "No",
-                detail: scheduler.diagnostics.snapshotFilePath ?? "No snapshot path resolved.",
+                title: "快照存在",
+                value: scheduler.diagnostics.snapshotExists ? "是" : "否",
+                detail: scheduler.diagnostics.snapshotFilePath ?? "还没有解析到快照路径。",
                 isError: !scheduler.diagnostics.snapshotExists
             )
             diagnosticsRow(
-                title: "Snapshot readable",
-                value: scheduler.diagnostics.snapshotReadable ? "Yes" : "No",
-                detail: scheduler.diagnostics.snapshotReadable ? "File is readable." : "File cannot be read by the app.",
+                title: "快照可读",
+                value: scheduler.diagnostics.snapshotReadable ? "是" : "否",
+                detail: scheduler.diagnostics.snapshotReadable ? "主 App 可以读取该文件。" : "主 App 目前无法读取该文件。",
                 isError: !scheduler.diagnostics.snapshotReadable
             )
             diagnosticsRow(
-                title: "Snapshot writable",
-                value: scheduler.diagnostics.snapshotWritable ? "Yes" : "No",
-                detail: scheduler.diagnostics.snapshotWritable ? "File or container is writable." : "File or container cannot be written.",
+                title: "快照可写",
+                value: scheduler.diagnostics.snapshotWritable ? "是" : "否",
+                detail: scheduler.diagnostics.snapshotWritable ? "文件或容器当前可写。" : "文件或容器当前不可写。",
                 isError: !scheduler.diagnostics.snapshotWritable
             )
             diagnosticsRow(
-                title: "Snapshot decodable",
-                value: scheduler.diagnostics.snapshotDecodable ? "Yes" : "No",
-                detail: scheduler.diagnostics.snapshotDecodable ? "Shared snapshot decoded successfully." : (scheduler.diagnostics.sharedDataReadError ?? "Shared snapshot has not been decoded yet."),
+                title: "快照可解码",
+                value: scheduler.diagnostics.snapshotDecodable ? "是" : "否",
+                detail: scheduler.diagnostics.snapshotDecodable ? "共享快照已成功解码。" : (scheduler.diagnostics.sharedDataReadError ?? "共享快照尚未成功解码。"),
                 isError: !scheduler.diagnostics.snapshotDecodable
             )
             diagnosticsRow(
-                title: "Shared read",
+                title: "共享读回",
                 value: sharedReadStatus,
                 detail: sharedReadDetail,
-                isError: sharedReadStatus == "Failed"
+                isError: sharedReadStatus == "失败"
             )
             diagnosticsRow(
-                title: "Shared write",
+                title: "共享写入",
                 value: sharedWriteStatus,
                 detail: sharedWriteDetail,
-                isError: sharedWriteStatus == "Failed"
+                isError: sharedWriteStatus == "失败"
             )
             diagnosticsRow(
-                title: "Widget snapshot",
+                title: "Widget 快照",
                 value: widgetSnapshotStatus,
                 detail: widgetSnapshotDetail,
-                isError: widgetSnapshotStatus == "Failed"
+                isError: widgetSnapshotStatus == "失败"
             )
             diagnosticsRow(
-                title: "Validation",
-                value: scheduler.diagnostics.validationIssues.isEmpty ? "Pass" : "Mismatch",
-                detail: scheduler.diagnostics.validationIssues.isEmpty ? "Main app, shared data, and widget-readable snapshot match." : scheduler.diagnostics.validationIssues.joined(separator: " "),
+                title: "一致性校验",
+                value: scheduler.diagnostics.validationIssues.isEmpty ? "通过" : "不一致",
+                detail: scheduler.diagnostics.validationIssues.isEmpty ? "主 App、共享数据与 Widget 可读快照当前一致。" : scheduler.diagnostics.validationIssues.joined(separator: " "),
                 isError: !scheduler.diagnostics.validationIssues.isEmpty
             )
             diagnosticsRow(
-                title: "Refresh trust",
+                title: "刷新可信度",
                 value: scheduler.refreshTrustAssessment.title,
                 detail: scheduler.refreshTrustAssessment.basis,
                 isError: scheduler.refreshTrustAssessment.isError
             )
             diagnosticsRow(
-                title: "Widget trust",
+                title: "Widget 可信度",
                 value: widgetTrustAssessment.title,
                 detail: widgetTrustAssessment.basis,
                 isError: widgetTrustAssessment.isError
             )
             diagnosticsRow(
-                title: "Last refresh",
-                value: scheduler.lastScanAt.map { snapshotTimeLabel($0) } ?? "Unavailable",
-                detail: scheduler.lastScanAt.map { formattedDate($0) } ?? "No successful refresh recorded yet.",
+                title: "最近刷新",
+                value: scheduler.lastScanAt.map { snapshotTimeLabel($0) } ?? "不可用",
+                detail: scheduler.lastScanAt.map { formattedDate($0) } ?? "还没有成功刷新记录。",
                 isError: scheduler.lastScanAt == nil
             )
             diagnosticsRow(
-                title: "Generated at",
-                value: scheduler.diagnostics.lastGeneratedAt.map { snapshotTimeLabel($0) } ?? "Unavailable",
-                detail: scheduler.diagnostics.lastGeneratedAt ?? "No generatedAt captured yet.",
+                title: "generatedAt",
+                value: scheduler.diagnostics.lastGeneratedAt.map { snapshotTimeLabel($0) } ?? "不可用",
+                detail: scheduler.diagnostics.lastGeneratedAt ?? "还没有记录 generatedAt。",
                 isError: scheduler.diagnostics.lastGeneratedAt == nil
             )
             diagnosticsRow(
-                title: "Written at",
-                value: scheduler.diagnostics.lastWrittenAt.map { snapshotTimeLabel($0) } ?? "Unavailable",
-                detail: scheduler.diagnostics.lastWrittenAt ?? "No writtenAt captured yet.",
+                title: "writtenAt",
+                value: scheduler.diagnostics.lastWrittenAt.map { snapshotTimeLabel($0) } ?? "不可用",
+                detail: scheduler.diagnostics.lastWrittenAt ?? "还没有记录 writtenAt。",
                 isError: scheduler.diagnostics.lastWrittenAt == nil
             )
             diagnosticsRow(
-                title: "Reload requested",
-                value: scheduler.diagnostics.lastReloadRequestedAt.map { snapshotTimeLabel($0) } ?? "Unavailable",
-                detail: scheduler.diagnostics.lastReloadRequestedAt.map { formattedDate($0) } ?? "Widget reload has not been requested yet.",
+                title: "reload requested",
+                value: scheduler.diagnostics.lastReloadRequestedAt.map { snapshotTimeLabel($0) } ?? "不可用",
+                detail: scheduler.diagnostics.lastReloadRequestedAt.map { formattedDate($0) } ?? "还没有请求过 Widget reload。",
                 isError: scheduler.diagnostics.lastReloadRequestedAt == nil
             )
             diagnosticsRow(
-                title: "Refresh started",
-                value: scheduler.diagnostics.lastRefreshStartedAt.map { snapshotTimeLabel($0) } ?? "Unavailable",
-                detail: scheduler.diagnostics.lastRefreshStartedAt.map { formattedDate($0) } ?? "No refresh start has been recorded yet.",
+                title: "刷新开始",
+                value: scheduler.diagnostics.lastRefreshStartedAt.map { snapshotTimeLabel($0) } ?? "不可用",
+                detail: scheduler.diagnostics.lastRefreshStartedAt.map { formattedDate($0) } ?? "还没有刷新开始时间记录。",
                 isError: scheduler.diagnostics.lastRefreshStartedAt == nil
             )
             diagnosticsRow(
-                title: "Refresh completed",
-                value: scheduler.diagnostics.lastRefreshCompletedAt.map { snapshotTimeLabel($0) } ?? "Unavailable",
-                detail: scheduler.diagnostics.lastRefreshCompletedAt.map { formattedDate($0) } ?? "No refresh completion has been recorded yet.",
+                title: "刷新完成",
+                value: scheduler.diagnostics.lastRefreshCompletedAt.map { snapshotTimeLabel($0) } ?? "不可用",
+                detail: scheduler.diagnostics.lastRefreshCompletedAt.map { formattedDate($0) } ?? "还没有刷新完成时间记录。",
                 isError: scheduler.diagnostics.lastRefreshCompletedAt == nil
             )
             diagnosticsRow(
@@ -571,13 +519,13 @@ struct SettingsView: View {
                 isError: scheduler.diagnostics.lastSnapshotStoreState == .failed
             )
             diagnosticsRow(
-                title: "Store trigger",
+                title: "触发来源",
                 value: snapshotStoreTriggerLabel,
                 detail: snapshotStoreTriggerDetail,
                 isError: false
             )
             diagnosticsRow(
-                title: "Reload decision",
+                title: "reload 决策",
                 value: widgetReloadStateLabel,
                 detail: widgetReloadStateDetail,
                 isError: false
@@ -594,31 +542,10 @@ struct SettingsView: View {
         )
     }
 
-    private var widgetSummarySectionModel: DiagnosticsSectionModel {
-        diagnosticsOverview.sections.first(where: { $0.id == "widget-state" })
-            ?? DiagnosticsSectionModel(
-                id: "widget-state",
-                title: "Widget 状态",
-                summary: "Widget 状态暂不可用。",
-                severity: .warning,
-                items: []
-            )
-    }
-
-    private var widgetSummarySeverity: DiagnosticsSeverity {
-        widgetSummarySectionModel.severity
-    }
-
-    private var widgetSummaryHighlights: [DiagnosticsStatusItem] {
-        widgetSummarySectionModel.items.filter {
-            $0.id == "widget-trust" || $0.id == "validation"
-        }
-    }
-
     private var diagnosticsSnapshotFactsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Snapshot facts")
+                Text("原始诊断证据")
                     .font(.caption.weight(.semibold))
                 Spacer()
                 Text(snapshotFactsUpdatedLabel)
@@ -632,29 +559,29 @@ struct SettingsView: View {
 
             HStack(alignment: .top, spacing: 8) {
                 diagnosticsCompactBadge(
-                    title: "Chain",
+                    title: "链路",
                     value: snapshotChainSummary,
                     severity: snapshotChainSeverity
                 )
                 diagnosticsCompactBadge(
-                    title: "Snapshot",
+                    title: "快照",
                     value: snapshotReadableSummary,
                     severity: snapshotReadableSeverity
                 )
                 diagnosticsCompactBadge(
-                    title: "Consistency",
+                    title: "一致性",
                     value: snapshotConsistencySummary,
                     severity: snapshotConsistencySeverity
                 )
             }
 
-            Text("Detailed evidence")
+            Text("原始字段")
                 .font(.caption.weight(.semibold))
-            Text("Container paths, snapshot file paths, raw timestamps, and read/write evidence are kept here for deeper troubleshooting.")
+            Text("共享容器路径、快照文件路径、原始时间戳与读写证据都保留在这里，用于进一步排查。")
                 .font(.caption2)
                 .foregroundColor(.secondary)
 
-            DisclosureGroup("Show raw diagnostics details") {
+            DisclosureGroup("查看原始诊断字段") {
                 VStack(alignment: .leading, spacing: 8) {
                     diagnosticsStatusGrid
                 }
@@ -677,59 +604,59 @@ struct SettingsView: View {
 
     private var sharedReadStatus: String {
         if scheduler.diagnostics.sharedDataReadError != nil {
-            return "Failed"
+            return "失败"
         }
         if scheduler.diagnostics.sharedDataSnapshot != nil {
-            return "Success"
+            return "成功"
         }
-        return "Pending"
+        return "等待中"
     }
 
     private var sharedReadDetail: String {
         if scheduler.diagnostics.sharedDataReadError != nil {
-            return scheduler.diagnostics.sharedDataReadError ?? "Shared data read failed."
+            return scheduler.diagnostics.sharedDataReadError ?? "共享数据读取失败。"
         }
         if scheduler.diagnostics.sharedDataSnapshot != nil {
             return scheduler.diagnostics.sharedDataReadAt.map { "最近读回：\(formattedDate($0))" }
                 ?? "共享快照已成功读回。"
         }
-        return "Waiting for the first App Group read-back after launch."
+        return "启动后还在等待第一次共享快照读回。"
     }
 
     private var sharedWriteStatus: String {
         if scheduler.diagnostics.sharedDataWriteError != nil {
-            return "Failed"
+            return "失败"
         }
         if scheduler.diagnostics.lastSharedWriteAt != nil {
-            return "Success"
+            return "成功"
         }
-        return "Pending"
+        return "等待中"
     }
 
     private var sharedWriteDetail: String {
         if scheduler.diagnostics.sharedDataWriteError != nil {
-            return scheduler.diagnostics.sharedDataWriteError ?? "Shared data write failed."
+            return scheduler.diagnostics.sharedDataWriteError ?? "共享数据写入失败。"
         }
         if scheduler.diagnostics.lastSharedWriteAt != nil {
             return scheduler.diagnostics.lastSharedWriteAt.map { "最近写入：\(formattedDate($0))" }
                 ?? "共享快照已成功写入。"
         }
-        return "Waiting for the first verified snapshot write."
+        return "还在等待第一次已校验的快照写入。"
     }
 
     private var widgetSnapshotStatus: String {
         if scheduler.diagnostics.widgetSnapshotReadError != nil {
-            return "Failed"
+            return "失败"
         }
         if scheduler.diagnostics.widgetSnapshot != nil {
-            return "Readable"
+            return "可读取"
         }
-        return "Pending"
+        return "等待中"
     }
 
     private var widgetSnapshotDetail: String {
         if scheduler.diagnostics.widgetSnapshotReadError != nil {
-            return scheduler.diagnostics.widgetSnapshotReadError ?? "Widget snapshot read failed."
+            return scheduler.diagnostics.widgetSnapshotReadError ?? "Widget 快照读取失败。"
         }
         if let widgetSnapshot = scheduler.diagnostics.widgetSnapshot {
             let readSummary = scheduler.diagnostics.widgetSnapshotReadAt.map { "最近读取：\(formattedDate($0))" }
@@ -739,7 +666,7 @@ struct SettingsView: View {
                 ?? "writtenAt 缺失"
             return "\(readSummary) · repos \(widgetSnapshot.repositories.count) · \(timestampSummary)"
         }
-        return "Waiting for the widget-readable snapshot after launch."
+        return "启动后还在等待 Widget 可读快照。"
     }
 
     private var widgetTrustAssessment: SnapshotTrustAssessment {
@@ -765,29 +692,16 @@ struct SettingsView: View {
     private var launchAtLoginStatusLabel: String {
         switch launchAtLoginController.status {
         case .enabled:
-            return "Enabled"
+            return "已启用"
         case .requiresApproval:
-            return "Approval Required"
+            return "等待批准"
         case .notRegistered:
-            return "Disabled"
+            return "未启用"
         case .notFound:
-            return "App Not Found"
+            return "未找到应用"
         case .unknown:
-            return "Unknown"
+            return "状态未知"
         }
-    }
-
-    private var launchAtLoginOperationLabel: String {
-        if launchAtLoginController.isUpdating {
-            return "Updating"
-        }
-        if launchAtLoginController.lastOperationSucceeded == true {
-            return "Succeeded"
-        }
-        if launchAtLoginController.lastOperationSucceeded == false {
-            return "Failed"
-        }
-        return "Not run"
     }
 
     private var launchAtLoginOperationDetail: String {
@@ -801,16 +715,6 @@ struct SettingsView: View {
             return "最近一次切换已被系统接受，并已刷新当前状态。"
         }
         return "尚未在本次启动中切换过开机启动。"
-    }
-
-    private var launchAtLoginOperationSeverity: DiagnosticsSeverity {
-        if launchAtLoginController.lastOperationSucceeded == false {
-            return .error
-        }
-        if launchAtLoginController.lastOperationSucceeded == true {
-            return .normal
-        }
-        return .warning
     }
 
     private func diagnosticsRow(title: String, value: String, detail: String, isError: Bool) -> some View {
@@ -851,7 +755,7 @@ struct SettingsView: View {
                     .foregroundColor(.secondary)
             }
 
-            DisclosureGroup("Details") {
+            DisclosureGroup("查看明细") {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(section.items) { item in
                         diagnosticsInsightRow(item)
@@ -897,19 +801,6 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.white.opacity(0.3))
         .cornerRadius(6)
-    }
-
-    private func diagnosticsStatusSummaryRow(_ item: DiagnosticsStatusItem) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(item.title)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .frame(width: 110, alignment: .leading)
-            Text(item.value)
-                .font(.caption.weight(.semibold))
-                .foregroundColor(severityColor(item.severity))
-            Spacer(minLength: 0)
-        }
     }
 
     private func diagnosticsSectionTimeHint(_ section: DiagnosticsSectionModel) -> String? {
@@ -986,15 +877,15 @@ struct SettingsView: View {
 
     private var diagnosticsRepositorySummary: String {
         let repositories = scheduler.lastResult.repositories
-        guard !repositories.isEmpty else { return "0 repos" }
+        guard !repositories.isEmpty else { return "0 个仓库" }
 
         let changedCount = repositories.filter {
             $0.status != .clean || $0.changedFileCount > 0 || ($0.aheadCount ?? 0) > 0
         }.count
 
         return changedCount == 0
-            ? "\(repositories.count) repos · all clean"
-            : "\(repositories.count) repos · \(changedCount) active"
+            ? "\(repositories.count) 个仓库 · 全部干净"
+            : "\(repositories.count) 个仓库 · \(changedCount) 个有活动"
     }
 
     private func diagnosticsRepositoryCompactRow(_ repo: RepositorySnapshot) -> some View {
@@ -1199,33 +1090,13 @@ struct SettingsView: View {
     }
 
     private var diagnosticsEventSummary: String {
-        scheduler.diagnosticEvents.isEmpty ? "No events" : "\(scheduler.diagnosticEvents.count) recorded"
-    }
-
-    private var diagnosticsEventHeadline: String {
-        guard let latest = scheduler.diagnosticEvents.last else { return "No recent events" }
-        return latest.message
+        scheduler.diagnosticEvents.isEmpty ? "无事件" : "\(scheduler.diagnosticEvents.count) 条记录"
     }
 
     private var diagnosticsTopSummaryHint: String {
         diagnosticsOverview.summary
             .replacingOccurrences(of: "。", with: "")
             .replacingOccurrences(of: "，", with: " · ")
-    }
-
-    private var diagnosticsEventSeverity: DiagnosticsSeverity {
-        if scheduler.diagnosticEvents.contains(where: {
-            $0.kind == .validationFailed
-                || $0.kind == .sharedDataWriteFailed
-                || $0.kind == .sharedDataReadFailed
-                || $0.kind == .scanFailed
-        }) {
-            return .error
-        }
-        if scheduler.diagnosticEvents.contains(where: { $0.kind == .widgetReloadSkipped }) {
-            return .warning
-        }
-        return .normal
     }
 
     private func diagnosticsEventSummaryRow(_ event: DiagnosticEvent) -> some View {
@@ -1257,35 +1128,35 @@ struct SettingsView: View {
     private var snapshotStoreStateLabel: String {
         switch scheduler.diagnostics.lastSnapshotStoreState {
         case .idle:
-            return scheduler.diagnostics.snapshotExists ? "Idle" : "Not initialized"
+            return scheduler.diagnostics.snapshotExists ? "等待下一次写入" : "尚未初始化"
         case .restored:
-            return "Restored on startup"
+            return "启动时已恢复"
         case .verified:
-            return "Verified write"
+            return "写入并校验成功"
         case .failed:
-            return "Failed"
+            return "失败"
         }
     }
 
     private var snapshotStoreStateDetail: String {
         scheduler.diagnostics.lastSnapshotStoreDetail
-            ?? "No Snapshot Store detail recorded yet."
+            ?? "还没有 Snapshot Store 明细记录。"
     }
 
     private var snapshotStoreTriggerLabel: String {
         guard let trigger = scheduler.diagnostics.lastSnapshotStoreTrigger else {
-            return "Unavailable"
+            return "尚未记录"
         }
 
         switch trigger {
         case "scan":
-            return "Scan refresh"
+            return "扫描刷新"
         case "self-check":
-            return "Self-check"
+            return "自检"
         case "pin toggle":
-            return "Pin toggle"
+            return "置顶状态变更"
         case "startup":
-            return "Startup restore"
+            return "启动恢复"
         default:
             return trigger
         }
@@ -1295,29 +1166,29 @@ struct SettingsView: View {
         var parts: [String] = []
 
         if let startedAt = scheduler.diagnostics.lastRefreshStartedAt {
-            parts.append("Started: \(formattedDate(startedAt))")
+            parts.append("开始于 \(formattedDate(startedAt))")
         }
         if let completedAt = scheduler.diagnostics.lastRefreshCompletedAt {
-            parts.append("Completed: \(formattedDate(completedAt))")
+            parts.append("完成于 \(formattedDate(completedAt))")
         }
 
-        return parts.isEmpty ? "No refresh timing recorded yet." : parts.joined(separator: " · ")
+        return parts.isEmpty ? "还没有刷新时间记录。" : parts.joined(separator: " · ")
     }
 
     private var widgetReloadStateLabel: String {
         switch scheduler.diagnostics.lastWidgetReloadState {
         case .idle:
-            return "Unavailable"
+            return "尚未记录"
         case .requested:
-            return "Requested"
+            return "已请求"
         case .skipped:
-            return "Skipped"
+            return "本次跳过"
         }
     }
 
     private var widgetReloadStateDetail: String {
         scheduler.diagnostics.lastWidgetReloadDetail
-            ?? "No Widget reload decision recorded yet."
+            ?? "还没有 Widget reload 决策记录。"
     }
 
     private var snapshotFactsSummary: String {
@@ -1393,10 +1264,10 @@ struct SettingsView: View {
     }
 
     private var snapshotChainSeverity: DiagnosticsSeverity {
-        if !scheduler.appGroupAvailable || sharedWriteStatus == "Failed" || sharedReadStatus == "Failed" {
+        if !scheduler.appGroupAvailable || sharedWriteStatus == "失败" || sharedReadStatus == "失败" {
             return .error
         }
-        if sharedWriteStatus == "Pending" || sharedReadStatus == "Pending" {
+        if sharedWriteStatus == "等待中" || sharedReadStatus == "等待中" {
             return .warning
         }
         return .normal
@@ -1447,12 +1318,12 @@ struct SettingsView: View {
     }
 
     private func snapshotTimeLabel(_ date: Date?) -> String {
-        guard let date else { return "unknown" }
+        guard let date else { return "未知" }
         return formattedDate(date)
     }
 
     private func snapshotTimeLabel(_ iso: String?) -> String {
-        guard let iso, let date = DateFormatting.date(from: iso) else { return "unknown" }
+        guard let iso, let date = DateFormatting.date(from: iso) else { return "未知" }
         return formattedDate(date)
     }
 
