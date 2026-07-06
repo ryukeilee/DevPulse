@@ -906,6 +906,7 @@ struct DiagnosticEvent: Identifiable, Equatable {
         case sharedDataWriteFailed
         case sharedDataReadFailed
         case widgetReloadRequested
+        case widgetReloadSkipped
         case validationPassed
         case validationFailed
     }
@@ -917,6 +918,8 @@ struct DiagnosticEvent: Identifiable, Equatable {
 }
 
 struct DiagnosticsSnapshot {
+    var lastRefreshStartedAt: Date?
+    var lastRefreshCompletedAt: Date?
     var appBundleIdentifier: String = Bundle.main.bundleIdentifier ?? "unknown"
     var widgetBundleIdentifier: String = "local.devpulse.app.widget"
     var appGroupIdentifier: String = SharedSnapshotLocation.appGroupIdentifier
@@ -932,6 +935,11 @@ struct DiagnosticsSnapshot {
     var lastWrittenAt: String?
     var lastSharedWriteAt: Date?
     var lastReloadRequestedAt: Date?
+    var lastSnapshotStoreTrigger: String?
+    var lastSnapshotStoreState: SnapshotStoreState = .idle
+    var lastSnapshotStoreDetail: String?
+    var lastWidgetReloadState: WidgetReloadState = .idle
+    var lastWidgetReloadDetail: String?
     var sharedDataReadAt: Date?
     var widgetSnapshotReadAt: Date?
     var sharedDataReadError: String?
@@ -955,6 +963,19 @@ struct DiagnosticsSnapshot {
     var widgetSnapshotReadSucceeded: Bool {
         widgetSnapshotReadError == nil && widgetSnapshot != nil
     }
+}
+
+enum SnapshotStoreState: Equatable {
+    case idle
+    case restored
+    case verified
+    case failed
+}
+
+enum WidgetReloadState: Equatable {
+    case idle
+    case requested
+    case skipped
 }
 
 enum DiagnosticsSeverity: Equatable {
@@ -1302,6 +1323,10 @@ enum DiagnosticsOverviewBuilder {
             diagnostics: diagnostics,
             repositories: repositories
         )
+        let snapshotStoreSection = snapshotStoreSection(
+            diagnostics: diagnostics,
+            repositories: repositories
+        )
         let widgetSection = widgetSection(diagnostics: diagnostics, widgetTrust: widgetTrust)
         let scanSection = scanSection(
             diagnostics: diagnostics,
@@ -1309,7 +1334,7 @@ enum DiagnosticsOverviewBuilder {
             repositories: repositories
         )
 
-        let sections = [sharedDataSection, widgetSection, scanSection]
+        let sections = [sharedDataSection, snapshotStoreSection, widgetSection, scanSection]
         let headline: (title: String, summary: String, severity: DiagnosticsSeverity)
 
         if let topError = sections.first(where: { $0.severity == .error }) {
@@ -1452,6 +1477,75 @@ enum DiagnosticsOverviewBuilder {
         )
     }
 
+    private static func snapshotStoreSection(
+        diagnostics: DiagnosticsSnapshot,
+        repositories: [RepositorySnapshot]
+    ) -> DiagnosticsSectionModel {
+        let isInitialSnapshotMissing = isInitialSnapshotMissing(
+            diagnostics: diagnostics,
+            repositories: repositories
+        )
+        let storeSeverity = severity(
+            for: diagnostics.lastSnapshotStoreState,
+            snapshotExists: diagnostics.snapshotExists,
+            isInitialSnapshotMissing: isInitialSnapshotMissing
+        )
+        let triggerSeverity: DiagnosticsSeverity = diagnostics.lastSnapshotStoreTrigger == nil
+            ? (isInitialSnapshotMissing ? .warning : .normal)
+            : .normal
+        let reloadSeverity = severity(for: diagnostics.lastWidgetReloadState)
+
+        let items = [
+            DiagnosticsStatusItem(
+                id: "snapshot-store-state",
+                title: "Snapshot Store",
+                value: label(for: diagnostics.lastSnapshotStoreState, snapshotExists: diagnostics.snapshotExists),
+                detail: diagnostics.lastSnapshotStoreDetail
+                    ?? defaultSnapshotStoreDetail(
+                        state: diagnostics.lastSnapshotStoreState,
+                        snapshotExists: diagnostics.snapshotExists,
+                        isInitialSnapshotMissing: isInitialSnapshotMissing
+                    ),
+                nextStep: diagnostics.lastSnapshotStoreState == .failed ? "先执行 Refresh Data，再检查 shared write 和 validation。" : nil,
+                severity: storeSeverity
+            ),
+            DiagnosticsStatusItem(
+                id: "snapshot-store-trigger",
+                title: "最近触发来源",
+                value: diagnostics.lastSnapshotStoreTrigger.map(label(forTrigger:)) ?? "尚未记录",
+                detail: triggerDetail(diagnostics: diagnostics),
+                nextStep: diagnostics.lastSnapshotStoreTrigger == nil && !isInitialSnapshotMissing
+                    ? "执行一次 Refresh Data 或 Rescan，建立第一条可追踪的快照写入记录。"
+                    : nil,
+                severity: triggerSeverity
+            ),
+            DiagnosticsStatusItem(
+                id: "widget-reload-state",
+                title: "Widget reload",
+                value: label(for: diagnostics.lastWidgetReloadState),
+                detail: diagnostics.lastWidgetReloadDetail
+                    ?? defaultWidgetReloadDetail(state: diagnostics.lastWidgetReloadState),
+                nextStep: diagnostics.lastWidgetReloadState == .skipped
+                    ? "如果你预期桌面立刻变化，可手动执行 Refresh Data 再观察 reload requested 时间。"
+                    : nil,
+                severity: reloadSeverity
+            )
+        ]
+
+        let severity = maxSeverity(items.map(\.severity))
+        let summary = items.first(where: { $0.severity == .error })?.detail
+            ?? items.first(where: { $0.severity == .warning })?.detail
+            ?? "Snapshot Store 最近一次写入、校验和 Widget reload 决策都已记录。"
+
+        return DiagnosticsSectionModel(
+            id: "snapshot-store",
+            title: "Snapshot Store",
+            summary: summary,
+            severity: severity,
+            items: items
+        )
+    }
+
     private static func scanSection(
         diagnostics: DiagnosticsSnapshot,
         refreshTrust: SnapshotTrustAssessment,
@@ -1558,6 +1652,115 @@ enum DiagnosticsOverviewBuilder {
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         return formatter.string(from: date)
+    }
+
+    private static func severity(
+        for state: SnapshotStoreState,
+        snapshotExists: Bool,
+        isInitialSnapshotMissing: Bool
+    ) -> DiagnosticsSeverity {
+        switch state {
+        case .failed:
+            return .error
+        case .idle:
+            return (!snapshotExists && isInitialSnapshotMissing) ? .warning : .normal
+        case .restored, .verified:
+            return .normal
+        }
+    }
+
+    private static func severity(for state: WidgetReloadState) -> DiagnosticsSeverity {
+        switch state {
+        case .idle, .requested, .skipped:
+            return .normal
+        }
+    }
+
+    private static func label(for state: SnapshotStoreState, snapshotExists: Bool) -> String {
+        switch state {
+        case .idle:
+            return snapshotExists ? "等待下一次写入" : "尚未建立"
+        case .restored:
+            return "启动时已恢复"
+        case .verified:
+            return "写入并校验成功"
+        case .failed:
+            return "写入或校验失败"
+        }
+    }
+
+    private static func label(for state: WidgetReloadState) -> String {
+        switch state {
+        case .idle:
+            return "尚未记录"
+        case .requested:
+            return "已请求"
+        case .skipped:
+            return "本次跳过"
+        }
+    }
+
+    private static func label(forTrigger trigger: String) -> String {
+        switch trigger {
+        case "scan":
+            return "扫描刷新"
+        case "self-check":
+            return "自检刷新"
+        case "pin toggle":
+            return "置顶状态变更"
+        case "startup":
+            return "启动恢复"
+        default:
+            return trigger
+        }
+    }
+
+    private static func triggerDetail(diagnostics: DiagnosticsSnapshot) -> String {
+        var parts: [String] = []
+
+        if let startedAt = diagnostics.lastRefreshStartedAt {
+            parts.append("开始于 \(formattedDate(startedAt))")
+        }
+        if let completedAt = diagnostics.lastRefreshCompletedAt {
+            parts.append("完成于 \(formattedDate(completedAt))")
+        }
+
+        if parts.isEmpty {
+            return "还没有记录过刷新开始/结束时间。"
+        }
+
+        return parts.joined(separator: " · ")
+    }
+
+    private static func defaultSnapshotStoreDetail(
+        state: SnapshotStoreState,
+        snapshotExists: Bool,
+        isInitialSnapshotMissing: Bool
+    ) -> String {
+        switch state {
+        case .idle:
+            if !snapshotExists && isInitialSnapshotMissing {
+                return "共享快照还没生成；这是首次启动或清空快照后的正常待初始化状态。"
+            }
+            return "当前还没有新的 Snapshot Store 写入记录。"
+        case .restored:
+            return "启动时已从共享容器恢复最近一次可读快照。"
+        case .verified:
+            return "最近一次共享快照写入成功，并且主 App 已读回同一份数据。"
+        case .failed:
+            return "最近一次共享快照写入或读回校验失败。"
+        }
+    }
+
+    private static func defaultWidgetReloadDetail(state: WidgetReloadState) -> String {
+        switch state {
+        case .idle:
+            return "还没有记录过 Widget reload 决策。"
+        case .requested:
+            return "最近一次共享快照同步后，主 App 已请求 Widget 更新时间线。"
+        case .skipped:
+            return "最近一次共享快照同步没有请求 Widget reload。"
+        }
     }
 }
 

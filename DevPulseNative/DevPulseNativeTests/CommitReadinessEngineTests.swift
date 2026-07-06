@@ -389,6 +389,37 @@ struct CommitReadinessEngineTests {
         #expect(trust.primaryAction.title == "Rescan Now")
     }
 
+    @Test func diagnosticsOverviewIncludesSnapshotStoreObservabilitySection() throws {
+        var diagnostics = DiagnosticsSnapshot()
+        diagnostics.appGroupAvailable = true
+        diagnostics.snapshotExists = true
+        diagnostics.snapshotReadable = true
+        diagnostics.snapshotWritable = true
+        diagnostics.snapshotDecodable = true
+        diagnostics.sharedDataSnapshot = AppGroupData.empty()
+        diagnostics.widgetSnapshot = AppGroupData.empty()
+        diagnostics.lastSnapshotStoreTrigger = "scan"
+        diagnostics.lastSnapshotStoreState = .verified
+        diagnostics.lastSnapshotStoreDetail = "已写入并读回校验成功：1 个仓库，reason=scan。"
+        diagnostics.lastWidgetReloadState = .skipped
+        diagnostics.lastWidgetReloadDetail = "共享快照无实质变化，且距上次 reload 未超过 15 分钟，本次跳过 Widget reload。"
+        diagnostics.lastRefreshStartedAt = Date(timeIntervalSince1970: 1_718_000_000)
+        diagnostics.lastRefreshCompletedAt = Date(timeIntervalSince1970: 1_718_000_010)
+
+        let overview = DiagnosticsOverviewBuilder.build(
+            diagnostics: diagnostics,
+            refreshTrust: freshTrust(),
+            widgetTrust: freshTrust(),
+            repositories: [snapshot(modified: 1)]
+        )
+
+        let section = try #require(overview.sections.first(where: { $0.id == "snapshot-store" }))
+        #expect(section.severity == .normal)
+        #expect(section.items.contains(where: { $0.title == "Snapshot Store" && $0.value == "写入并校验成功" }) == true)
+        #expect(section.items.contains(where: { $0.title == "最近触发来源" && $0.value == "扫描刷新" }) == true)
+        #expect(section.items.contains(where: { $0.title == "Widget reload" && $0.value == "本次跳过" }) == true)
+    }
+
     @Test func missingSharedSnapshotUsesContainerWritableState() {
         #expect(AppGroupStore.resolveSnapshotWritable(
             snapshotExists: false,
@@ -403,6 +434,67 @@ struct CommitReadinessEngineTests {
             fileWritable: false,
             containerWritable: true
         ) == false)
+    }
+
+    @Test func widgetReloadDecisionRequestsReloadForManualRefreshPaths() {
+        let decision = ScanSchedulerPolicy.widgetReloadDecision(
+            previousSnapshot: AppGroupData.empty(),
+            nextSnapshot: AppGroupData.empty(),
+            lastReloadRequestedAt: Date(timeIntervalSince1970: 1_718_000_000),
+            reason: "pin toggle",
+            now: Date(timeIntervalSince1970: 1_718_000_100)
+        )
+
+        #expect(decision.shouldRequest)
+        #expect(decision.detail.contains("pin toggle"))
+    }
+
+    @Test func widgetReloadDecisionSkipsUnchangedScanWithinThrottleWindow() {
+        let now = Date(timeIntervalSince1970: 1_718_000_000)
+        let baseline = snapshot(modified: 1)
+        let previousSnapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-06-18T10:00:00Z",
+            writtenAt: "2026-06-18T10:00:05Z",
+            scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 1, totalChangedFiles: 1, errorRepositories: 0),
+            repositories: [baseline]
+        )
+        let nextSnapshot = previousSnapshot
+
+        let decision = ScanSchedulerPolicy.widgetReloadDecision(
+            previousSnapshot: previousSnapshot,
+            nextSnapshot: nextSnapshot,
+            lastReloadRequestedAt: now.addingTimeInterval(-60),
+            reason: "scan",
+            now: now
+        )
+
+        #expect(decision.shouldRequest == false)
+        #expect(decision.detail.contains("本次跳过"))
+    }
+
+    @Test func widgetReloadDecisionRequestsUnchangedScanAfterThrottleExpires() {
+        let now = Date(timeIntervalSince1970: 1_718_000_000)
+        let baseline = snapshot(modified: 1)
+        let previousSnapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-06-18T10:00:00Z",
+            writtenAt: "2026-06-18T10:00:05Z",
+            scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 1, totalChangedFiles: 1, errorRepositories: 0),
+            repositories: [baseline]
+        )
+        let nextSnapshot = previousSnapshot
+
+        let decision = ScanSchedulerPolicy.widgetReloadDecision(
+            previousSnapshot: previousSnapshot,
+            nextSnapshot: nextSnapshot,
+            lastReloadRequestedAt: now.addingTimeInterval(-(ScanSchedulerPolicy.widgetReloadThrottleInterval + 1)),
+            reason: "scan",
+            now: now
+        )
+
+        #expect(decision.shouldRequest)
+        #expect(decision.detail.contains("已重新请求"))
     }
 
     @Test func widgetDataTrustBuilderUsesRefreshWhenResultsExistButSnapshotMissing() {

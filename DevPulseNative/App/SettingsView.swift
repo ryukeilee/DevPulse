@@ -552,6 +552,36 @@ struct SettingsView: View {
                 detail: scheduler.diagnostics.lastReloadRequestedAt.map { formattedDate($0) } ?? "Widget reload has not been requested yet.",
                 isError: scheduler.diagnostics.lastReloadRequestedAt == nil
             )
+            diagnosticsRow(
+                title: "Refresh started",
+                value: scheduler.diagnostics.lastRefreshStartedAt.map { snapshotTimeLabel($0) } ?? "Unavailable",
+                detail: scheduler.diagnostics.lastRefreshStartedAt.map { formattedDate($0) } ?? "No refresh start has been recorded yet.",
+                isError: scheduler.diagnostics.lastRefreshStartedAt == nil
+            )
+            diagnosticsRow(
+                title: "Refresh completed",
+                value: scheduler.diagnostics.lastRefreshCompletedAt.map { snapshotTimeLabel($0) } ?? "Unavailable",
+                detail: scheduler.diagnostics.lastRefreshCompletedAt.map { formattedDate($0) } ?? "No refresh completion has been recorded yet.",
+                isError: scheduler.diagnostics.lastRefreshCompletedAt == nil
+            )
+            diagnosticsRow(
+                title: "Snapshot Store",
+                value: snapshotStoreStateLabel,
+                detail: snapshotStoreStateDetail,
+                isError: scheduler.diagnostics.lastSnapshotStoreState == .failed
+            )
+            diagnosticsRow(
+                title: "Store trigger",
+                value: snapshotStoreTriggerLabel,
+                detail: snapshotStoreTriggerDetail,
+                isError: false
+            )
+            diagnosticsRow(
+                title: "Reload decision",
+                value: widgetReloadStateLabel,
+                detail: widgetReloadStateDetail,
+                isError: false
+            )
         }
     }
 
@@ -895,6 +925,17 @@ struct SettingsView: View {
             }
 
             return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        case "snapshot-store":
+            var parts: [String] = []
+
+            if let startedAt = scheduler.diagnostics.lastRefreshStartedAt {
+                parts.append("开始 \(snapshotTimeLabel(startedAt))")
+            }
+            if let completedAt = scheduler.diagnostics.lastRefreshCompletedAt {
+                parts.append("结束 \(snapshotTimeLabel(completedAt))")
+            }
+
+            return parts.isEmpty ? nil : parts.joined(separator: " · ")
         case "widget-state":
             var parts: [String] = []
 
@@ -1141,7 +1182,7 @@ struct SettingsView: View {
         HStack(alignment: .top, spacing: 8) {
             Text(event.kind.rawValue)
                 .font(.caption2.weight(.semibold))
-                .foregroundColor(event.kind == .validationFailed || event.kind == .sharedDataWriteFailed || event.kind == .sharedDataReadFailed ? .red : .secondary)
+                .foregroundColor(diagnosticsEventColor(event))
                 .frame(width: 120, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
                 Text(event.message)
@@ -1181,6 +1222,9 @@ struct SettingsView: View {
         }) {
             return .error
         }
+        if scheduler.diagnosticEvents.contains(where: { $0.kind == .widgetReloadSkipped }) {
+            return .warning
+        }
         return .normal
     }
 
@@ -1203,9 +1247,77 @@ struct SettingsView: View {
         switch event.kind {
         case .validationFailed, .sharedDataWriteFailed, .sharedDataReadFailed, .scanFailed:
             return .red
+        case .widgetReloadSkipped:
+            return .orange
         default:
             return .secondary
         }
+    }
+
+    private var snapshotStoreStateLabel: String {
+        switch scheduler.diagnostics.lastSnapshotStoreState {
+        case .idle:
+            return scheduler.diagnostics.snapshotExists ? "Idle" : "Not initialized"
+        case .restored:
+            return "Restored on startup"
+        case .verified:
+            return "Verified write"
+        case .failed:
+            return "Failed"
+        }
+    }
+
+    private var snapshotStoreStateDetail: String {
+        scheduler.diagnostics.lastSnapshotStoreDetail
+            ?? "No Snapshot Store detail recorded yet."
+    }
+
+    private var snapshotStoreTriggerLabel: String {
+        guard let trigger = scheduler.diagnostics.lastSnapshotStoreTrigger else {
+            return "Unavailable"
+        }
+
+        switch trigger {
+        case "scan":
+            return "Scan refresh"
+        case "self-check":
+            return "Self-check"
+        case "pin toggle":
+            return "Pin toggle"
+        case "startup":
+            return "Startup restore"
+        default:
+            return trigger
+        }
+    }
+
+    private var snapshotStoreTriggerDetail: String {
+        var parts: [String] = []
+
+        if let startedAt = scheduler.diagnostics.lastRefreshStartedAt {
+            parts.append("Started: \(formattedDate(startedAt))")
+        }
+        if let completedAt = scheduler.diagnostics.lastRefreshCompletedAt {
+            parts.append("Completed: \(formattedDate(completedAt))")
+        }
+
+        return parts.isEmpty ? "No refresh timing recorded yet." : parts.joined(separator: " · ")
+    }
+
+    private var widgetReloadStateLabel: String {
+        switch scheduler.diagnostics.lastWidgetReloadState {
+        case .idle:
+            return "Unavailable"
+        case .requested:
+            return "Requested"
+        case .skipped:
+            return "Skipped"
+        }
+    }
+
+    private var widgetReloadStateDetail: String {
+        scheduler.diagnostics.lastWidgetReloadDetail
+            ?? "No Widget reload decision recorded yet."
     }
 
     private var snapshotFactsSummary: String {

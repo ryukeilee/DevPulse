@@ -18,6 +18,11 @@ enum ScanSchedulerPolicy {
     static let repositoryRediscoveryInterval: TimeInterval = 60 * 60
     static let widgetReloadThrottleInterval: TimeInterval = 15 * 60
 
+    struct WidgetReloadDecision: Equatable {
+        let shouldRequest: Bool
+        let detail: String
+    }
+
     static func shouldRediscoverRepositories(
         forceRepositoryDiscovery: Bool,
         knownRepositoryPaths: [String],
@@ -55,19 +60,54 @@ enum ScanSchedulerPolicy {
         reason: String,
         now: Date = Date()
     ) -> Bool {
+        widgetReloadDecision(
+            previousSnapshot: previousSnapshot,
+            nextSnapshot: nextSnapshot,
+            lastReloadRequestedAt: lastReloadRequestedAt,
+            reason: reason,
+            now: now
+        ).shouldRequest
+    }
+
+    static func widgetReloadDecision(
+        previousSnapshot: AppGroupData,
+        nextSnapshot: AppGroupData,
+        lastReloadRequestedAt: Date?,
+        reason: String,
+        now: Date = Date()
+    ) -> WidgetReloadDecision {
         guard reason == "scan" else {
-            return true
+            return WidgetReloadDecision(
+                shouldRequest: true,
+                detail: "此次同步由 \(reason) 触发，不走扫描节流，已直接请求 Widget reload。"
+            )
         }
 
         if hasMeaningfulSnapshotChanges(previousSnapshot: previousSnapshot, nextSnapshot: nextSnapshot) {
-            return true
+            return WidgetReloadDecision(
+                shouldRequest: true,
+                detail: "共享快照内容发生变化，已请求 Widget reload。"
+            )
         }
 
         guard let lastReloadRequestedAt else {
-            return true
+            return WidgetReloadDecision(
+                shouldRequest: true,
+                detail: "还没有记录过 Widget reload，已补发第一次请求。"
+            )
         }
 
-        return now.timeIntervalSince(lastReloadRequestedAt) >= widgetReloadThrottleInterval
+        if now.timeIntervalSince(lastReloadRequestedAt) >= widgetReloadThrottleInterval {
+            return WidgetReloadDecision(
+                shouldRequest: true,
+                detail: "共享快照无实质变化，但距上次 reload 已超过 15 分钟，已重新请求 Widget reload。"
+            )
+        }
+
+        return WidgetReloadDecision(
+            shouldRequest: false,
+            detail: "共享快照无实质变化，且距上次 reload 未超过 15 分钟，本次跳过 Widget reload。"
+        )
     }
 
     static func hasMeaningfulSnapshotChanges(
@@ -112,6 +152,8 @@ enum ScanSchedulerPolicy {
 struct ScanSelfCheckReport {
     let success: Bool
     let refreshPhase: RefreshPhase
+    let snapshotStoreState: SnapshotStoreState
+    let widgetReloadState: WidgetReloadState
     let generatedAt: String?
     let writtenAt: String?
     let reloadRequestedAt: Date?
@@ -125,6 +167,8 @@ struct ScanSelfCheckReport {
         var lines = [
             "self_check.result=\(success ? "pass" : "fail")",
             "self_check.refresh_phase=\(label(for: refreshPhase))",
+            "self_check.snapshot_store=\(label(for: snapshotStoreState))",
+            "self_check.widget_reload=\(label(for: widgetReloadState))",
             "self_check.repository_count=\(repositoryCount)",
             "self_check.validation=\(validationIssues.isEmpty ? "pass" : "mismatch")"
         ]
@@ -164,6 +208,30 @@ struct ScanSelfCheckReport {
             return "success"
         case .failure:
             return "failure"
+        }
+    }
+
+    private func label(for snapshotStoreState: SnapshotStoreState) -> String {
+        switch snapshotStoreState {
+        case .idle:
+            return "idle"
+        case .restored:
+            return "restored"
+        case .verified:
+            return "verified"
+        case .failed:
+            return "failed"
+        }
+    }
+
+    private func label(for widgetReloadState: WidgetReloadState) -> String {
+        switch widgetReloadState {
+        case .idle:
+            return "idle"
+        case .requested:
+            return "requested"
+        case .skipped:
+            return "skipped"
         }
     }
 }
@@ -294,6 +362,8 @@ final class ScanScheduler: ObservableObject {
         }
 
         isScanning = true
+        diagnostics.lastRefreshStartedAt = Date()
+        diagnostics.lastRefreshCompletedAt = nil
         refreshPhase = .refreshing
         refreshFailureMessage = nil
         warnings = []
@@ -411,6 +481,8 @@ final class ScanScheduler: ObservableObject {
         diagnostics.sharedDataReadError = nil
         diagnostics.widgetSnapshotReadError = nil
         diagnostics.snapshotDecodable = false
+        diagnostics.lastRefreshStartedAt = Date()
+        diagnostics.lastRefreshCompletedAt = nil
         isScanning = true
         refreshPhase = .refreshing
         refreshFailureMessage = nil
@@ -607,6 +679,9 @@ final class ScanScheduler: ObservableObject {
         case .success(let snapshot):
             let pinned = applyPins(snapshot)
             lastResult = pinned
+            diagnostics.lastSnapshotStoreTrigger = "startup"
+            diagnostics.lastSnapshotStoreState = .restored
+            diagnostics.lastSnapshotStoreDetail = "启动时已恢复 \(snapshot.repositories.count) 个仓库的共享快照。"
             diagnostics.sharedDataSnapshot = snapshot
             diagnostics.snapshotDecodable = true
             let now = Date()
@@ -656,17 +731,23 @@ final class ScanScheduler: ObservableObject {
         let snapshotToWrite = snapshot.withWrittenAt(writtenAt)
         let previousSnapshot = previousSnapshot ?? lastResult
         var verifiedSnapshot: AppGroupData?
+        diagnostics.lastSnapshotStoreTrigger = reason
+        diagnostics.lastSnapshotStoreState = .idle
+        diagnostics.lastSnapshotStoreDetail = "正在把 \(snapshotToWrite.repositories.count) 个仓库写入共享快照。"
 
         switch AppGroupStore.write(snapshotToWrite) {
         case .success(let readBack):
             let now = Date()
             syncStoreInspection()
             appGroupAvailable = AppGroupStore.isAvailable
+            diagnostics.lastRefreshCompletedAt = now
             diagnostics.lastSharedWriteAt = now
             diagnostics.lastGeneratedAt = readBack.generatedAt
             diagnostics.lastWrittenAt = readBack.writtenAt
             diagnostics.sharedDataWriteError = nil
             diagnostics.snapshotDecodable = true
+            diagnostics.lastSnapshotStoreState = .verified
+            diagnostics.lastSnapshotStoreDetail = "已写入并读回校验成功：\(readBack.repositories.count) 个仓库，reason=\(reason)。"
             verifiedSnapshot = readBack
             recordEvent(
                 .sharedDataWritten,
@@ -674,17 +755,27 @@ final class ScanScheduler: ObservableObject {
             )
         case .failure(let error):
             syncStoreInspection()
+            diagnostics.lastRefreshCompletedAt = Date()
             diagnostics.sharedDataWriteError = error.localizedDescription
             diagnostics.snapshotDecodable = false
             diagnostics.validationIssues = [error.localizedDescription]
+            diagnostics.lastSnapshotStoreState = .failed
+            diagnostics.lastSnapshotStoreDetail = error.localizedDescription
+            diagnostics.lastWidgetReloadState = .idle
+            diagnostics.lastWidgetReloadDetail = "共享快照写入失败，本次没有进入 Widget reload 判断。"
             markSharedSnapshotSyncFailure(error.localizedDescription)
             recordEvent(.sharedDataWriteFailed, "Shared snapshot write failed: \(error.localizedDescription)")
             return
         }
 
         guard let verifiedSnapshot else {
+            diagnostics.lastRefreshCompletedAt = Date()
             diagnostics.sharedDataWriteError = "Shared snapshot verification failed without a decoded payload."
             diagnostics.validationIssues = [diagnostics.sharedDataWriteError ?? "Verification failed."]
+            diagnostics.lastSnapshotStoreState = .failed
+            diagnostics.lastSnapshotStoreDetail = diagnostics.sharedDataWriteError
+            diagnostics.lastWidgetReloadState = .idle
+            diagnostics.lastWidgetReloadDetail = "共享快照校验失败，本次没有进入 Widget reload 判断。"
             markSharedSnapshotSyncFailure(diagnostics.sharedDataWriteError ?? "Verification failed.")
             recordEvent(.sharedDataWriteFailed, "Shared snapshot verification failed unexpectedly.")
             return
@@ -696,15 +787,20 @@ final class ScanScheduler: ObservableObject {
         setWidgetReadableSnapshot(verifiedSnapshot, readAt: diagnostics.sharedDataReadAt ?? Date())
         validateConsistency(expected: snapshotToWrite, shared: verifiedSnapshot, widget: diagnostics.widgetSnapshot, reason: reason)
         lastResult = applyPins(verifiedSnapshot)
-        if ScanSchedulerPolicy.shouldRequestWidgetReload(
+        let reloadDecision = ScanSchedulerPolicy.widgetReloadDecision(
             previousSnapshot: previousSnapshot,
             nextSnapshot: lastResult,
             lastReloadRequestedAt: diagnostics.lastReloadRequestedAt,
             reason: reason
-        ) {
+        )
+        diagnostics.lastWidgetReloadState = reloadDecision.shouldRequest ? .requested : .skipped
+        diagnostics.lastWidgetReloadDetail = reloadDecision.detail
+        if reloadDecision.shouldRequest {
             diagnostics.lastReloadRequestedAt = Date()
-            recordEvent(.widgetReloadRequested, "Widget reload requested (\(reason))")
+            recordEvent(.widgetReloadRequested, "Widget reload requested (\(reason)): \(reloadDecision.detail)")
             AppGroupStore.reloadWidgets()
+        } else {
+            recordEvent(.widgetReloadSkipped, "Widget reload skipped (\(reason)): \(reloadDecision.detail)")
         }
     }
 
@@ -845,6 +941,7 @@ final class ScanScheduler: ObservableObject {
         isScanning = false
         refreshPhase = .failure
         refreshFailureMessage = message
+        diagnostics.lastRefreshCompletedAt = Date()
         warnings = [message]
         diagnostics.validationIssues = [message]
         diagnostics.nextSteps = suggestedNextSteps(from: [message])
@@ -1208,6 +1305,8 @@ final class ScanScheduler: ObservableObject {
                 && diagnostics.sharedDataReadError == nil
                 && diagnostics.widgetSnapshotReadError == nil,
             refreshPhase: refreshPhase,
+            snapshotStoreState: diagnostics.lastSnapshotStoreState,
+            widgetReloadState: diagnostics.lastWidgetReloadState,
             generatedAt: diagnostics.lastGeneratedAt,
             writtenAt: diagnostics.lastWrittenAt,
             reloadRequestedAt: diagnostics.lastReloadRequestedAt,
