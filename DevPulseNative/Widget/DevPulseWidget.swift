@@ -192,56 +192,23 @@ struct WidgetEntry: TimelineEntry {
 
 struct DevPulseWidgetEntryView: View {
     @Environment(\.widgetFamily) private var widgetFamily
-    @Environment(\.widgetRenderingMode) private var renderingMode
-    @Environment(\.showsWidgetContainerBackground) private var showsContainerBackground
     let entry: WidgetEntry
 
     var body: some View {
         Group {
-            if useSystemFallback {
-                fallbackContent
-            } else {
-                themedContent
+            switch widgetFamily {
+            case .systemSmall:
+                SmallGlanceWidgetView(entry: entry)
+            case .systemMedium:
+                MediumGlanceWidgetView(entry: entry)
+            case .systemLarge:
+                LargeGlanceWidgetView(entry: entry)
+            default:
+                SmallGlanceWidgetView(entry: entry)
             }
         }
         .containerBackground(for: .widget) {
-            if useSystemFallback {
-                Color.clear
-            } else {
-                WidgetPanelBackground()
-            }
-        }
-    }
-
-    private var useSystemFallback: Bool {
-        renderingMode != .fullColor || !showsContainerBackground
-    }
-
-    @ViewBuilder
-    private var themedContent: some View {
-        switch widgetFamily {
-        case .systemSmall:
-            SmallGlanceWidgetView(entry: entry)
-        case .systemMedium:
-            MediumGlanceWidgetView(entry: entry)
-        case .systemLarge:
-            LargeGlanceWidgetView(entry: entry)
-        default:
-            SmallGlanceWidgetView(entry: entry)
-        }
-    }
-
-    @ViewBuilder
-    private var fallbackContent: some View {
-        switch widgetFamily {
-        case .systemSmall:
-            SimpleSmallGlanceWidgetView(entry: entry)
-        case .systemMedium:
-            SimpleMediumGlanceWidgetView(entry: entry)
-        case .systemLarge:
-            SimpleLargeGlanceWidgetView(entry: entry)
-        default:
-            SimpleSmallGlanceWidgetView(entry: entry)
+            WidgetPanelBackground()
         }
     }
 }
