@@ -59,33 +59,16 @@ struct SettingsView: View {
     // MARK: - Default scan locations
 
     private var defaultScanLocationsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("Default Scan Locations", systemImage: "house")
+        VStack(alignment: .leading, spacing: 12) {
+            Label("默认扫描目录", systemImage: "house")
                 .font(.headline)
 
-            Text("Toggle built-in directories to include or exclude from scanning.")
+            Text("按分组启用常见目录；不存在的目录会自动跳过，避免干扰主要设置。")
                 .font(.caption)
                 .foregroundColor(.secondary)
 
-            ForEach($builtInToggles) { $toggle in
-                Toggle(isOn: $toggle.isEnabled) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "folder")
-                            .font(.caption)
-                        Text(toggle.path)
-                            .font(.caption)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        if !directoryExists(toggle.path) {
-                            Text("(not found)")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-                .onChange(of: toggle.isEnabled) { _, newValue in
-                    scheduler.toggleBuiltIn(path: toggle.path, enabled: newValue)
-                }
+            ForEach(defaultScanGroups) { group in
+                defaultScanGroupSection(group)
             }
         }
     }
@@ -94,11 +77,11 @@ struct SettingsView: View {
 
     private var customScanDirectoriesSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Custom Scan Directories", systemImage: "folder.badge.plus")
+            Label("自定义扫描目录", systemImage: "folder.badge.plus")
                 .font(.headline)
 
             if scheduler.scanDirectories.isEmpty {
-                Text("No custom directories added.")
+                Text("还没有添加自定义目录。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else {
@@ -111,9 +94,13 @@ struct SettingsView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                         if !directoryExists(directory.path) {
-                            Image(systemName: "exclamationmark.triangle")
+                            Text("当前不存在")
                                 .font(.caption2)
-                                .foregroundColor(.yellow)
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.secondary.opacity(0.08))
+                                .cornerRadius(6)
                         }
                         Spacer()
                         Button(role: .destructive) {
@@ -128,10 +115,10 @@ struct SettingsView: View {
             }
 
             HStack {
-                TextField("/path/to/projects", text: $newCustomPath)
+                TextField("输入仓库根目录路径", text: $newCustomPath)
                     .textFieldStyle(.roundedBorder)
                     .font(.caption)
-                Button("Add") {
+                Button("添加") {
                     let trimmed = newCustomPath.trimmingCharacters(in: .whitespaces)
                     guard !trimmed.isEmpty else { return }
                     scheduler.addCustomPath(trimmed)
@@ -141,7 +128,7 @@ struct SettingsView: View {
                 .controlSize(.small)
                 .disabled(newCustomPath.trimmingCharacters(in: .whitespaces).isEmpty)
 
-                Button("Choose…") {
+                Button("选择…") {
                     chooseDirectory()
                 }
                 .buttonStyle(.bordered)
@@ -154,7 +141,7 @@ struct SettingsView: View {
 
     private var launchAtLoginSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Launch At Login", systemImage: "power.circle")
+            Label("登录后启动", systemImage: "power.circle")
                 .font(.headline)
 
             Toggle(isOn: Binding(
@@ -162,7 +149,7 @@ struct SettingsView: View {
                 set: { launchAtLoginController.setEnabled($0) }
             )) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Start DevPulse automatically after login")
+                    Text("登录 macOS 后自动启动 DevPulse")
                         .font(.caption.weight(.semibold))
                     Text(launchAtLoginController.diagnostics.detail)
                         .font(.caption2)
@@ -210,7 +197,8 @@ struct SettingsView: View {
                         systemImage: "arrow.triangle.2.circlepath"
                     )
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
                 .disabled(scheduler.isScanning)
             }
 
@@ -333,7 +321,7 @@ struct SettingsView: View {
                     severity: diagnosticsOverview.sections.first(where: { $0.id == "shared-data" })?.severity ?? .warning
                 )
                 diagnosticsInlineStatusPill(
-                    title: "Widget",
+                    title: "小组件",
                     value: diagnosticsOverview.sections.first(where: { $0.id == "widget-state" })?.summary ?? "暂不可用",
                     severity: diagnosticsOverview.sections.first(where: { $0.id == "widget-state" })?.severity ?? .warning
                 )
@@ -387,27 +375,27 @@ struct SettingsView: View {
     private var diagnosticsStatusGrid: some View {
         VStack(alignment: .leading, spacing: 8) {
             diagnosticsRow(
-                title: "App Bundle",
+                title: "主应用标识",
                 value: scheduler.diagnostics.appBundleIdentifier,
-                detail: "主 App 的 bundle identifier。",
+                detail: "主应用的标识符。",
                 isError: false
             )
             diagnosticsRow(
-                title: "Widget Bundle",
+                title: "小组件标识",
                 value: scheduler.diagnostics.widgetBundleIdentifier,
-                detail: "Widget Extension 的 bundle identifier。",
+                detail: "小组件扩展的标识符。",
                 isError: false
             )
             diagnosticsRow(
-                title: "App Group",
+                title: "共享组",
                 value: scheduler.diagnostics.appGroupIdentifier,
-                detail: scheduler.diagnostics.appGroupContainerPath ?? "当前拿不到 App Group 容器路径。",
+                detail: scheduler.diagnostics.appGroupContainerPath ?? "当前拿不到共享组容器路径。",
                 isError: !scheduler.appGroupAvailable
             )
             diagnosticsRow(
                 title: "共享容器",
                 value: scheduler.diagnostics.appGroupContainerPath ?? "不可用",
-                detail: scheduler.diagnostics.appGroupAvailable ? "当前解析到的 App Group 容器路径。" : "检查 entitlement 与签名配置。",
+                detail: scheduler.diagnostics.appGroupAvailable ? "当前解析到的共享组容器路径。" : "检查权限声明与签名配置。",
                 isError: !scheduler.appGroupAvailable
             )
             diagnosticsRow(
@@ -453,7 +441,7 @@ struct SettingsView: View {
                 isError: sharedWriteStatus == "失败"
             )
             diagnosticsRow(
-                title: "Widget 快照",
+                title: "小组件快照",
                 value: widgetSnapshotStatus,
                 detail: widgetSnapshotDetail,
                 isError: widgetSnapshotStatus == "失败"
@@ -461,7 +449,7 @@ struct SettingsView: View {
             diagnosticsRow(
                 title: "一致性校验",
                 value: scheduler.diagnostics.validationIssues.isEmpty ? "通过" : "不一致",
-                detail: scheduler.diagnostics.validationIssues.isEmpty ? "主 App、共享数据与 Widget 可读快照当前一致。" : scheduler.diagnostics.validationIssues.joined(separator: " "),
+                detail: scheduler.diagnostics.validationIssues.isEmpty ? "主应用、共享数据与小组件可读快照当前一致。" : scheduler.diagnostics.validationIssues.joined(separator: " "),
                 isError: !scheduler.diagnostics.validationIssues.isEmpty
             )
             diagnosticsRow(
@@ -471,7 +459,7 @@ struct SettingsView: View {
                 isError: scheduler.refreshTrustAssessment.isError
             )
             diagnosticsRow(
-                title: "Widget 可信度",
+                title: "小组件可信度",
                 value: widgetTrustAssessment.title,
                 detail: widgetTrustAssessment.basis,
                 isError: widgetTrustAssessment.isError
@@ -483,21 +471,21 @@ struct SettingsView: View {
                 isError: scheduler.lastScanAt == nil
             )
             diagnosticsRow(
-                title: "generatedAt",
+                title: "生成时间",
                 value: scheduler.diagnostics.lastGeneratedAt.map { snapshotTimeLabel($0) } ?? "不可用",
-                detail: scheduler.diagnostics.lastGeneratedAt ?? "还没有记录 generatedAt。",
+                detail: scheduler.diagnostics.lastGeneratedAt ?? "还没有记录生成时间。",
                 isError: scheduler.diagnostics.lastGeneratedAt == nil
             )
             diagnosticsRow(
-                title: "writtenAt",
+                title: "写入时间",
                 value: scheduler.diagnostics.lastWrittenAt.map { snapshotTimeLabel($0) } ?? "不可用",
-                detail: scheduler.diagnostics.lastWrittenAt ?? "还没有记录 writtenAt。",
+                detail: scheduler.diagnostics.lastWrittenAt ?? "还没有记录写入时间。",
                 isError: scheduler.diagnostics.lastWrittenAt == nil
             )
             diagnosticsRow(
-                title: "reload requested",
+                title: "请求重载",
                 value: scheduler.diagnostics.lastReloadRequestedAt.map { snapshotTimeLabel($0) } ?? "不可用",
-                detail: scheduler.diagnostics.lastReloadRequestedAt.map { formattedDate($0) } ?? "还没有请求过 Widget reload。",
+                detail: scheduler.diagnostics.lastReloadRequestedAt.map { formattedDate($0) } ?? "还没有请求过小组件重载。",
                 isError: scheduler.diagnostics.lastReloadRequestedAt == nil
             )
             diagnosticsRow(
@@ -513,7 +501,7 @@ struct SettingsView: View {
                 isError: scheduler.diagnostics.lastRefreshCompletedAt == nil
             )
             diagnosticsRow(
-                title: "Snapshot Store",
+                title: "快照存储",
                 value: snapshotStoreStateLabel,
                 detail: snapshotStoreStateDetail,
                 isError: scheduler.diagnostics.lastSnapshotStoreState == .failed
@@ -525,7 +513,7 @@ struct SettingsView: View {
                 isError: false
             )
             diagnosticsRow(
-                title: "reload 决策",
+                title: "重载决策",
                 value: widgetReloadStateLabel,
                 detail: widgetReloadStateDetail,
                 isError: false
@@ -656,17 +644,17 @@ struct SettingsView: View {
 
     private var widgetSnapshotDetail: String {
         if scheduler.diagnostics.widgetSnapshotReadError != nil {
-            return scheduler.diagnostics.widgetSnapshotReadError ?? "Widget 快照读取失败。"
+            return scheduler.diagnostics.widgetSnapshotReadError ?? "小组件快照读取失败。"
         }
         if let widgetSnapshot = scheduler.diagnostics.widgetSnapshot {
             let readSummary = scheduler.diagnostics.widgetSnapshotReadAt.map { "最近读取：\(formattedDate($0))" }
-                ?? "Widget 已读到共享快照。"
+                ?? "小组件已读到共享快照。"
             let timestampSummary = widgetSnapshot.writtenAt
-                .map { "writtenAt: \($0)" }
-                ?? "writtenAt 缺失"
-            return "\(readSummary) · repos \(widgetSnapshot.repositories.count) · \(timestampSummary)"
+                .map { "写入时间：\($0)" }
+                ?? "写入时间缺失"
+            return "\(readSummary) · 仓库 \(widgetSnapshot.repositories.count) 个 · \(timestampSummary)"
         }
-        return "启动后还在等待 Widget 可读快照。"
+        return "启动后还在等待小组件可读快照。"
     }
 
     private var widgetTrustAssessment: SnapshotTrustAssessment {
@@ -674,7 +662,7 @@ struct SettingsView: View {
             generatedAt: scheduler.diagnostics.widgetSnapshot?.generatedAt,
             writtenAt: scheduler.diagnostics.widgetSnapshot?.writtenAt,
             readError: scheduler.diagnostics.widgetSnapshotReadError,
-            missingReason: "Widget 侧还没有拿到可用快照时间。"
+            missingReason: "小组件侧还没有拿到可用快照时间。"
         )
     }
 
@@ -834,7 +822,7 @@ struct SettingsView: View {
                 parts.append("最近读取 \(snapshotTimeLabel(readAt))")
             }
             if let reloadAt = scheduler.diagnostics.lastReloadRequestedAt {
-                parts.append("最近 reload \(snapshotTimeLabel(reloadAt))")
+                parts.append("最近重载 \(snapshotTimeLabel(reloadAt))")
             }
 
             return parts.isEmpty ? nil : parts.joined(separator: " · ")
@@ -1140,7 +1128,7 @@ struct SettingsView: View {
 
     private var snapshotStoreStateDetail: String {
         scheduler.diagnostics.lastSnapshotStoreDetail
-            ?? "还没有 Snapshot Store 明细记录。"
+            ?? "还没有快照存储明细记录。"
     }
 
     private var snapshotStoreTriggerLabel: String {
@@ -1188,7 +1176,7 @@ struct SettingsView: View {
 
     private var widgetReloadStateDetail: String {
         scheduler.diagnostics.lastWidgetReloadDetail
-            ?? "还没有 Widget reload 决策记录。"
+            ?? "还没有小组件重载决策记录。"
     }
 
     private var snapshotFactsSummary: String {
@@ -1309,7 +1297,7 @@ struct SettingsView: View {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = false
-        panel.prompt = "Choose"
+        panel.prompt = "选择"
 
         if panel.runModal() == .OK, let url = panel.url {
             scheduler.addCustomPath(url.path)
@@ -1334,8 +1322,126 @@ struct SettingsView: View {
         return formatter.string(from: date)
     }
 
+    private var defaultScanGroups: [DefaultScanGroup] {
+        [
+            DefaultScanGroup(
+                title: "开发工作区",
+                subtitle: "优先覆盖常见代码目录",
+                paths: [
+                    ScanLocationProvider.expandTilde("~/Developer"),
+                    ScanLocationProvider.expandTilde("~/Projects"),
+                    ScanLocationProvider.expandTilde("~/Code"),
+                    ScanLocationProvider.expandTilde("~/Workspace"),
+                    ScanLocationProvider.expandTilde("~/GitHub")
+                ]
+            ),
+            DefaultScanGroup(
+                title: "常用位置",
+                subtitle: "补充桌面和文稿等常见入口",
+                paths: [
+                    ScanLocationProvider.expandTilde("~/Desktop"),
+                    ScanLocationProvider.expandTilde("~/Documents")
+                ]
+            )
+        ]
+    }
+
+    private func defaultScanGroupSection(_ group: DefaultScanGroup) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(group.title)
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text(group.subtitle)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            ForEach(group.paths, id: \.self) { path in
+                defaultScanToggleRow(for: path)
+            }
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.06))
+        .cornerRadius(8)
+    }
+
+    @ViewBuilder
+    private func defaultScanToggleRow(for path: String) -> some View {
+        if let index = builtInToggles.firstIndex(where: { $0.path == path }) {
+            let toggle = builtInToggles[index]
+            let metadata = builtInDirectoryMetadata(for: toggle.path)
+
+            Toggle(isOn: $builtInToggles[index].isEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(metadata.title)
+                            .font(.caption.weight(.semibold))
+                        if !directoryExists(toggle.path) {
+                            Text("当前不存在")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.secondary.opacity(0.08))
+                                .cornerRadius(6)
+                        }
+                    }
+                    Text(metadata.subtitle)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    Text(compactHomeRelativePath(toggle.path))
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .toggleStyle(.switch)
+            .onChange(of: builtInToggles[index].isEnabled) { _, newValue in
+                scheduler.toggleBuiltIn(path: toggle.path, enabled: newValue)
+            }
+        }
+    }
+
+    private func builtInDirectoryMetadata(for path: String) -> (title: String, subtitle: String) {
+        switch URL(fileURLWithPath: path).lastPathComponent {
+        case "Developer":
+            return ("开发", "常见 Xcode 与本地开发目录")
+        case "Projects":
+            return ("项目", "通用项目根目录")
+        case "Code":
+            return ("代码", "轻量代码目录")
+        case "Workspace":
+            return ("工作区", "多项目工作区目录")
+        case "GitHub":
+            return ("GitHub", "克隆仓库常用位置")
+        case "Desktop":
+            return ("桌面", "临时放置的仓库目录")
+        case "Documents":
+            return ("文稿", "文稿中的项目目录")
+        default:
+            return (URL(fileURLWithPath: path).lastPathComponent, compactHomeRelativePath(path))
+        }
+    }
+
+    private func compactHomeRelativePath(_ path: String) -> String {
+        let home = ScanLocationProvider.resolvedUserHomeDirectory()
+        guard path.hasPrefix(home) else { return path }
+
+        let suffix = path.dropFirst(home.count)
+        return suffix.isEmpty ? "~" : "~\(suffix)"
+    }
+
     private func directoryExists(_ path: String) -> Bool {
         var isDir: ObjCBool = false
         return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
     }
+}
+
+private struct DefaultScanGroup: Identifiable {
+    let id = UUID()
+    let title: String
+    let subtitle: String
+    let paths: [String]
 }
