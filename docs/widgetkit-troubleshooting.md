@@ -100,20 +100,25 @@ Recovery steps:
 4. Rebuild and run the app.
 5. Trigger `Rescan Now` so the app rewrites the shared snapshot.
 
-## About free Apple ID and ad-hoc signing
+## About free Apple account, local signing, and Widget discovery
 
 This project is intended for local development.
 
-Free Apple ID and ad-hoc signing can work for local testing, but they may be fragile when the account state, entitlements, or derived data change. If the widget or App Group stops working after a signing change:
+For WidgetKit on macOS, the important distinction is:
+
+- no paid Apple Developer Program membership may still be acceptable for local development
+- but you still need an Apple account signed in to Xcode so automatic signing can obtain local development profiles
+
+Ad-hoc or manual local `codesign` alone is not enough to make the system discover a WidgetKit extension. If the widget or App Group stops working after a signing change:
 
 - switch back to Automatic signing
 - select the same Team on both targets
 - clean build
 - reinstall the app
 
-## Local install without a Developer account
+## Local install with an Apple account in Xcode
 
-If this Mac has only a local signing identity and does not have an Xcode Developer account session, use local install as a downgrade path instead of treating Widget launch as a code bug.
+If this Mac has an Apple account signed in to Xcode, use the local install flow below to validate both the host app and Widget discovery.
 
 Recommended local acceptance flow:
 
@@ -127,7 +132,7 @@ pluginkit -vm -A -D -i local.devpulse.app.widget
 What this proves:
 
 - the host app builds locally
-- the app and widget are signed with the same local identity
+- the app and widget were built through Xcode automatic signing
 - the app is installed to `/Applications/DevPulse.app`
 - the app launches
 - `self_check.result=pass`
@@ -136,7 +141,7 @@ What this proves:
 
 What this does not prove:
 
-- that WidgetKit will accept and launch the widget on a machine with no matching provisioning profile
+- that WidgetKit will accept and launch the widget if this Mac has no eligible local development profiles
 
 If `pluginkit -i local.devpulse.app.widget` returns no match, or `chronod` keeps logging that it cannot find `local.devpulse.app.widget`, treat that as a runtime blocker outside the business logic first.
 
@@ -153,6 +158,13 @@ If `amfid` or `taskgated-helper` reports `No matching profile found` for either:
 - `/Applications/DevPulse.app/Contents/PlugIns/DevPulseWidgetExtension.appex/Contents/MacOS/DevPulseWidgetExtension`
 
 then stop changing app code. Record the failure as an Apple provisioning-profile blocker for this machine.
+
+If `xcodebuild` fails earlier with either of these:
+
+- `No Accounts: Add a new account in Accounts settings.`
+- `No profiles for 'local.devpulse.app.widget' were found`
+
+then the machine is missing the Apple-account-backed provisioning setup that WidgetKit needs. This is not fixable by local `codesign` alone.
 
 ## What the app diagnostics should look like
 

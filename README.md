@@ -98,8 +98,8 @@ In Xcode:
 1. Select the `DevPulse` target.
 2. Open `Signing & Capabilities`.
 3. Pick the same signing setup for both the app and `DevPulseWidgetExtension`.
-4. If you do have a Developer account session, keep both targets on the same Team.
-5. If you do not have a Developer account session, you can still use the local-install downgrade path below.
+4. If you have an Apple account signed in to Xcode, keep both targets on the same Team.
+5. You do not need a paid Apple Developer Program membership for local Widget debugging, but you do need an Apple account session in Xcode so automatic signing can request local development profiles.
 6. Make sure both targets keep the same App Group: `group.local.devpulse`.
 
 ### Run A Debug Build
@@ -118,7 +118,7 @@ xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -co
 
 ### Install A Local Debug Build
 
-If you only need a local `/Applications` install, prefer the repository script:
+If you need a local `/Applications` install that the system can also discover as a Widget host, prefer the repository script:
 
 ```sh
 ./scripts/install-and-self-check.sh
@@ -126,30 +126,19 @@ If you only need a local `/Applications` install, prefer the repository script:
 
 This script:
 
-- builds the app without Xcode-managed signing
-- signs the host app and widget with the same local identity
+- builds the app with Xcode automatic signing
+- requires an Apple account signed in to Xcode
+- requires Xcode to obtain local development provisioning profiles for both the app and the widget
 - installs the latest build to `/Applications/DevPulse.app`
 - launches the app
 - runs the headless self-check
 - verifies shared snapshot generation
 
-The manual equivalent is:
-
-```sh
-xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug -derivedDataPath /tmp/devpulse-build -destination platform=macOS CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
-security find-identity -v -p codesigning
-codesign --force --sign <SIGNING_IDENTITY_HASH> --timestamp=none --entitlements DevPulseNative/Widget/DevPulseWidgetExtension.entitlements /tmp/devpulse-build/Build/Products/Debug/DevPulse.app/Contents/PlugIns/DevPulseWidgetExtension.appex
-codesign --force --sign <SIGNING_IDENTITY_HASH> --timestamp=none --entitlements DevPulseNative/App/DevPulse.entitlements /tmp/devpulse-build/Build/Products/Debug/DevPulse.app
-codesign --verify --deep --strict --verbose=2 /tmp/devpulse-build/Build/Products/Debug/DevPulse.app
-ditto /tmp/devpulse-build/Build/Products/Debug/DevPulse.app /Applications/DevPulse.app
-open -n /Applications/DevPulse.app
-```
-
 If you ran tests immediately before installing and the build product contains `DevPulseTests.xctest` inside `DevPulse.app/Contents/PlugIns/`, remove that test bundle from the build product before signing the app for installation.
 
-### Local Acceptance Without A Developer Account
+### Local Acceptance Without A Paid Developer Membership
 
-On a machine with no Xcode Developer account session, treat Widget launch as a separate runtime check instead of assuming local signing is enough.
+On a machine with an Apple account signed in to Xcode but no paid Apple Developer Program membership, treat Widget launch as a runtime check after automatic signing succeeds.
 
 Recommended acceptance sequence:
 
@@ -165,6 +154,8 @@ Interpret the results this way:
 - if `install-and-self-check` passes and `self_check.validation=pass`, the host app and shared snapshot path are locally healthy
 - if `pluginkit` shows the widget, WidgetKit discovery succeeded on this machine
 - if the widget still fails and logs show `No matching profile found`, treat it as an Apple provisioning-profile blocker for that machine
+
+If this Mac has no Apple account signed in to Xcode, automatic signing cannot request the local development profiles that WidgetKit needs. In that case, `xcodebuild` will typically fail with `No Accounts` or `No profiles for 'local.devpulse.app.widget' were found`, and the system will not register the widget.
 
 Useful runtime log check:
 
