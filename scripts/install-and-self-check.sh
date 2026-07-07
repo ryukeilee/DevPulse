@@ -32,6 +32,10 @@ fail() {
     exit 1
 }
 
+xcode_accounts_configured() {
+    defaults read com.apple.dt.Xcode DVTDeveloperAccountManagerAppleIDs >/dev/null 2>&1
+}
+
 first_apple_development_identity_line() {
     # Keep keychain access scoped to codesigning identities only.
     security find-identity -v -p codesigning \
@@ -50,6 +54,61 @@ resolve_signing_identity() {
     identity="$(printf '%s\n' "$identity_line" | awk '{ print $2 }')"
     [ -n "$identity" ] || fail "No Apple Development signing identity found. Set DEVPULSE_SIGNING_IDENTITY to a certificate hash first."
     printf '%s\n' "$identity"
+}
+
+resolve_identity_team() {
+    local identity_line team
+    identity_line="$(first_apple_development_identity_line)"
+    team="$(printf '%s\n' "$identity_line" | sed -n 's/.*(\([A-Z0-9]\{10\}\)).*/\1/p')"
+    [ -n "$team" ] || fail "No Apple Development identity team could be derived on this Mac."
+    printf '%s\n' "$team"
+}
+
+profile_team_for_bundle_id() {
+    local bundle_id="$1"
+    local tmp
+    tmp="$(mktemp)"
+    for profile in "$HOME"/Library/Developer/Xcode/UserData/Provisioning\ Profiles/*.provisionprofile; do
+        [ -e "$profile" ] || continue
+        security cms -D -i "$profile" > "$tmp" 2>/dev/null || continue
+        local app_id team_id
+        app_id="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.application-identifier' "$tmp" 2>/dev/null || true)"
+        if [ -z "$app_id" ]; then
+            app_id="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$tmp" 2>/dev/null || true)"
+        fi
+        case "$app_id" in
+            *."$bundle_id")
+                team_id="$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$tmp" 2>/dev/null || true)"
+                rm -f "$tmp"
+                printf '%s\n' "$team_id"
+                return 0
+                ;;
+        esac
+    done
+    rm -f "$tmp"
+    return 1
+}
+
+verify_automatic_signing_prerequisites() {
+    local identity_team host_profile_team widget_profile_team
+    identity_team="$(resolve_identity_team)"
+    host_profile_team="$(profile_team_for_bundle_id "local.devpulse.app" || true)"
+    widget_profile_team="$(profile_team_for_bundle_id "local.devpulse.app.widget" || true)"
+
+    if [ -n "$host_profile_team" ] && [ -n "$widget_profile_team" ] && [ "$host_profile_team" != "$widget_profile_team" ]; then
+        fail "Local DevPulse host and widget provisioning profiles belong to different teams. Remove or regenerate the stale DevPulse profiles before retrying automatic signing."
+    fi
+
+    if [ -n "$host_profile_team" ] && [ "$host_profile_team" != "$identity_team" ]; then
+        if ! xcode_accounts_configured; then
+            fail "Local DevPulse provisioning profiles do not match the current Apple Development identity, and Xcode has no signed-in account to regenerate matching profiles."
+        fi
+        fail "Local DevPulse provisioning profiles do not match the current Apple Development identity. Regenerate or download fresh DevPulse profiles from the signed-in Xcode account before retrying."
+    fi
+
+    if ! xcode_accounts_configured; then
+        fail "No Xcode Apple account is configured on this Mac. Automatic signing cannot regenerate the DevPulse host and widget provisioning profiles."
+    fi
 }
 
 resolve_development_team() {
@@ -234,9 +293,10 @@ main() {
 
     local identity team
     identity="$(resolve_signing_identity)"
+    verify_automatic_signing_prerequisites
     team="$(resolve_development_team)"
-    info "Using signing identity hash: $identity"
-    info "Using Development Team: $team"
+    info "Using Apple Development signing identity: available"
+    info "Using automatic signing team: resolved"
 
     build_signed_app "$team"
     stop_running_app
