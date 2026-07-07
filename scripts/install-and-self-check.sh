@@ -13,6 +13,8 @@ INSTALL_APP="/Applications/DevPulse.app"
 SNAPSHOT_FILE="$HOME/Library/Group Containers/group.local.devpulse/repositories.json"
 SELF_CHECK_LOG="$(mktemp "${TMPDIR:-/tmp}/devpulse-self-check.XXXXXX.log")"
 BACKUP_DIR=""
+HOST_PROFILE_RELATIVE_PATH="Contents/embedded.provisionprofile"
+WIDGET_PROFILE_RELATIVE_PATH="Contents/PlugIns/DevPulseWidgetExtension.appex/Contents/embedded.provisionprofile"
 
 cleanup() {
     rm -f "$SELF_CHECK_LOG"
@@ -56,7 +58,19 @@ resolve_development_team() {
         return
     fi
 
-    local identity_line team
+    local configured_team identity_line team
+    configured_team="$(
+        xcodebuild \
+            -project "$XCODEPROJ" \
+            -scheme "$SCHEME" \
+            -showBuildSettings 2>/dev/null \
+        | awk -F ' = ' '/^[[:space:]]*DEVELOPMENT_TEAM = / { print $2; exit }'
+    )"
+    if [ -n "$configured_team" ]; then
+        printf '%s\n' "$configured_team"
+        return
+    fi
+
     identity_line="$(first_apple_development_identity_line)"
     team="$(printf '%s\n' "$identity_line" | sed -n 's/.*(\([A-Z0-9]\{10\}\)).*/\1/p')"
     [ -n "$team" ] || fail "No Development Team found from signing identities. Set DEVPULSE_DEVELOPMENT_TEAM first."
@@ -97,9 +111,9 @@ build_signed_app() {
         build
 
     [ -d "$BUILD_APP" ] || fail "Build product not found at $BUILD_APP"
-    [ -f "$BUILD_APP/embedded.provisionprofile" ] \
+    [ -f "$BUILD_APP/$HOST_PROFILE_RELATIVE_PATH" ] \
         || fail "Built app is missing embedded.provisionprofile. Automatic signing did not produce a usable host app."
-    [ -f "$BUILD_APP/Contents/PlugIns/DevPulseWidgetExtension.appex/embedded.provisionprofile" ] \
+    [ -f "$BUILD_APP/$WIDGET_PROFILE_RELATIVE_PATH" ] \
         || fail "Built widget is missing embedded.provisionprofile. WidgetKit will be rejected on this machine."
 
     if [ -d "$BUILD_APP/Contents/PlugIns/DevPulseTests.xctest" ]; then
