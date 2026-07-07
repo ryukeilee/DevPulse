@@ -33,7 +33,8 @@ fail() {
 }
 
 xcode_accounts_configured() {
-    defaults read com.apple.dt.Xcode DVTDeveloperAccountManagerAppleIDs >/dev/null 2>&1
+    defaults read com.apple.dt.Xcode DVTDeveloperAccountManagerAppleIDs >/dev/null 2>&1 \
+        || defaults read com.apple.dt.Xcode DVTDeveloperAccountManagerAppleIDLists >/dev/null 2>&1
 }
 
 first_apple_development_identity_line() {
@@ -64,6 +65,16 @@ resolve_identity_team() {
     printf '%s\n' "$team"
 }
 
+resolve_xcode_team() {
+    local team
+    team="$(
+        plutil -p "$HOME/Library/Preferences/com.apple.dt.Xcode.plist" 2>/dev/null \
+            | awk '/teamID/ { gsub(/"/, "", $3); print $3; exit }'
+    )"
+    [ -n "$team" ] || return 1
+    printf '%s\n' "$team"
+}
+
 profile_team_for_bundle_id() {
     local bundle_id="$1"
     local tmp
@@ -90,8 +101,8 @@ profile_team_for_bundle_id() {
 }
 
 verify_automatic_signing_prerequisites() {
-    local identity_team host_profile_team widget_profile_team
-    identity_team="$(resolve_identity_team)"
+    local expected_team host_profile_team widget_profile_team
+    expected_team="$(resolve_xcode_team || resolve_identity_team)"
     host_profile_team="$(profile_team_for_bundle_id "local.devpulse.app" || true)"
     widget_profile_team="$(profile_team_for_bundle_id "local.devpulse.app.widget" || true)"
 
@@ -99,11 +110,11 @@ verify_automatic_signing_prerequisites() {
         fail "Local DevPulse host and widget provisioning profiles belong to different teams. Remove or regenerate the stale DevPulse profiles before retrying automatic signing."
     fi
 
-    if [ -n "$host_profile_team" ] && [ "$host_profile_team" != "$identity_team" ]; then
+    if [ -n "$host_profile_team" ] && [ "$host_profile_team" != "$expected_team" ]; then
         if ! xcode_accounts_configured; then
             fail "Local DevPulse provisioning profiles do not match the current Apple Development identity, and Xcode has no signed-in account to regenerate matching profiles."
         fi
-        fail "Local DevPulse provisioning profiles do not match the current Apple Development identity. Regenerate or download fresh DevPulse profiles from the signed-in Xcode account before retrying."
+        fail "Local DevPulse provisioning profiles do not match the active Xcode automatic-signing team. Regenerate or download fresh DevPulse profiles from the signed-in Xcode account before retrying."
     fi
 
     if ! xcode_accounts_configured; then
@@ -117,7 +128,7 @@ resolve_development_team() {
         return
     fi
 
-    local configured_team identity_line team
+    local configured_team identity_line team xcode_team
     configured_team="$(
         xcodebuild \
             -project "$XCODEPROJ" \
@@ -127,6 +138,12 @@ resolve_development_team() {
     )"
     if [ -n "$configured_team" ]; then
         printf '%s\n' "$configured_team"
+        return
+    fi
+
+    xcode_team="$(resolve_xcode_team || true)"
+    if [ -n "$xcode_team" ]; then
+        printf '%s\n' "$xcode_team"
         return
     fi
 
