@@ -63,7 +63,7 @@ struct SettingsView: View {
             Label("默认扫描目录", systemImage: "house")
                 .font(.headline)
 
-            Text("按分组启用常见目录；不存在的目录会自动跳过，避免干扰主要设置。")
+            Text("按分组启用常见目录；未找到的目录会直接提示，并提供可执行操作。")
                 .font(.caption)
                 .foregroundColor(.secondary)
 
@@ -1305,6 +1305,66 @@ struct SettingsView: View {
         }
     }
 
+    private func chooseDirectoryAndRefresh() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.prompt = "选择"
+
+        if panel.runModal() == .OK, let url = panel.url {
+            addScanDirectoryAndRefresh(url.path)
+            newCustomPath = ""
+        }
+    }
+
+    private func setBuiltInDirectoryEnabled(_ path: String, enabled: Bool) {
+        let normalized = ScanLocationProvider.normalizePersistedPath(path)
+        let wasEnabled = scheduler.scanDirectories.contains { $0.path == normalized }
+        guard wasEnabled != enabled else {
+            refreshBuiltInToggles()
+            return
+        }
+
+        scheduler.toggleBuiltIn(path: normalized, enabled: enabled)
+        refreshBuiltInToggles()
+        refreshAfterDirectoryChange()
+    }
+
+    private func addScanDirectoryAndRefresh(_ path: String) {
+        let normalized = ScanLocationProvider.normalizePersistedPath(path)
+        scheduler.addCustomPath(normalized)
+        refreshBuiltInToggles()
+
+        if scheduler.scanDirectories.contains(where: { $0.path == normalized }) {
+            refreshAfterDirectoryChange()
+        }
+    }
+
+    private func createBuiltInDirectoryAndEnable(_ path: String) {
+        let normalized = ScanLocationProvider.normalizePersistedPath(path)
+
+        do {
+            try FileManager.default.createDirectory(
+                at: URL(fileURLWithPath: normalized),
+                withIntermediateDirectories: true
+            )
+            addScanDirectoryAndRefresh(normalized)
+        } catch {
+            scheduler.scanRootAccessWarning = "无法创建目录：\(compactHomeRelativePath(normalized))。"
+        }
+    }
+
+    private func refreshAfterDirectoryChange() {
+        Task { @MainActor in
+            while scheduler.isScanning {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            scheduler.scanNow(forceRepositoryDiscovery: true)
+        }
+    }
+
     private func snapshotTimeLabel(_ date: Date?) -> String {
         guard let date else { return "未知" }
         return formattedDate(date)
@@ -1371,35 +1431,72 @@ struct SettingsView: View {
         if let index = builtInToggles.firstIndex(where: { $0.path == path }) {
             let toggle = builtInToggles[index]
             let metadata = builtInDirectoryMetadata(for: toggle.path)
+            let exists = directoryExists(toggle.path)
 
-            Toggle(isOn: $builtInToggles[index].isEnabled) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(metadata.title)
-                            .font(.caption.weight(.semibold))
-                        if !directoryExists(toggle.path) {
-                            Text("当前不存在")
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(metadata.title)
+                                .font(.caption.weight(.semibold))
+                            if exists {
+                                Text("可用")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.secondary.opacity(0.08))
+                                    .cornerRadius(6)
+                            } else {
+                                Text("未找到")
+                                    .font(.caption2)
+                                    .foregroundColor(.red)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.red.opacity(0.08))
+                                    .cornerRadius(6)
+                            }
+                        }
+                        Text(metadata.subtitle)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Text(compactHomeRelativePath(toggle.path))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        if !exists {
+                            Text("路径不存在")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.secondary.opacity(0.08))
-                                .cornerRadius(6)
                         }
                     }
-                    Text(metadata.subtitle)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    Text(compactHomeRelativePath(toggle.path))
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    Spacer(minLength: 12)
+                    if exists {
+                        Toggle("", isOn: $builtInToggles[index].isEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .onChange(of: builtInToggles[index].isEnabled) { _, newValue in
+                                setBuiltInDirectoryEnabled(toggle.path, enabled: newValue)
+                            }
+                    }
                 }
-            }
-            .toggleStyle(.switch)
-            .onChange(of: builtInToggles[index].isEnabled) { _, newValue in
-                scheduler.toggleBuiltIn(path: toggle.path, enabled: newValue)
+
+                if !exists {
+                    HStack(spacing: 8) {
+                        Button("创建并启用") {
+                            createBuiltInDirectoryAndEnable(toggle.path)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+
+                        Button("选择其他位置") {
+                            chooseDirectoryAndRefresh()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
             }
         }
     }
