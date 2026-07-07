@@ -30,14 +30,22 @@ fail() {
     exit 1
 }
 
+first_apple_development_identity_line() {
+    # Keep keychain access scoped to codesigning identities only.
+    security find-identity -v -p codesigning \
+        | sed -n '/Apple Development:/p' \
+        | head -n 1
+}
+
 resolve_signing_identity() {
     if [ -n "${DEVPULSE_SIGNING_IDENTITY:-}" ]; then
         printf '%s\n' "$DEVPULSE_SIGNING_IDENTITY"
         return
     fi
 
-    local identity
-    identity="$(security find-identity -v -p codesigning | awk '/Apple Development:/ { print $2; exit }')"
+    local identity_line identity
+    identity_line="$(first_apple_development_identity_line)"
+    identity="$(printf '%s\n' "$identity_line" | awk '{ print $2 }')"
     [ -n "$identity" ] || fail "No Apple Development signing identity found. Set DEVPULSE_SIGNING_IDENTITY to a certificate hash first."
     printf '%s\n' "$identity"
 }
@@ -48,20 +56,9 @@ resolve_development_team() {
         return
     fi
 
-    local certificate_name team
-    certificate_name="$(
-        security find-identity -v -p codesigning \
-        | sed -n 's/.*"\(Apple Development:.*\)"/\1/p' \
-        | head -n 1
-    )"
-    [ -n "$certificate_name" ] || fail "No Apple Development certificate name found. Set DEVPULSE_DEVELOPMENT_TEAM first."
-
-    team="$(
-        security find-certificate -Z -p -c "$certificate_name" \
-        | openssl x509 -noout -subject -nameopt utf8,sep_multiline \
-        | sed -n 's/.*OU=\([A-Z0-9]\{10\}\).*/\1/p' \
-        | head -n 1
-    )"
+    local identity_line team
+    identity_line="$(first_apple_development_identity_line)"
+    team="$(printf '%s\n' "$identity_line" | sed -n 's/.*(\([A-Z0-9]\{10\}\)).*/\1/p')"
     [ -n "$team" ] || fail "No Development Team found from signing identities. Set DEVPULSE_DEVELOPMENT_TEAM first."
     printf '%s\n' "$team"
 }
