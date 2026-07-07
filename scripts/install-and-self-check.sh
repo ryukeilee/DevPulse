@@ -10,8 +10,6 @@ DESTINATION="platform=macOS"
 DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-/tmp/devpulse-build}"
 BUILD_APP="$DERIVED_DATA_PATH/Build/Products/Debug/DevPulse.app"
 INSTALL_APP="/Applications/DevPulse.app"
-APP_ENTITLEMENTS_FILE="$PROJECT_DIR/App/DevPulse.entitlements"
-WIDGET_ENTITLEMENTS_FILE="$PROJECT_DIR/Widget/DevPulseWidgetExtension.entitlements"
 SNAPSHOT_FILE="$HOME/Library/Group Containers/group.local.devpulse/repositories.json"
 SELF_CHECK_LOG="$(mktemp "${TMPDIR:-/tmp}/devpulse-self-check.XXXXXX.log")"
 BACKUP_DIR=""
@@ -44,6 +42,30 @@ resolve_signing_identity() {
     printf '%s\n' "$identity"
 }
 
+resolve_development_team() {
+    if [ -n "${DEVPULSE_DEVELOPMENT_TEAM:-}" ]; then
+        printf '%s\n' "$DEVPULSE_DEVELOPMENT_TEAM"
+        return
+    fi
+
+    local certificate_name team
+    certificate_name="$(
+        security find-identity -v -p codesigning \
+        | sed -n 's/.*"\(Apple Development:.*\)"/\1/p' \
+        | head -n 1
+    )"
+    [ -n "$certificate_name" ] || fail "No Apple Development certificate name found. Set DEVPULSE_DEVELOPMENT_TEAM first."
+
+    team="$(
+        security find-certificate -Z -p -c "$certificate_name" \
+        | openssl x509 -noout -subject -nameopt utf8,sep_multiline \
+        | sed -n 's/.*OU=\([A-Z0-9]\{10\}\).*/\1/p' \
+        | head -n 1
+    )"
+    [ -n "$team" ] || fail "No Development Team found from signing identities. Set DEVPULSE_DEVELOPMENT_TEAM first."
+    printf '%s\n' "$team"
+}
+
 stop_running_app() {
     local pids
     pids="$(pgrep -x DevPulse || true)"
@@ -63,48 +85,31 @@ stop_running_app() {
     fail "Existing DevPulse process did not exit cleanly."
 }
 
-build_unsigned_app() {
-    info "Building latest DevPulse.app"
+build_signed_app() {
+    local team="$1"
+
+    info "Building latest DevPulse.app with automatic signing"
     xcodebuild \
         -project "$XCODEPROJ" \
         -scheme "$SCHEME" \
         -configuration "$CONFIGURATION" \
         -derivedDataPath "$DERIVED_DATA_PATH" \
         -destination "$DESTINATION" \
-        CODE_SIGNING_ALLOWED=NO \
-        CODE_SIGNING_REQUIRED=NO \
+        DEVELOPMENT_TEAM="$team" \
+        -allowProvisioningUpdates \
         build
 
     [ -d "$BUILD_APP" ] || fail "Build product not found at $BUILD_APP"
+    [ -f "$BUILD_APP/embedded.provisionprofile" ] \
+        || fail "Built app is missing embedded.provisionprofile. Automatic signing did not produce a usable host app."
+    [ -f "$BUILD_APP/Contents/PlugIns/DevPulseWidgetExtension.appex/embedded.provisionprofile" ] \
+        || fail "Built widget is missing embedded.provisionprofile. WidgetKit will be rejected on this machine."
 
     if [ -d "$BUILD_APP/Contents/PlugIns/DevPulseTests.xctest" ]; then
         info "Removing test bundle from app product before signing"
         mv "$BUILD_APP/Contents/PlugIns/DevPulseTests.xctest" \
             "${TMPDIR:-/tmp}/DevPulseTests.xctest.$$.bak"
     fi
-}
-
-sign_app() {
-    local identity="$1"
-
-    info "Signing widget extension"
-    codesign \
-        --force \
-        --sign "$identity" \
-        --timestamp=none \
-        --deep \
-        --entitlements "$WIDGET_ENTITLEMENTS_FILE" \
-        "$BUILD_APP/Contents/PlugIns/DevPulseWidgetExtension.appex"
-
-    info "Signing host app"
-    codesign \
-        --force \
-        --sign "$identity" \
-        --timestamp=none \
-        --deep \
-        --entitlements "$APP_ENTITLEMENTS_FILE" \
-        "$BUILD_APP"
-
     codesign --verify --deep --strict --verbose=2 "$BUILD_APP"
 }
 
@@ -216,13 +221,14 @@ PY
 main() {
     trap cleanup EXIT
 
-    local identity
+    local identity team
     identity="$(resolve_signing_identity)"
+    team="$(resolve_development_team)"
     info "Using signing identity hash: $identity"
+    info "Using Development Team: $team"
 
+    build_signed_app "$team"
     stop_running_app
-    build_unsigned_app
-    sign_app "$identity"
     install_app
     launch_installed_app
     verify_running_process
