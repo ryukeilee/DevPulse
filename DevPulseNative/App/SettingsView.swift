@@ -1407,7 +1407,16 @@ struct SettingsView: View {
     }
 
     private func defaultScanGroupSection(_ group: DefaultScanGroup) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let visiblePaths = group.paths.filter { path in
+            guard let toggle = builtInToggles.first(where: { $0.path == path }) else { return false }
+            return directoryExists(path) || toggle.isEnabled
+        }
+        let missingPaths = group.paths.filter { path in
+            guard let toggle = builtInToggles.first(where: { $0.path == path }) else { return false }
+            return !directoryExists(path) && !toggle.isEnabled
+        }
+
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
                 Text(group.title)
                     .font(.caption.weight(.semibold))
@@ -1417,8 +1426,20 @@ struct SettingsView: View {
                     .foregroundColor(.secondary)
             }
 
-            ForEach(group.paths, id: \.self) { path in
+            ForEach(visiblePaths, id: \.self) { path in
                 defaultScanToggleRow(for: path)
+            }
+
+            if !missingPaths.isEmpty {
+                DisclosureGroup("未找到的预设目录（\(missingPaths.count)）") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(missingPaths, id: \.self) { path in
+                            missingDefaultScanRow(for: path)
+                        }
+                    }
+                    .padding(.top, 6)
+                }
+                .font(.caption)
             }
         }
         .padding(10)
@@ -1490,13 +1511,59 @@ struct SettingsView: View {
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
 
-                        Button("选择其他位置") {
-                            chooseDirectoryAndRefresh()
+                        Menu("更多") {
+                            Button("选择其他位置") {
+                                chooseDirectoryAndRefresh()
+                            }
                         }
-                        .buttonStyle(.bordered)
                         .controlSize(.small)
                     }
                 }
+            }
+        }
+    }
+
+    private func missingDefaultScanRow(for path: String) -> some View {
+        let metadata = builtInDirectoryMetadata(for: path)
+
+        return HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(metadata.title)
+                        .font(.caption.weight(.semibold))
+                    Text("未找到")
+                        .font(.caption2)
+                        .foregroundColor(.red)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.red.opacity(0.08))
+                        .cornerRadius(6)
+                }
+                Text(compactHomeRelativePath(path))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("路径不存在")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer(minLength: 12)
+
+            HStack(spacing: 6) {
+                Button("创建并启用") {
+                    createBuiltInDirectoryAndEnable(path)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+
+                Menu("更多") {
+                    Button("选择其他位置") {
+                        chooseDirectoryAndRefresh()
+                    }
+                }
+                .controlSize(.small)
             }
         }
     }
