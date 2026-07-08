@@ -94,6 +94,41 @@ struct RepositoryDiscoveryExperienceTests {
         #expect(scheduler.scanRootAccessWarning == "未发现可用的扫描目录。请在 Settings 启用一个默认目录或添加真实的仓库根目录后再刷新。")
     }
 
+    @MainActor
+    @Test func enablingBuiltInDirectoryPersistsAcrossSchedulerReload() throws {
+        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let configKey = "scan_config_json"
+        let scanDirectoriesKey = "scan_directories_json"
+        let previousConfig = defaults.data(forKey: configKey)
+        let previousDirectories = defaults.data(forKey: scanDirectoriesKey)
+        defer {
+            restore(previousConfig, forKey: configKey, in: defaults)
+            restore(previousDirectories, forKey: scanDirectoriesKey, in: defaults)
+        }
+
+        let builtInPath = ScanLocationProvider.expandTilde("~/Developer")
+        let persistedConfig = ScanConfig(
+            enabledBuiltInPaths: [],
+            customPaths: [],
+            maxDepth: ScanConfig.default.maxDepth,
+            changedPreviewLimit: ScanConfig.default.changedPreviewLimit,
+            maxConcurrentGitOps: ScanConfig.default.maxConcurrentGitOps,
+            gitCommandTimeout: ScanConfig.default.gitCommandTimeout,
+            scanTimeout: ScanConfig.default.scanTimeout,
+            slowReposkipSeconds: ScanConfig.default.slowReposkipSeconds,
+            activeRepoThreshold: ScanConfig.default.activeRepoThreshold
+        )
+        defaults.set(try JSONEncoder().encode(persistedConfig), forKey: configKey)
+        defaults.removeObject(forKey: scanDirectoriesKey)
+
+        let scheduler = ScanScheduler()
+        scheduler.toggleBuiltIn(path: builtInPath, enabled: true)
+
+        let reloadedScheduler = ScanScheduler()
+
+        #expect(reloadedScheduler.isBuiltInEnabled(path: builtInPath))
+    }
+
     private func restore(_ data: Data?, forKey key: String, in defaults: UserDefaults) {
         if let data {
             defaults.set(data, forKey: key)

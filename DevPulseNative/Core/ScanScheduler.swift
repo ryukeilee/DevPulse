@@ -1242,13 +1242,20 @@ final class ScanScheduler: ObservableObject {
 
     // MARK: - Enabled toggles
 
+    func isBuiltInEnabled(path: String) -> Bool {
+        let normalized = ScanLocationProvider.normalizePersistedPath(path)
+        return config.enabledBuiltInPaths.contains(normalized)
+    }
+
     func toggleBuiltIn(path: String, enabled: Bool) {
         let normalized = ScanLocationProvider.normalizePersistedPath(path)
+        var updatedConfig = config
         if enabled {
-            config.enabledBuiltInPaths.insert(normalized)
+            updatedConfig.enabledBuiltInPaths.insert(normalized)
         } else {
-            config.enabledBuiltInPaths.remove(normalized)
+            updatedConfig.enabledBuiltInPaths.remove(normalized)
         }
+        config = updatedConfig
         scanRootAccessWarning = scanRoots().warning
     }
 
@@ -1311,12 +1318,14 @@ final class ScanScheduler: ObservableObject {
     }
 
     private func syncConfigFromScanDirectories() {
-        config.enabledBuiltInPaths = Set(
-            config.enabledBuiltInPaths
+        var updatedConfig = config
+        updatedConfig.enabledBuiltInPaths = Set(
+            updatedConfig.enabledBuiltInPaths
                 .map(ScanLocationProvider.normalizePersistedPath)
                 .filter(ScanLocationProvider.isBuiltInPath)
         )
-        config.customPaths = scanDirectories.map(\.path).sorted()
+        updatedConfig.customPaths = scanDirectories.map(\.path).sorted()
+        config = updatedConfig
     }
 
     private func defaultScanConfig() -> ScanConfig {

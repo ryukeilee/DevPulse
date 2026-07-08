@@ -1323,7 +1323,7 @@ struct SettingsView: View {
 
     private func setBuiltInDirectoryEnabled(_ path: String, enabled: Bool) {
         let normalized = ScanLocationProvider.normalizePersistedPath(path)
-        let wasEnabled = scheduler.config.enabledBuiltInPaths.contains(normalized)
+        let wasEnabled = scheduler.isBuiltInEnabled(path: normalized)
         guard wasEnabled != enabled else {
             refreshBuiltInToggles()
             return
@@ -1469,12 +1469,12 @@ struct SettingsView: View {
 
                     VStack(alignment: .trailing, spacing: 8) {
                         if exists {
-                            Toggle("", isOn: $builtInToggles[index].isEnabled)
+                            Toggle("", isOn: Binding(
+                                get: { scheduler.isBuiltInEnabled(path: toggle.path) },
+                                set: { setBuiltInDirectoryEnabled(toggle.path, enabled: $0) }
+                            ))
                                 .labelsHidden()
                                 .toggleStyle(.switch)
-                                .onChange(of: builtInToggles[index].isEnabled) { _, newValue in
-                                    setBuiltInDirectoryEnabled(toggle.path, enabled: newValue)
-                                }
                         } else {
                             Button("创建并启用") {
                                 createBuiltInDirectoryAndEnable(toggle.path)
