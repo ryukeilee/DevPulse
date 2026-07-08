@@ -426,18 +426,27 @@ enum ActivityTimelineBuilder {
 enum WidgetPrioritySummaryBuilder {
     static func build(feed: ActivityTimelineFeed,
                       trustAssessment: SnapshotTrustAssessment?) -> WidgetPrioritySummary {
+        if trustAssessment == nil, feed.state == .neverScanned {
+            return WidgetPrioritySummary(
+                title: WidgetRefreshCopy.waitingFirstRefreshTitle,
+                message: "打开 DevPulse 执行一次刷新",
+                readinessLevel: nil,
+                auxiliary: nil
+            )
+        }
+
         switch trustAssessment?.state {
         case .stale, .expired:
             return WidgetPrioritySummary(
-                title: "数据可能已过期",
-                message: "刷新后再判断是否适合提交",
+                title: WidgetRefreshCopy.waitingRefreshTitle,
+                message: WidgetRefreshCopy.waitingRefreshSummary,
                 readinessLevel: nil,
                 auxiliary: nil
             )
         case .unknown, .failed, .none:
             return WidgetPrioritySummary(
-                title: "状态未知",
-                message: "打开 DevPulse 查看 Diagnostics",
+                title: WidgetRefreshCopy.pendingConfirmationTitle,
+                message: WidgetRefreshCopy.pendingConfirmationSummary,
                 readinessLevel: nil,
                 auxiliary: nil
             )
@@ -448,7 +457,7 @@ enum WidgetPrioritySummaryBuilder {
         switch feed.state {
         case .neverScanned:
             return WidgetPrioritySummary(
-                title: "状态未知",
+                title: WidgetRefreshCopy.waitingFirstRefreshTitle,
                 message: "打开 DevPulse 执行一次刷新",
                 readinessLevel: nil,
                 auxiliary: nil
@@ -684,6 +693,35 @@ struct SnapshotTrustAssessment: Equatable {
 
     var isError: Bool {
         state != .fresh
+    }
+}
+
+enum WidgetRefreshCopy {
+    static let waitingFirstRefreshTitle = "等待首次刷新"
+    static let waitingRefreshTitle = "等待刷新"
+    static let pendingConfirmationTitle = "状态待确认"
+
+    static let waitingFirstRefreshDetail = "打开 DevPulse 执行 Refresh Data 或 Rescan Now"
+    static let pendingConfirmationDetail = "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照"
+    static let waitingRefreshSummary = "先刷新后再判断是否适合提交"
+    static let pendingConfirmationSummary = "打开 DevPulse 查看 Diagnostics"
+
+    static func waitingRefreshDetail(from trustAssessment: SnapshotTrustAssessment?) -> String {
+        if let trustAssessment {
+            return "\(trustAssessment.detail)。打开 DevPulse 执行 Refresh Data"
+        }
+        return "打开 DevPulse 执行 Refresh Data，再判断当前状态"
+    }
+
+    static func diagnosticsLabel(for trustAssessment: SnapshotTrustAssessment) -> String {
+        switch trustAssessment.state {
+        case .fresh:
+            return trustAssessment.title
+        case .stale, .expired:
+            return waitingRefreshTitle
+        case .unknown, .failed:
+            return pendingConfirmationTitle
+        }
     }
 }
 
@@ -1436,7 +1474,7 @@ enum DiagnosticsOverviewBuilder {
             DiagnosticsStatusItem(
                 id: "widget-trust",
                 title: "Widget 数据可信度",
-                value: widgetTrust.title,
+                value: WidgetRefreshCopy.diagnosticsLabel(for: widgetTrust),
                 detail: widgetTrust.basis,
                 nextStep: widgetTrust.isError ? "如果 Widget 文案看起来不对，优先检查这里的时间戳和读取结果。" : nil,
                 severity: trustSeverity
@@ -1868,7 +1906,7 @@ enum WidgetDataTrustBuilder {
             DiagnosticsStatusItem(
                 id: "widget-trust-freshness",
                 title: "最新程度",
-                value: widgetTrust.title,
+                value: freshnessLabel(for: widgetTrust),
                 detail: widgetTrust.basis,
                 nextStep: widgetTrust.state == .fresh ? nil : "如果时间已经过旧，优先执行 Refresh Data；仍异常再检查 Widget reload 和签名配置。",
                 severity: freshnessSeverity
@@ -1930,13 +1968,13 @@ enum WidgetDataTrustBuilder {
                 diagnostics: diagnostics,
                 repositories: repositories
             ) {
-                return "Widget 尚未生成快照"
+                return "Widget 正等待首次刷新"
             }
             switch widgetTrust.state {
             case .stale, .expired:
-                return "当前 Widget 数据可能过期"
+                return "当前 Widget 正等待刷新"
             case .unknown, .failed:
-                return "当前无法确认 Widget 数据是否可信"
+                return "当前 Widget 状态待确认"
             case .fresh:
                 return "当前 Widget 数据基本可信"
             }
@@ -1966,9 +2004,16 @@ enum WidgetDataTrustBuilder {
                 diagnostics: diagnostics,
                 repositories: repositories
             ) {
-                return "共享快照还没有生成，Widget 会提示先执行 Rescan Now；这是首次启动或清空快照后的正常待初始化状态。"
+                return "共享快照还没有生成，Widget 当前正等待首次刷新；这是首次启动或清空快照后的正常待初始化状态。"
             }
-            return widgetTrust.detail + "。共享链路基本正常，但你应先刷新后再判断 Widget 里的仓库状态。"
+            switch widgetTrust.state {
+            case .stale, .expired:
+                return "\(WidgetRefreshCopy.waitingRefreshDetail(from: widgetTrust))。共享链路基本正常，但你应先刷新后再判断 Widget 里的仓库状态。"
+            case .unknown, .failed:
+                return "当前还无法确认 Widget 数据是否已经追上主 App。先查看 Diagnostics，再决定是否需要重写共享快照。"
+            case .fresh:
+                return widgetTrust.detail + "。共享链路基本正常，但你应先刷新后再判断 Widget 里的仓库状态。"
+            }
         case .error:
             if !diagnostics.appGroupAvailable {
                 return "主 App 还拿不到共享容器，Widget 无法和 App 对齐同一份数据。"
@@ -2069,7 +2114,7 @@ enum WidgetDataTrustBuilder {
             return ["当前可以信任 Widget 数据；如果桌面没有立即变化，等待 macOS 刷新时间线即可。"]
         case .stale, .expired:
             return [
-                "先执行 Refresh Data，再重新判断 Widget 上的仓库状态。",
+                "Widget 当前正等待刷新；先执行 Refresh Data，再重新判断仓库状态。",
                 "如果刷新后仍然过期，检查 Widget reload requested 是否更新。",
                 "如桌面仍不变，可移除旧 Widget 后重新添加。"
             ]
@@ -2191,6 +2236,17 @@ enum WidgetDataTrustBuilder {
             return .warning
         case .failed:
             return .error
+        }
+    }
+
+    private static func freshnessLabel(for widgetTrust: SnapshotTrustAssessment) -> String {
+        switch widgetTrust.state {
+        case .fresh:
+            return widgetTrust.title
+        case .stale, .expired:
+            return WidgetRefreshCopy.waitingRefreshTitle
+        case .unknown, .failed:
+            return WidgetRefreshCopy.pendingConfirmationTitle
         }
     }
 

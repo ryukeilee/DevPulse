@@ -190,9 +190,9 @@ struct CommitReadinessEngineTests {
             )
         )
 
-        #expect(summary.title == "数据可能已过期")
+        #expect(summary.title == WidgetRefreshCopy.waitingRefreshTitle)
         #expect(summary.readinessLevel == nil)
-        #expect(summary.message == "刷新后再判断是否适合提交")
+        #expect(summary.message == WidgetRefreshCopy.waitingRefreshSummary)
     }
 
     @Test func widgetPrioritySummaryFallsBackToUnknownTrust() {
@@ -209,9 +209,32 @@ struct CommitReadinessEngineTests {
             )
         )
 
-        #expect(summary.title == "状态未知")
+        #expect(summary.title == WidgetRefreshCopy.pendingConfirmationTitle)
         #expect(summary.readinessLevel == nil)
-        #expect(summary.message == "打开 DevPulse 查看 Diagnostics")
+        #expect(summary.message == WidgetRefreshCopy.pendingConfirmationSummary)
+    }
+
+    @Test func widgetPrioritySummaryUsesWaitingFirstRefreshForNeverScanned() {
+        let summary = WidgetPrioritySummaryBuilder.build(
+            feed: ActivityTimelineFeed(state: .neverScanned, items: []),
+            trustAssessment: nil
+        )
+
+        #expect(summary.title == WidgetRefreshCopy.waitingFirstRefreshTitle)
+        #expect(summary.message == "打开 DevPulse 执行一次刷新")
+    }
+
+    @Test func widgetRefreshCopyBuildsConsistentWaitingRefreshDetail() {
+        let detail = WidgetRefreshCopy.waitingRefreshDetail(
+            from: SnapshotTrustAssessment(
+                state: .stale,
+                title: "数据可能已过期",
+                detail: "最近一次更新在 12 分钟前更新",
+                basis: "test"
+            )
+        )
+
+        #expect(detail == "最近一次更新在 12 分钟前更新。打开 DevPulse 执行 Refresh Data")
     }
 
     @Test func widgetPrioritySummaryKeepsGitReadFailureVisibleWhenFresh() {
@@ -364,7 +387,7 @@ struct CommitReadinessEngineTests {
 
         let widgetSection = try #require(overview.sections.first(where: { $0.id == "widget-state" }))
         #expect(widgetSection.severity == .warning)
-        #expect(widgetSection.items.contains(where: { $0.title == "Widget 数据可信度" && $0.value == "数据可能已过期" }) == true)
+        #expect(widgetSection.items.contains(where: { $0.title == "Widget 数据可信度" && $0.value == WidgetRefreshCopy.waitingRefreshTitle }) == true)
     }
 
     @Test func diagnosticsOverviewHighlightsGitReadFailure() throws {
@@ -450,7 +473,7 @@ struct CommitReadinessEngineTests {
         )
 
         #expect(trust.severity == .warning)
-        #expect(trust.headline == "Widget 尚未生成快照")
+        #expect(trust.headline == "Widget 正等待首次刷新")
         #expect(trust.summary.contains("首次启动"))
         #expect(trust.nextSteps.first?.contains("Rescan Now") == true)
         #expect(trust.primaryAction.kind == .rescan)
@@ -614,7 +637,7 @@ struct CommitReadinessEngineTests {
         )
 
         #expect(trust.severity == .warning)
-        #expect(trust.headline == "当前 Widget 数据可能过期")
+        #expect(trust.headline == "当前 Widget 正等待刷新")
         #expect(trust.nextSteps.first?.contains("Refresh Data") == true)
         #expect(trust.primaryAction.kind == .refreshData)
         #expect(trust.primaryAction.title == "Refresh Data")
@@ -852,7 +875,7 @@ struct CommitReadinessEngineTests {
             lastScanAt: Date(timeIntervalSince1970: 1_718_000_000),
             diagnostics: diagnostics,
             widgetTrust: WidgetDataTrustModel(
-                headline: "当前 Widget 数据可能过期",
+                headline: "当前 Widget 正等待刷新",
                 summary: "桌面 Widget 看到的数据可能不是最新一轮扫描结果。",
                 severity: .warning,
                 evidence: [],

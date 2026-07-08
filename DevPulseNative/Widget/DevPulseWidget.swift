@@ -853,8 +853,8 @@ private struct SmallGlanceWidgetView: View {
             placeholderContent
         case .noSnapshot:
             shortState(
-                title: "尚未生成快照",
-                detail: "打开 DevPulse 执行 Refresh Data 或 Rescan Now",
+                title: WidgetRefreshCopy.waitingFirstRefreshTitle,
+                detail: WidgetRefreshCopy.waitingFirstRefreshDetail,
                 icon: "arrow.triangle.2.circlepath"
             )
         case .loadFailed:
@@ -875,20 +875,20 @@ private struct SmallGlanceWidgetView: View {
             readyContent
         case .stale, .expired:
             shortState(
-                title: "数据可能已过期",
-                detail: staleDetail,
+                title: WidgetRefreshCopy.waitingRefreshTitle,
+                detail: WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment),
                 icon: "clock.badge.exclamationmark"
             )
         case .unknown, .failed:
             shortState(
-                title: "状态未知",
-                detail: "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照",
+                title: WidgetRefreshCopy.pendingConfirmationTitle,
+                detail: WidgetRefreshCopy.pendingConfirmationDetail,
                 icon: "questionmark.circle"
             )
         case .none:
             shortState(
-                title: "状态未知",
-                detail: "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照",
+                title: WidgetRefreshCopy.pendingConfirmationTitle,
+                detail: WidgetRefreshCopy.pendingConfirmationDetail,
                 icon: "questionmark.circle"
             )
         }
@@ -930,13 +930,6 @@ private struct SmallGlanceWidgetView: View {
     private func shortState(title: String, detail: String?, icon: String) -> some View {
         WidgetStateBlock(title: title, detail: detail, icon: icon, prominent: true)
     }
-
-    private var staleDetail: String {
-        if let trustAssessment = entry.trustAssessment {
-            return "\(trustAssessment.detail)。打开 DevPulse 执行 Refresh Data"
-        }
-        return "打开 DevPulse 执行 Refresh Data，再判断当前状态"
-    }
 }
 
 private struct MediumGlanceWidgetView: View {
@@ -964,7 +957,14 @@ private struct MediumGlanceWidgetView: View {
         if case .ready = entry.loadState,
            let trustAssessment = entry.trustAssessment,
            trustAssessment.state != .fresh {
-            return trustAssessment.title
+            switch trustAssessment.state {
+            case .stale, .expired:
+                return WidgetRefreshCopy.waitingRefreshTitle
+            case .unknown, .failed:
+                return WidgetRefreshCopy.pendingConfirmationTitle
+            case .fresh:
+                break
+            }
         }
 
         guard
@@ -998,8 +998,8 @@ private struct MediumGlanceWidgetView: View {
             placeholderRows
         case .noSnapshot:
             shortState(
-                title: "尚未生成快照",
-                detail: "打开 DevPulse 执行 Refresh Data 或 Rescan Now",
+                title: WidgetRefreshCopy.waitingFirstRefreshTitle,
+                detail: WidgetRefreshCopy.waitingFirstRefreshDetail,
                 icon: "arrow.triangle.2.circlepath"
             )
         case .loadFailed:
@@ -1020,20 +1020,20 @@ private struct MediumGlanceWidgetView: View {
             readyContent
         case .stale, .expired:
             shortState(
-                title: "数据可能已过期",
-                detail: staleDetail,
+                title: WidgetRefreshCopy.waitingRefreshTitle,
+                detail: WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment),
                 icon: "clock.badge.exclamationmark"
             )
         case .unknown, .failed:
             shortState(
-                title: "状态未知",
-                detail: "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照",
+                title: WidgetRefreshCopy.pendingConfirmationTitle,
+                detail: WidgetRefreshCopy.pendingConfirmationDetail,
                 icon: "questionmark.circle"
             )
         case .none:
             shortState(
-                title: "状态未知",
-                detail: "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照",
+                title: WidgetRefreshCopy.pendingConfirmationTitle,
+                detail: WidgetRefreshCopy.pendingConfirmationDetail,
                 icon: "questionmark.circle"
             )
         }
@@ -1085,13 +1085,6 @@ private struct MediumGlanceWidgetView: View {
     private var footer: some View {
         WidgetFooterBar(text: entry.footerText, compact: true)
     }
-
-    private var staleDetail: String {
-        if let trustAssessment = entry.trustAssessment {
-            return "\(trustAssessment.detail)。打开 DevPulse 执行 Refresh Data"
-        }
-        return "打开 DevPulse 执行 Refresh Data，再判断当前状态"
-    }
 }
 
 private struct LargeGlanceWidgetView: View {
@@ -1119,7 +1112,14 @@ private struct LargeGlanceWidgetView: View {
         if case .ready = entry.loadState,
            let trustAssessment = entry.trustAssessment,
            trustAssessment.state != .fresh {
-            return trustAssessment.title
+            switch trustAssessment.state {
+            case .stale, .expired:
+                return WidgetRefreshCopy.waitingRefreshTitle
+            case .unknown, .failed:
+                return WidgetRefreshCopy.pendingConfirmationTitle
+            case .fresh:
+                break
+            }
         }
 
         guard
@@ -1149,8 +1149,8 @@ private struct LargeGlanceWidgetView: View {
             placeholderRows
         case .noSnapshot:
             shortState(
-                title: "尚未生成快照",
-                detail: "打开 DevPulse 执行 Refresh Data 或 Rescan Now",
+                title: WidgetRefreshCopy.waitingFirstRefreshTitle,
+                detail: WidgetRefreshCopy.waitingFirstRefreshDetail,
                 icon: "arrow.triangle.2.circlepath"
             )
         case .loadFailed:
@@ -1171,20 +1171,20 @@ private struct LargeGlanceWidgetView: View {
             readyContent
         case .stale, .expired:
             shortState(
-                title: "数据可能已过期",
-                detail: staleDetail,
+                title: WidgetRefreshCopy.waitingRefreshTitle,
+                detail: WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment),
                 icon: "clock.badge.exclamationmark"
             )
         case .unknown, .failed:
             shortState(
-                title: "状态未知",
-                detail: "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照",
+                title: WidgetRefreshCopy.pendingConfirmationTitle,
+                detail: WidgetRefreshCopy.pendingConfirmationDetail,
                 icon: "questionmark.circle"
             )
         case .none:
             shortState(
-                title: "状态未知",
-                detail: "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照",
+                title: WidgetRefreshCopy.pendingConfirmationTitle,
+                detail: WidgetRefreshCopy.pendingConfirmationDetail,
                 icon: "questionmark.circle"
             )
         }
@@ -1233,13 +1233,6 @@ private struct LargeGlanceWidgetView: View {
     @ViewBuilder
     private var footer: some View {
         WidgetFooterBar(text: entry.footerText)
-    }
-
-    private var staleDetail: String {
-        if let trustAssessment = entry.trustAssessment {
-            return "\(trustAssessment.detail)。打开 DevPulse 执行 Refresh Data"
-        }
-        return "打开 DevPulse 执行 Refresh Data，再判断当前状态"
     }
 }
 
@@ -1473,15 +1466,15 @@ private struct SimpleSmallGlanceWidgetView: View {
         case .placeholder:
             return ("正在读取共享快照", nil, "clock")
         case .noSnapshot:
-            return ("尚未生成快照", "打开 DevPulse 执行 Refresh Data 或 Rescan Now", "arrow.triangle.2.circlepath")
+            return (WidgetRefreshCopy.waitingFirstRefreshTitle, WidgetRefreshCopy.waitingFirstRefreshDetail, "arrow.triangle.2.circlepath")
         case .loadFailed:
             return (entry.loadFailure?.title ?? "共享快照读取失败", entry.loadFailure?.detail, entry.loadFailure?.icon ?? "exclamationmark.triangle.fill")
         case .ready:
             switch entry.trustAssessment?.state {
             case .stale, .expired:
-                return ("数据可能已过期", entry.trustAssessment?.detail, "clock.badge.exclamationmark")
+                return (WidgetRefreshCopy.waitingRefreshTitle, WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment), "clock.badge.exclamationmark")
             case .unknown, .failed, .none:
-                return ("状态未知", "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照", "questionmark.circle")
+                return (WidgetRefreshCopy.pendingConfirmationTitle, WidgetRefreshCopy.pendingConfirmationDetail, "questionmark.circle")
             case .fresh:
                 return nil
             }
@@ -1529,7 +1522,15 @@ private struct SimpleMediumGlanceWidgetView: View {
 
     private var mediumTrailingText: String? {
         guard case .ready = entry.loadState else { return nil }
-        return entry.trustAssessment?.state == .fresh ? nil : entry.trustAssessment?.title
+        guard let state = entry.trustAssessment?.state, state != .fresh else { return nil }
+        switch state {
+        case .stale, .expired:
+            return WidgetRefreshCopy.waitingRefreshTitle
+        case .unknown, .failed:
+            return WidgetRefreshCopy.pendingConfirmationTitle
+        case .fresh:
+            return nil
+        }
     }
 
     private var fallbackState: (title: String, detail: String?, icon: String)? {
@@ -1537,15 +1538,15 @@ private struct SimpleMediumGlanceWidgetView: View {
         case .placeholder:
             return ("正在读取共享快照", nil, "clock")
         case .noSnapshot:
-            return ("尚未生成快照", "打开 DevPulse 执行 Refresh Data 或 Rescan Now", "arrow.triangle.2.circlepath")
+            return (WidgetRefreshCopy.waitingFirstRefreshTitle, WidgetRefreshCopy.waitingFirstRefreshDetail, "arrow.triangle.2.circlepath")
         case .loadFailed:
             return (entry.loadFailure?.title ?? "共享快照读取失败", entry.loadFailure?.detail, entry.loadFailure?.icon ?? "exclamationmark.triangle.fill")
         case .ready:
             switch entry.trustAssessment?.state {
             case .stale, .expired:
-                return ("数据可能已过期", entry.trustAssessment?.detail, "clock.badge.exclamationmark")
+                return (WidgetRefreshCopy.waitingRefreshTitle, WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment), "clock.badge.exclamationmark")
             case .unknown, .failed, .none:
-                return ("状态未知", "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照", "questionmark.circle")
+                return (WidgetRefreshCopy.pendingConfirmationTitle, WidgetRefreshCopy.pendingConfirmationDetail, "questionmark.circle")
             case .fresh:
                 return prioritizedItems.isEmpty ? ("没有找到仓库", "检查扫描目录后重新刷新", "folder") : nil
             }
@@ -1595,7 +1596,15 @@ private struct SimpleLargeGlanceWidgetView: View {
 
     private var largeTrailingText: String? {
         guard case .ready = entry.loadState else { return nil }
-        return entry.trustAssessment?.state == .fresh ? nil : entry.trustAssessment?.title
+        guard let state = entry.trustAssessment?.state, state != .fresh else { return nil }
+        switch state {
+        case .stale, .expired:
+            return WidgetRefreshCopy.waitingRefreshTitle
+        case .unknown, .failed:
+            return WidgetRefreshCopy.pendingConfirmationTitle
+        case .fresh:
+            return nil
+        }
     }
 
     private var fallbackState: (title: String, detail: String?, icon: String)? {
@@ -1603,15 +1612,15 @@ private struct SimpleLargeGlanceWidgetView: View {
         case .placeholder:
             return ("正在读取共享快照", nil, "clock")
         case .noSnapshot:
-            return ("尚未生成快照", "打开 DevPulse 执行 Refresh Data 或 Rescan Now", "arrow.triangle.2.circlepath")
+            return (WidgetRefreshCopy.waitingFirstRefreshTitle, WidgetRefreshCopy.waitingFirstRefreshDetail, "arrow.triangle.2.circlepath")
         case .loadFailed:
             return (entry.loadFailure?.title ?? "共享快照读取失败", entry.loadFailure?.detail, entry.loadFailure?.icon ?? "exclamationmark.triangle.fill")
         case .ready:
             switch entry.trustAssessment?.state {
             case .stale, .expired:
-                return ("数据可能已过期", entry.trustAssessment?.detail, "clock.badge.exclamationmark")
+                return (WidgetRefreshCopy.waitingRefreshTitle, WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment), "clock.badge.exclamationmark")
             case .unknown, .failed, .none:
-                return ("状态未知", "打开 DevPulse 查看 Diagnostics，并执行 Refresh Data 重写共享快照", "questionmark.circle")
+                return (WidgetRefreshCopy.pendingConfirmationTitle, WidgetRefreshCopy.pendingConfirmationDetail, "questionmark.circle")
             case .fresh:
                 return prioritizedItems.isEmpty ? ("没有找到仓库", "检查扫描目录后重新刷新", "folder") : nil
             }
@@ -1625,12 +1634,19 @@ private extension WidgetEntry {
         case .placeholder:
             return "正在读取共享快照"
         case .noSnapshot:
-            return "最近刷新: 尚未生成快照"
+            return "最近刷新: \(WidgetRefreshCopy.waitingFirstRefreshTitle)"
         case .loadFailed:
             return loadFailure?.footerText ?? "最近刷新: snapshot 读取失败"
         case .ready:
             if let trustAssessment, trustAssessment.state != .fresh {
-                return trustAssessment.detail
+                switch trustAssessment.state {
+                case .stale, .expired:
+                    return "\(WidgetRefreshCopy.waitingRefreshTitle) · \(trustAssessment.detail)"
+                case .unknown, .failed:
+                    return "最近刷新: \(WidgetRefreshCopy.pendingConfirmationTitle)"
+                case .fresh:
+                    break
+                }
             }
 
             guard let snapshot else {
@@ -1661,7 +1677,7 @@ private extension WidgetSnapshotLoadError {
         case .appGroupUnavailable:
             return "共享容器不可用"
         case .snapshotMissing:
-            return "尚未生成快照"
+            return WidgetRefreshCopy.waitingFirstRefreshTitle
         case .readFailed:
             return "共享快照读取失败"
         case .decodeFailed:
@@ -1676,7 +1692,7 @@ private extension WidgetSnapshotLoadError {
         case .appGroupUnavailable:
             return "检查 App 与 Widget 是否使用同一 Team / App Group，然后打开 Diagnostics"
         case .snapshotMissing:
-            return "打开 DevPulse 执行 Refresh Data 或 Rescan Now"
+            return WidgetRefreshCopy.waitingFirstRefreshDetail
         case .readFailed:
             return "打开 Diagnostics 检查 snapshot 路径、权限和共享容器状态"
         case .decodeFailed:
@@ -1706,7 +1722,7 @@ private extension WidgetSnapshotLoadError {
         case .appGroupUnavailable:
             return "最近刷新: 共享容器不可用"
         case .snapshotMissing:
-            return "最近刷新: 尚未生成快照"
+            return "最近刷新: \(WidgetRefreshCopy.waitingFirstRefreshTitle)"
         case .readFailed:
             return "最近刷新: snapshot 读取失败"
         case .decodeFailed:
