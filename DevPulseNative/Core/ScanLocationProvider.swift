@@ -102,6 +102,14 @@ enum ScanLocationProvider {
         expandAll(builtInLocations)
     }
 
+    static var builtInAbsoluteSet: Set<String> {
+        Set(builtInAbsolute)
+    }
+
+    static func isBuiltInPath(_ path: String) -> Bool {
+        builtInAbsoluteSet.contains(normalizePersistedPath(path))
+    }
+
     /// Create toggle objects for all built-in locations.
     static func builtInToggles(_ enabledDefaults: Set<String>? = nil) -> [ScanLocationToggle] {
         let enabled = enabledDefaults ?? Set(builtInAbsolute)

@@ -40,6 +40,9 @@ struct SettingsView: View {
                 .onChange(of: scheduler.scanDirectories) { _, _ in
                     refreshBuiltInToggles()
                 }
+                .onChange(of: scheduler.config.enabledBuiltInPaths) { _, _ in
+                    refreshBuiltInToggles()
+                }
                 .onChange(of: scrollTarget) { _, _ in
                     scrollToTargetIfNeeded(using: proxy)
                 }
@@ -1287,8 +1290,7 @@ struct SettingsView: View {
     }
 
     private func refreshBuiltInToggles() {
-        let enabledPaths = Set(scheduler.scanDirectories.map(\.path))
-        builtInToggles = ScanLocationProvider.builtInToggles(enabledPaths)
+        builtInToggles = ScanLocationProvider.builtInToggles(scheduler.config.enabledBuiltInPaths)
     }
 
     private func chooseDirectory() {
@@ -1321,7 +1323,7 @@ struct SettingsView: View {
 
     private func setBuiltInDirectoryEnabled(_ path: String, enabled: Bool) {
         let normalized = ScanLocationProvider.normalizePersistedPath(path)
-        let wasEnabled = scheduler.scanDirectories.contains { $0.path == normalized }
+        let wasEnabled = scheduler.config.enabledBuiltInPaths.contains(normalized)
         guard wasEnabled != enabled else {
             refreshBuiltInToggles()
             return
@@ -1455,68 +1457,38 @@ struct SettingsView: View {
             let exists = directoryExists(toggle.path)
 
             VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .top, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text(metadata.title)
-                                .font(.caption.weight(.semibold))
-                            if exists {
-                                Text("可用")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.secondary.opacity(0.08))
-                                    .cornerRadius(6)
-                            } else {
-                                Text("未找到")
-                                    .font(.caption2)
-                                    .foregroundColor(.red)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.red.opacity(0.08))
-                                    .cornerRadius(6)
-                            }
-                        }
-                        Text(metadata.subtitle)
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                        Text(compactHomeRelativePath(toggle.path))
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        if !exists {
-                            Text("路径不存在")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    Spacer(minLength: 12)
-                    if exists {
-                        Toggle("", isOn: $builtInToggles[index].isEnabled)
-                            .labelsHidden()
-                            .toggleStyle(.switch)
-                            .onChange(of: builtInToggles[index].isEnabled) { _, newValue in
-                                setBuiltInDirectoryEnabled(toggle.path, enabled: newValue)
-                            }
-                    }
-                }
+                HStack(alignment: .top, spacing: 12) {
+                    defaultScanDirectoryDetails(
+                        title: metadata.title,
+                        subtitle: metadata.subtitle,
+                        path: toggle.path,
+                        exists: exists
+                    )
 
-                if !exists {
-                    HStack(spacing: 8) {
-                        Button("创建并启用") {
-                            createBuiltInDirectoryAndEnable(toggle.path)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
+                    Spacer(minLength: 8)
 
-                        Menu("更多") {
-                            Button("选择其他位置") {
-                                chooseDirectoryAndRefresh()
+                    VStack(alignment: .trailing, spacing: 8) {
+                        if exists {
+                            Toggle("", isOn: $builtInToggles[index].isEnabled)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .onChange(of: builtInToggles[index].isEnabled) { _, newValue in
+                                    setBuiltInDirectoryEnabled(toggle.path, enabled: newValue)
+                                }
+                        } else {
+                            Button("创建并启用") {
+                                createBuiltInDirectoryAndEnable(toggle.path)
                             }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+
+                            Menu("更多") {
+                                Button("选择其他位置") {
+                                    chooseDirectoryAndRefresh()
+                                }
+                            }
+                            .controlSize(.small)
                         }
-                        .controlSize(.small)
                     }
                 }
             }
@@ -1526,32 +1498,17 @@ struct SettingsView: View {
     private func missingDefaultScanRow(for path: String) -> some View {
         let metadata = builtInDirectoryMetadata(for: path)
 
-        return HStack(alignment: .top, spacing: 8) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(metadata.title)
-                        .font(.caption.weight(.semibold))
-                    Text("未找到")
-                        .font(.caption2)
-                        .foregroundColor(.red)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.red.opacity(0.08))
-                        .cornerRadius(6)
-                }
-                Text(compactHomeRelativePath(path))
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text("路径不存在")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
+        return HStack(alignment: .top, spacing: 12) {
+            defaultScanDirectoryDetails(
+                title: metadata.title,
+                subtitle: metadata.subtitle,
+                path: path,
+                exists: false
+            )
 
-            Spacer(minLength: 12)
+            Spacer(minLength: 8)
 
-            HStack(spacing: 6) {
+            VStack(alignment: .trailing, spacing: 8) {
                 Button("创建并启用") {
                     createBuiltInDirectoryAndEnable(path)
                 }
@@ -1566,6 +1523,43 @@ struct SettingsView: View {
                 .controlSize(.small)
             }
         }
+    }
+
+    private func defaultScanDirectoryDetails(title: String,
+                                             subtitle: String,
+                                             path: String,
+                                             exists: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                defaultScanStatusBadge(exists: exists)
+            }
+            Text(subtitle)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            Text(compactHomeRelativePath(path))
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if !exists {
+                Text("路径不存在")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func defaultScanStatusBadge(exists: Bool) -> some View {
+        Text(exists ? "可用" : "未找到")
+            .font(.caption2)
+            .foregroundColor(exists ? .secondary : .red)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(exists ? Color.secondary.opacity(0.08) : Color.red.opacity(0.08))
+            .cornerRadius(6)
     }
 
     private func builtInDirectoryMetadata(for path: String) -> (title: String, subtitle: String) {

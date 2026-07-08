@@ -333,6 +333,7 @@ final class ScanScheduler: ObservableObject {
     private var lastSystemSleepAt: Date?
     private var pendingWakeRefresh = false
     private var pendingWakeRefreshForceRepositoryDiscovery = false
+    private var configLoadedFromPersistence = false
 
     // Config persistence
     private let configKey = "scan_config_json"
@@ -686,19 +687,13 @@ final class ScanScheduler: ObservableObject {
     }
 
     private func scanRoots() -> (roots: [String], warning: String?) {
+        let enabledBuiltInRoots = ScanLocationProvider.builtInLocations
+            .map(ScanLocationProvider.expandTilde)
+            .filter { config.enabledBuiltInPaths.contains($0) }
+            .filter { isAccessibleScanRoot($0) && !isAppContainerPath($0) }
         let configuredDirectories = scanDirectories
 
-        if configuredDirectories.isEmpty {
-            let defaultRoots = ScanLocationProvider.defaultDiscoveryRoots()
-            let warning: String? = defaultRoots.isEmpty
-                ? "未发现可用的默认扫描目录。请在 Settings 添加真实的仓库根目录后再刷新。"
-                : nil
-            diagnostics.scanRoots = defaultRoots
-            diagnostics.scanRootWarnings = warning.map { [$0] } ?? []
-            return (defaultRoots, warning)
-        }
-
-        var accessibleRoots: [String] = []
+        var accessibleRoots = enabledBuiltInRoots
         var inaccessibleCount = 0
         var containerPathCount = 0
 
@@ -732,8 +727,8 @@ final class ScanScheduler: ObservableObject {
 
         let deduped = Array(Set(accessibleRoots)).sorted()
         let warning: String?
-        if deduped.isEmpty && configuredDirectories.isEmpty {
-            warning = "No scan roots configured. Add a directory in Settings."
+        if deduped.isEmpty {
+            warning = "未发现可用的扫描目录。请在 Settings 启用一个默认目录或添加真实的仓库根目录后再刷新。"
         } else if containerPathCount > 0 {
             warning = "检测到沙盒容器路径，已忽略。请把扫描目录改回真实用户目录。"
         } else if inaccessibleCount > 0 {
@@ -1197,10 +1192,12 @@ final class ScanScheduler: ObservableObject {
         guard let data = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
             .data(forKey: configKey),
               let decoded = try? JSONDecoder().decode(ScanConfig.self, from: data) else {
-            config = .default
+            configLoadedFromPersistence = false
+            config = defaultScanConfig()
             persistConfig()
             return
         }
+        configLoadedFromPersistence = true
         config = normalizeConfig(decoded)
         persistConfig()
 
@@ -1212,14 +1209,32 @@ final class ScanScheduler: ObservableObject {
     }
 
     private func loadScanDirectories() {
-            if let data = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+        let configuredBuiltIns = config.enabledBuiltInPaths
+            .map(ScanLocationProvider.normalizePersistedPath)
+        if let data = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
             .data(forKey: scanDirectoriesKey),
            let decoded = try? JSONDecoder().decode([CustomScanDirectory].self, from: data) {
-            scanDirectories = sanitizeScanDirectories(decoded)
+            let sanitized = sanitizeScanDirectories(decoded)
+            let builtInPaths = Set(sanitized.map(\.path).filter(ScanLocationProvider.isBuiltInPath))
+            scanDirectories = sanitized.filter { !ScanLocationProvider.isBuiltInPath($0.path) }
+            if !configLoadedFromPersistence {
+                config.enabledBuiltInPaths = sanitized.isEmpty ? ScanLocationProvider.builtInAbsoluteSet : builtInPaths
+            } else if sanitized.isEmpty && configuredBuiltIns.isEmpty && config.customPaths.isEmpty {
+                config.enabledBuiltInPaths = ScanLocationProvider.builtInAbsoluteSet
+            } else if configuredBuiltIns.isEmpty {
+                config.enabledBuiltInPaths = builtInPaths
+            } else {
+                config.enabledBuiltInPaths = Set(configuredBuiltIns)
+            }
         } else {
             scanDirectories = sanitizeScanDirectories(
                 config.customPaths.map { CustomScanDirectory(path: $0, bookmarkData: nil) }
             )
+            if configuredBuiltIns.isEmpty && config.customPaths.isEmpty {
+                config.enabledBuiltInPaths = ScanLocationProvider.builtInAbsoluteSet
+            } else {
+                config.enabledBuiltInPaths = Set(configuredBuiltIns)
+            }
         }
 
         syncConfigFromScanDirectories()
@@ -1230,16 +1245,22 @@ final class ScanScheduler: ObservableObject {
     // MARK: - Enabled toggles
 
     func toggleBuiltIn(path: String, enabled: Bool) {
+        let normalized = ScanLocationProvider.normalizePersistedPath(path)
         if enabled {
-            addCustomPath(path)
+            config.enabledBuiltInPaths.insert(normalized)
         } else {
-            removeCustomPath(path)
+            config.enabledBuiltInPaths.remove(normalized)
         }
+        scanRootAccessWarning = scanRoots().warning
     }
 
     func addCustomPath(_ path: String) {
         let expanded = ScanLocationProvider.normalizePersistedPath(path)
         guard !expanded.isEmpty else { return }
+        guard !ScanLocationProvider.isBuiltInPath(expanded) else {
+            toggleBuiltIn(path: expanded, enabled: true)
+            return
+        }
         guard !isAppContainerPath(expanded) else {
             scanRootAccessWarning = "不能把 DevPulse 自己的沙盒容器当作扫描目录，请选择真实的用户目录。"
             return
@@ -1282,15 +1303,28 @@ final class ScanScheduler: ObservableObject {
         var normalized = config
         let existingRoots = config.customPaths
             .map(ScanLocationProvider.normalizePersistedPath)
-            .filter { isAccessibleScanRoot($0) && !isAppContainerPath($0) }
-        normalized.enabledBuiltInPaths = []
+            .filter { isAccessibleScanRoot($0) && !isAppContainerPath($0) && !ScanLocationProvider.isBuiltInPath($0) }
+        let enabledBuiltIns = config.enabledBuiltInPaths
+            .map(ScanLocationProvider.normalizePersistedPath)
+            .filter(ScanLocationProvider.isBuiltInPath)
+        normalized.enabledBuiltInPaths = Set(enabledBuiltIns)
         normalized.customPaths = Array(Set(existingRoots)).sorted()
         return normalized
     }
 
     private func syncConfigFromScanDirectories() {
-        config.enabledBuiltInPaths = []
+        config.enabledBuiltInPaths = Set(
+            config.enabledBuiltInPaths
+                .map(ScanLocationProvider.normalizePersistedPath)
+                .filter(ScanLocationProvider.isBuiltInPath)
+        )
         config.customPaths = scanDirectories.map(\.path).sorted()
+    }
+
+    private func defaultScanConfig() -> ScanConfig {
+        var defaultConfig = ScanConfig.default
+        defaultConfig.enabledBuiltInPaths = ScanLocationProvider.builtInAbsoluteSet
+        return defaultConfig
     }
 
     private func sanitizeScanDirectories(_ directories: [CustomScanDirectory]) -> [CustomScanDirectory] {
