@@ -1219,10 +1219,8 @@ final class ScanScheduler: ObservableObject {
             scanDirectories = sanitized.filter { !ScanLocationProvider.isBuiltInPath($0.path) }
             if !configLoadedFromPersistence {
                 config.enabledBuiltInPaths = sanitized.isEmpty ? ScanLocationProvider.builtInAbsoluteSet : builtInPaths
-            } else if sanitized.isEmpty && configuredBuiltIns.isEmpty && config.customPaths.isEmpty {
-                config.enabledBuiltInPaths = ScanLocationProvider.builtInAbsoluteSet
             } else if configuredBuiltIns.isEmpty {
-                config.enabledBuiltInPaths = builtInPaths
+                config.enabledBuiltInPaths = sanitized.isEmpty ? [] : builtInPaths
             } else {
                 config.enabledBuiltInPaths = Set(configuredBuiltIns)
             }
@@ -1230,7 +1228,7 @@ final class ScanScheduler: ObservableObject {
             scanDirectories = sanitizeScanDirectories(
                 config.customPaths.map { CustomScanDirectory(path: $0, bookmarkData: nil) }
             )
-            if configuredBuiltIns.isEmpty && config.customPaths.isEmpty {
+            if !configLoadedFromPersistence && configuredBuiltIns.isEmpty && config.customPaths.isEmpty {
                 config.enabledBuiltInPaths = ScanLocationProvider.builtInAbsoluteSet
             } else {
                 config.enabledBuiltInPaths = Set(configuredBuiltIns)
