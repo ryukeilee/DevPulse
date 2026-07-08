@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 import IOKit.ps
@@ -20,6 +21,12 @@ enum ScanSchedulerPolicy {
 
     struct WidgetReloadDecision: Equatable {
         let shouldRequest: Bool
+        let detail: String
+    }
+
+    struct WakeRefreshDecision: Equatable {
+        let shouldRefreshImmediately: Bool
+        let forceRepositoryDiscovery: Bool
         let detail: String
     }
 
@@ -108,6 +115,62 @@ enum ScanSchedulerPolicy {
             shouldRequest: false,
             detail: "共享快照无实质变化，且距上次 reload 未超过 15 分钟，本次跳过 Widget reload。"
         )
+    }
+
+    static func wakeRefreshDecision(
+        lastScanAt: Date?,
+        refreshPhase: RefreshPhase,
+        sleepBeganAt: Date?,
+        refreshStartedAt: Date?,
+        refreshCompletedAt: Date?,
+        now: Date = Date()
+    ) -> WakeRefreshDecision {
+        if refreshPhase == .refreshing,
+           let sleepBeganAt,
+           let refreshStartedAt,
+           refreshStartedAt <= sleepBeganAt,
+           refreshCompletedAt == nil || refreshCompletedAt.map({ $0 < sleepBeganAt }) == true {
+            return WakeRefreshDecision(
+                shouldRefreshImmediately: true,
+                forceRepositoryDiscovery: false,
+                detail: "系统休眠前刷新尚未完成，唤醒后立即补一次刷新恢复状态。"
+            )
+        }
+
+        if refreshPhase == .failure {
+            return WakeRefreshDecision(
+                shouldRefreshImmediately: true,
+                forceRepositoryDiscovery: false,
+                detail: "上次刷新处于失败状态，唤醒后立即重试恢复。"
+            )
+        }
+
+        switch RefreshStatusFormatter.freshness(for: lastScanAt, now: now) {
+        case .fresh:
+            return WakeRefreshDecision(
+                shouldRefreshImmediately: false,
+                forceRepositoryDiscovery: false,
+                detail: "当前共享快照仍然新鲜，唤醒后仅恢复后台定时器。"
+            )
+        case .stale:
+            return WakeRefreshDecision(
+                shouldRefreshImmediately: true,
+                forceRepositoryDiscovery: false,
+                detail: "共享快照已超过 10 分钟未刷新，唤醒后立即补一次刷新。"
+            )
+        case .expired:
+            return WakeRefreshDecision(
+                shouldRefreshImmediately: true,
+                forceRepositoryDiscovery: false,
+                detail: "共享快照已超过 30 分钟未刷新，唤醒后立即补一次刷新。"
+            )
+        case .unknown:
+            return WakeRefreshDecision(
+                shouldRefreshImmediately: true,
+                forceRepositoryDiscovery: false,
+                detail: "还没有可用的刷新记录，唤醒后立即执行首次恢复刷新。"
+            )
+        }
     }
 
     static func hasMeaningfulSnapshotChanges(
@@ -263,6 +326,13 @@ final class ScanScheduler: ObservableObject {
 
     private var backgroundTimer: Timer?
     private var consecutiveNoChanges = 0
+    private var backgroundScanningEnabled = false
+    private var powerStateObserver: NSObjectProtocol?
+    private var workspaceSleepObserver: NSObjectProtocol?
+    private var workspaceWakeObserver: NSObjectProtocol?
+    private var lastSystemSleepAt: Date?
+    private var pendingWakeRefresh = false
+    private var pendingWakeRefreshForceRepositoryDiscovery = false
 
     // Config persistence
     private let configKey = "scan_config_json"
@@ -316,6 +386,7 @@ final class ScanScheduler: ObservableObject {
         restorePersistedSnapshot()
         updatePowerState()
         startPowerMonitoring()
+        startSleepWakeMonitoring()
     }
 
     var snapshotFreshness: SnapshotFreshness? {
@@ -410,6 +481,7 @@ final class ScanScheduler: ObservableObject {
                     self.warnings = [failureMessage] + combinedWarnings.filter { $0 != failureMessage }
                     self.diagnostics.validationIssues = self.warnings
                     self.recordEvent(.scanFailed, failureMessage)
+                    self.triggerPendingWakeRefreshIfNeeded()
                     return
                 }
 
@@ -456,6 +528,7 @@ final class ScanScheduler: ObservableObject {
                 }
                 self.updateScanInterval()
                 self.syncSharedSnapshot(from: pinned, previousSnapshot: previousSnapshot, reason: "scan")
+                self.triggerPendingWakeRefreshIfNeeded()
             }
         }
     }
@@ -544,6 +617,7 @@ final class ScanScheduler: ObservableObject {
 
     func startBackgroundScanning() {
         stopBackgroundScanning()
+        backgroundScanningEnabled = true
         if shouldRunImmediateStartupScan {
             scanNow()
         }
@@ -551,11 +625,13 @@ final class ScanScheduler: ObservableObject {
     }
 
     func stopBackgroundScanning() {
+        backgroundScanningEnabled = false
         backgroundTimer?.invalidate()
         backgroundTimer = nil
     }
 
     private func scheduleNextTimer() {
+        guard backgroundScanningEnabled else { return }
         backgroundTimer?.invalidate()
         backgroundTimer = Timer.scheduledTimer(
             withTimeInterval: scanIntervalSeconds,
@@ -946,6 +1022,7 @@ final class ScanScheduler: ObservableObject {
         diagnostics.validationIssues = [message]
         diagnostics.nextSteps = suggestedNextSteps(from: [message])
         recordEvent(.scanFailed, message)
+        triggerPendingWakeRefreshIfNeeded()
     }
 
     // MARK: - Power monitoring
@@ -965,7 +1042,7 @@ final class ScanScheduler: ObservableObject {
 
     private func startPowerMonitoring() {
         // Observe low-power mode changes
-        NotificationCenter.default.addObserver(
+        powerStateObserver = NotificationCenter.default.addObserver(
             forName: Notification.Name.NSProcessInfoPowerStateDidChange,
             object: nil,
             queue: .main
@@ -973,6 +1050,79 @@ final class ScanScheduler: ObservableObject {
             Task { @MainActor in
                 self?.updateScanInterval()
             }
+        }
+    }
+
+    private func startSleepWakeMonitoring() {
+        let center = NSWorkspace.shared.notificationCenter
+
+        workspaceSleepObserver = center.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.handleSystemWillSleep()
+            }
+        }
+
+        workspaceWakeObserver = center.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.handleSystemDidWake()
+            }
+        }
+    }
+
+    private func handleSystemWillSleep(now: Date = Date()) {
+        guard backgroundScanningEnabled else { return }
+        lastSystemSleepAt = now
+        backgroundTimer?.invalidate()
+        backgroundTimer = nil
+    }
+
+    private func handleSystemDidWake(now: Date = Date()) {
+        guard backgroundScanningEnabled else { return }
+
+        updatePowerState()
+
+        let decision = ScanSchedulerPolicy.wakeRefreshDecision(
+            lastScanAt: lastScanAt,
+            refreshPhase: refreshPhase,
+            sleepBeganAt: lastSystemSleepAt,
+            refreshStartedAt: diagnostics.lastRefreshStartedAt,
+            refreshCompletedAt: diagnostics.lastRefreshCompletedAt,
+            now: now
+        )
+        lastSystemSleepAt = nil
+
+        if decision.shouldRefreshImmediately {
+            if isScanning {
+                pendingWakeRefresh = true
+                pendingWakeRefreshForceRepositoryDiscovery = decision.forceRepositoryDiscovery
+            } else {
+                scanNow(forceRepositoryDiscovery: decision.forceRepositoryDiscovery)
+            }
+        } else {
+            pendingWakeRefresh = false
+            pendingWakeRefreshForceRepositoryDiscovery = false
+        }
+
+        scheduleNextTimer()
+    }
+
+    private func triggerPendingWakeRefreshIfNeeded() {
+        guard pendingWakeRefresh else { return }
+
+        let forceRepositoryDiscovery = pendingWakeRefreshForceRepositoryDiscovery
+        pendingWakeRefresh = false
+        pendingWakeRefreshForceRepositoryDiscovery = false
+
+        Task { @MainActor in
+            self.scanNow(forceRepositoryDiscovery: forceRepositoryDiscovery)
         }
     }
 

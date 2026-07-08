@@ -53,6 +53,74 @@ struct CommitReadinessEngineTests {
         #expect(assessment.detail == "上次成功刷新：8 分钟前更新")
     }
 
+    @Test func wakeRefreshDecisionTriggersImmediateRefreshWhenSnapshotIsStale() {
+        let now = Date(timeIntervalSince1970: 1_718_000_000)
+        let lastScanAt = now.addingTimeInterval(-12 * 60)
+
+        let decision = ScanSchedulerPolicy.wakeRefreshDecision(
+            lastScanAt: lastScanAt,
+            refreshPhase: .success,
+            sleepBeganAt: now.addingTimeInterval(-60),
+            refreshStartedAt: nil,
+            refreshCompletedAt: nil,
+            now: now
+        )
+
+        #expect(decision.shouldRefreshImmediately == true)
+        #expect(decision.forceRepositoryDiscovery == false)
+        #expect(decision.detail.contains("超过 10 分钟"))
+    }
+
+    @Test func wakeRefreshDecisionRetriesFailedRefreshAfterWake() {
+        let now = Date(timeIntervalSince1970: 1_718_000_000)
+        let lastScanAt = now.addingTimeInterval(-5 * 60)
+
+        let decision = ScanSchedulerPolicy.wakeRefreshDecision(
+            lastScanAt: lastScanAt,
+            refreshPhase: .failure,
+            sleepBeganAt: now.addingTimeInterval(-120),
+            refreshStartedAt: now.addingTimeInterval(-6 * 60),
+            refreshCompletedAt: now.addingTimeInterval(-6 * 60 + 10),
+            now: now
+        )
+
+        #expect(decision.shouldRefreshImmediately == true)
+        #expect(decision.detail.contains("失败状态"))
+    }
+
+    @Test func wakeRefreshDecisionRecoversInterruptedRefreshAfterSleep() {
+        let now = Date(timeIntervalSince1970: 1_718_000_000)
+        let sleepBeganAt = now.addingTimeInterval(-90)
+        let refreshStartedAt = now.addingTimeInterval(-120)
+
+        let decision = ScanSchedulerPolicy.wakeRefreshDecision(
+            lastScanAt: now.addingTimeInterval(-2 * 60),
+            refreshPhase: .refreshing,
+            sleepBeganAt: sleepBeganAt,
+            refreshStartedAt: refreshStartedAt,
+            refreshCompletedAt: nil,
+            now: now
+        )
+
+        #expect(decision.shouldRefreshImmediately == true)
+        #expect(decision.detail.contains("休眠前刷新尚未完成"))
+    }
+
+    @Test func wakeRefreshDecisionOnlyReschedulesWhenSnapshotIsStillFresh() {
+        let now = Date(timeIntervalSince1970: 1_718_000_000)
+        let decision = ScanSchedulerPolicy.wakeRefreshDecision(
+            lastScanAt: now.addingTimeInterval(-3 * 60),
+            refreshPhase: .success,
+            sleepBeganAt: now.addingTimeInterval(-60),
+            refreshStartedAt: nil,
+            refreshCompletedAt: nil,
+            now: now
+        )
+
+        #expect(decision.shouldRefreshImmediately == false)
+        #expect(decision.detail.contains("仍然新鲜"))
+    }
+
     @Test func snapshotTrustAssessmentMarksMissingTimeUnknown() {
         let assessment = RefreshStatusFormatter.snapshotAssessment(
             generatedAt: nil,
