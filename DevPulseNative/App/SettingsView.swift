@@ -6,7 +6,6 @@ struct SettingsView: View {
     @EnvironmentObject var launchAtLoginController: LaunchAtLoginController
     @Binding var scrollTarget: SettingsScrollTarget?
     @State private var newCustomPath: String = ""
-    @State private var builtInToggles: [ScanLocationToggle] = ScanLocationProvider.builtInToggles()
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -33,15 +32,8 @@ struct SettingsView: View {
                 }
                 .padding(20)
                 .onAppear {
-                    refreshBuiltInToggles()
                     launchAtLoginController.refreshStatus()
                     scrollToTargetIfNeeded(using: proxy)
-                }
-                .onChange(of: scheduler.scanDirectories) { _, _ in
-                    refreshBuiltInToggles()
-                }
-                .onChange(of: scheduler.config.enabledBuiltInPaths) { _, _ in
-                    refreshBuiltInToggles()
                 }
                 .onChange(of: scrollTarget) { _, _ in
                     scrollToTargetIfNeeded(using: proxy)
@@ -1289,10 +1281,6 @@ struct SettingsView: View {
         scheduler.diagnostics.validationIssues.isEmpty ? .normal : .error
     }
 
-    private func refreshBuiltInToggles() {
-        builtInToggles = ScanLocationProvider.builtInToggles(scheduler.config.enabledBuiltInPaths)
-    }
-
     private func chooseDirectory() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -1325,23 +1313,15 @@ struct SettingsView: View {
         let normalized = ScanLocationProvider.normalizePersistedPath(path)
         let wasEnabled = scheduler.isBuiltInEnabled(path: normalized)
         guard wasEnabled != enabled else {
-            refreshBuiltInToggles()
             return
         }
 
         scheduler.toggleBuiltIn(path: normalized, enabled: enabled)
-        refreshBuiltInToggles()
-        refreshAfterDirectoryChange()
     }
 
     private func addScanDirectoryAndRefresh(_ path: String) {
         let normalized = ScanLocationProvider.normalizePersistedPath(path)
         scheduler.addCustomPath(normalized)
-        refreshBuiltInToggles()
-
-        if scheduler.scanDirectories.contains(where: { $0.path == normalized }) {
-            refreshAfterDirectoryChange()
-        }
     }
 
     private func createBuiltInDirectoryAndEnable(_ path: String) {
@@ -1358,14 +1338,6 @@ struct SettingsView: View {
         }
     }
 
-    private func refreshAfterDirectoryChange() {
-        Task { @MainActor in
-            while scheduler.isScanning {
-                try? await Task.sleep(for: .milliseconds(200))
-            }
-            scheduler.scanNow(forceRepositoryDiscovery: true)
-        }
-    }
 
     private func snapshotTimeLabel(_ date: Date?) -> String {
         guard let date else { return "未知" }
@@ -1410,12 +1382,10 @@ struct SettingsView: View {
 
     private func defaultScanGroupSection(_ group: DefaultScanGroup) -> some View {
         let visiblePaths = group.paths.filter { path in
-            guard let toggle = builtInToggles.first(where: { $0.path == path }) else { return false }
-            return directoryExists(path) || toggle.isEnabled
+            return directoryExists(path) || scheduler.isBuiltInEnabled(path: path)
         }
         let missingPaths = group.paths.filter { path in
-            guard let toggle = builtInToggles.first(where: { $0.path == path }) else { return false }
-            return !directoryExists(path) && !toggle.isEnabled
+            return !directoryExists(path) && !scheduler.isBuiltInEnabled(path: path)
         }
 
         return VStack(alignment: .leading, spacing: 8) {
@@ -1451,17 +1421,15 @@ struct SettingsView: View {
 
     @ViewBuilder
     private func defaultScanToggleRow(for path: String) -> some View {
-        if let index = builtInToggles.firstIndex(where: { $0.path == path }) {
-            let toggle = builtInToggles[index]
-            let metadata = builtInDirectoryMetadata(for: toggle.path)
-            let exists = directoryExists(toggle.path)
+        let metadata = builtInDirectoryMetadata(for: path)
+        let exists = directoryExists(path)
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .top, spacing: 12) {
                     defaultScanDirectoryDetails(
                         title: metadata.title,
                         subtitle: metadata.subtitle,
-                        path: toggle.path,
+                        path: path,
                         exists: exists
                     )
 
@@ -1470,14 +1438,14 @@ struct SettingsView: View {
                     VStack(alignment: .trailing, spacing: 8) {
                         if exists {
                             Toggle("", isOn: Binding(
-                                get: { scheduler.isBuiltInEnabled(path: toggle.path) },
-                                set: { setBuiltInDirectoryEnabled(toggle.path, enabled: $0) }
+                                get: { scheduler.isBuiltInEnabled(path: path) },
+                                set: { setBuiltInDirectoryEnabled(path, enabled: $0) }
                             ))
                                 .labelsHidden()
                                 .toggleStyle(.switch)
                         } else {
                             Button("创建并启用") {
-                                createBuiltInDirectoryAndEnable(toggle.path)
+                                createBuiltInDirectoryAndEnable(path)
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.small)
@@ -1492,7 +1460,6 @@ struct SettingsView: View {
                     }
                 }
             }
-        }
     }
 
     private func missingDefaultScanRow(for path: String) -> some View {

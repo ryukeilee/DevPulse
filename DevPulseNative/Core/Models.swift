@@ -2313,6 +2313,22 @@ struct ScanLocationToggle: Identifiable, Codable {
 
 // MARK: - Custom scan directory
 
+struct ScanLocationConfiguration: Codable, Equatable {
+    static let currentVersion = 1
+
+    let version: Int
+    var enabledBuiltInPaths: Set<String>
+    var customDirectories: [CustomScanDirectory]
+
+    init(version: Int = ScanLocationConfiguration.currentVersion,
+         enabledBuiltInPaths: Set<String>,
+         customDirectories: [CustomScanDirectory]) {
+        self.version = version
+        self.enabledBuiltInPaths = enabledBuiltInPaths
+        self.customDirectories = customDirectories
+    }
+}
+
 struct CustomScanDirectory: Identifiable, Codable, Equatable {
     let id: String
     let path: String

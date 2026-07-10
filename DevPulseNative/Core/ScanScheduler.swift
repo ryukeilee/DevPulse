@@ -15,7 +15,97 @@ private enum PowerState {
     case onBattery
 }
 
+struct ScanExecutionRequest {
+    let config: ScanConfig
+    let roots: [String]
+    let rootsSignature: String
+    let knownRepositoryPaths: [String]
+    let forceRepositoryDiscovery: Bool
+}
+typealias ScanExecution = @Sendable (ScanExecutionRequest) async -> (data: AppGroupData, warnings: [String], discoveredRepositoryPaths: [String])
+
+
+/// Coalesces scan refresh requests without retaining UI or scanner state.
+struct ScanRefreshCoordinator {
+    struct Request: Equatable {
+        let signature: String
+        let forceRepositoryDiscovery: Bool
+    }
+
+    private var scheduled: Request?
+    private var running: Request?
+
+    mutating func request(signature: String, forceRepositoryDiscovery: Bool) {
+        if let running, signature == running.signature {
+            scheduled = nil
+            return
+        }
+
+        if var scheduled {
+            scheduled = Request(
+                signature: signature,
+                forceRepositoryDiscovery: scheduled.forceRepositoryDiscovery || forceRepositoryDiscovery
+            )
+            self.scheduled = scheduled
+            return
+        }
+
+        guard let running else {
+            scheduled = Request(signature: signature, forceRepositoryDiscovery: forceRepositoryDiscovery)
+            return
+        }
+
+        guard signature != running.signature else {
+            scheduled = nil
+            return
+        }
+
+        scheduled = Request(signature: signature, forceRepositoryDiscovery: forceRepositoryDiscovery)
+    }
+
+    mutating func requestForced(signature: String) {
+        if let running, running.signature == signature {
+            scheduled = Request(signature: signature, forceRepositoryDiscovery: true)
+            return
+        }
+        request(signature: signature, forceRepositoryDiscovery: true)
+    }
+
+    mutating func beginNext() -> Request? {
+        guard running == nil, let scheduled else { return nil }
+        self.scheduled = nil
+        running = scheduled
+        return scheduled
+    }
+
+    mutating func completeCurrent() -> Request? {
+        running = nil
+        return scheduled
+    }
+}
+
 enum ScanSchedulerPolicy {
+    static func migratedBuiltInPaths(configWasLoaded: Bool,
+                                     configuredBuiltIns: Set<String>,
+                                     directoryBuiltIns: Set<String>,
+                                     defaultBuiltIns: Set<String>) -> Set<String> {
+        if configWasLoaded { return configuredBuiltIns }
+        return directoryBuiltIns.isEmpty ? defaultBuiltIns : directoryBuiltIns
+    }
+    struct StartupRefreshDecision: Equatable {
+        let shouldRefreshImmediately: Bool
+        let forceRepositoryDiscovery: Bool
+    }
+
+    static func startupRefreshDecision(snapshotIsFresh: Bool,
+                                       currentRootsSignature: String,
+                                       lastDiscoveryRootsSignature: String?) -> StartupRefreshDecision {
+        let rootsChanged = currentRootsSignature != (lastDiscoveryRootsSignature ?? "")
+        return StartupRefreshDecision(
+            shouldRefreshImmediately: !snapshotIsFresh || rootsChanged,
+            forceRepositoryDiscovery: rootsChanged
+        )
+    }
     static let repositoryRediscoveryInterval: TimeInterval = 60 * 60
     static let widgetReloadThrottleInterval: TimeInterval = 15 * 60
 
@@ -318,7 +408,11 @@ final class ScanScheduler: ObservableObject {
     @Published var appGroupAvailable: Bool = true
     @Published var warnings: [String] = []
     @Published var scanRootAccessWarning: String?
-    @Published var scanDirectories: [CustomScanDirectory] = []
+    @Published private(set) var scanLocationConfiguration = ScanLocationConfiguration(
+        enabledBuiltInPaths: [],
+        customDirectories: []
+    )
+    var scanDirectories: [CustomScanDirectory] { scanLocationConfiguration.customDirectories }
     @Published var diagnostics = DiagnosticsSnapshot()
     @Published var diagnosticEvents: [DiagnosticEvent] = []
     @Published var scanIntervalSeconds: TimeInterval = 300
@@ -331,13 +425,15 @@ final class ScanScheduler: ObservableObject {
     private var workspaceSleepObserver: NSObjectProtocol?
     private var workspaceWakeObserver: NSObjectProtocol?
     private var lastSystemSleepAt: Date?
-    private var pendingWakeRefresh = false
-    private var pendingWakeRefreshForceRepositoryDiscovery = false
+    private var refreshCoordinator = ScanRefreshCoordinator()
+    private var locationRefreshDrainScheduled = false
+    private let scanExecution: ScanExecution
     private var configLoadedFromPersistence = false
 
     // Config persistence
     private let configKey = "scan_config_json"
     private let scanDirectoriesKey = "scan_directories_json"
+    private let scanLocationsKey = "scan_locations_v1_json"
     private let pinnedKey = "pinned_repo_ids"
     private let lastScanIntervalKey = "last_scan_interval"
     private let lastRepositoryDiscoveryAtKey = "last_repository_discovery_at"
@@ -355,9 +451,7 @@ final class ScanScheduler: ObservableObject {
     private static let noChangeThreshold2 = 8  // scans w/o change → 20 min
     private static let noChangeThreshold3 = 15 // scans w/o change → 30 min
 
-    @Published var config: ScanConfig = .default {
-        didSet { persistConfig() }
-    }
+    @Published private(set) var config: ScanConfig = .default
 
     var pinnedRepoIDs: Set<String> {
         get {
@@ -371,7 +465,10 @@ final class ScanScheduler: ObservableObject {
         }
     }
 
-    init(commandMode: Bool = false) {
+    init(commandMode: Bool = false, scanExecution: @escaping ScanExecution = { request in
+        await GitRepositoryScanner.scan(config: request.config, scanRoots: request.roots, knownRepositoryPaths: request.knownRepositoryPaths, forceRepositoryDiscovery: request.forceRepositoryDiscovery)
+    }) {
+        self.scanExecution = scanExecution
         if commandMode {
             appGroupAvailable = AppGroupStore.isAvailable
             gitAvailable = ProcessRunner.isGitAvailable()
@@ -425,6 +522,17 @@ final class ScanScheduler: ObservableObject {
     // MARK: - Scan (async, non-blocking)
 
     func scanNow(forceRepositoryDiscovery: Bool = false) {
+        let signature = ScanSchedulerPolicy.scanRootsSignature(scanRoots().roots)
+        refreshCoordinator.request(signature: signature, forceRepositoryDiscovery: forceRepositoryDiscovery)
+        startNextCoalescedScanIfNeeded()
+    }
+
+    private func startNextCoalescedScanIfNeeded() {
+        guard let request = refreshCoordinator.beginNext() else { return }
+        performScanNow(forceRepositoryDiscovery: request.forceRepositoryDiscovery)
+    }
+
+    private func performScanNow(forceRepositoryDiscovery: Bool) {
         guard !isScanning else { return }
 
         gitAvailable = ProcessRunner.isGitAvailable()
@@ -444,7 +552,7 @@ final class ScanScheduler: ObservableObject {
         diagnostics.sharedDataReadError = nil
         diagnostics.widgetSnapshotReadError = nil
         diagnostics.snapshotDecodable = false
-        let currentConfig = config
+        let currentConfig = scanConfigForExecution()
         let currentScanRoots = scanRoots()
         let knownRepositoryPaths = lastDiscoveredRepositoryPaths
         let currentScanRootsSignature = ScanSchedulerPolicy.scanRootsSignature(currentScanRoots.roots)
@@ -457,13 +565,10 @@ final class ScanScheduler: ObservableObject {
         )
         recordEvent(.scanStarted, "Scan started")
 
+        let execution = scanExecution
+        let request = ScanExecutionRequest(config: currentConfig, roots: currentScanRoots.roots, rootsSignature: currentScanRootsSignature, knownRepositoryPaths: knownRepositoryPaths, forceRepositoryDiscovery: shouldRediscoverRepositories)
         Task.detached(priority: .userInitiated) {
-            let result = await GitRepositoryScanner.scan(
-                config: currentConfig,
-                scanRoots: currentScanRoots.roots,
-                knownRepositoryPaths: knownRepositoryPaths,
-                forceRepositoryDiscovery: shouldRediscoverRepositories
-            )
+            let result = await execution(request)
 
             await MainActor.run {
                 if let failureMessage = self.scanFailureMessage(
@@ -562,7 +667,7 @@ final class ScanScheduler: ObservableObject {
         refreshFailureMessage = nil
         warnings = []
 
-        let currentConfig = config
+        let currentConfig = scanConfigForExecution()
         let currentScanRoots = scanRoots()
         let result = await GitRepositoryScanner.scan(
             config: currentConfig,
@@ -619,8 +724,13 @@ final class ScanScheduler: ObservableObject {
     func startBackgroundScanning() {
         stopBackgroundScanning()
         backgroundScanningEnabled = true
-        if shouldRunImmediateStartupScan {
-            scanNow()
+        let decision = ScanSchedulerPolicy.startupRefreshDecision(
+            snapshotIsFresh: !shouldRunImmediateStartupScan,
+            currentRootsSignature: ScanSchedulerPolicy.scanRootsSignature(scanRoots().roots),
+            lastDiscoveryRootsSignature: lastRepositoryDiscoveryScanRootsSignature
+        )
+        if decision.shouldRefreshImmediately {
+            scanNow(forceRepositoryDiscovery: decision.forceRepositoryDiscovery)
         }
         scheduleNextTimer()
     }
@@ -689,9 +799,9 @@ final class ScanScheduler: ObservableObject {
     private func scanRoots() -> (roots: [String], warning: String?) {
         let enabledBuiltInRoots = ScanLocationProvider.builtInLocations
             .map(ScanLocationProvider.expandTilde)
-            .filter { config.enabledBuiltInPaths.contains($0) }
+            .filter { scanLocationConfiguration.enabledBuiltInPaths.contains($0) }
             .filter { isAccessibleScanRoot($0) && !isAppContainerPath($0) }
-        let configuredDirectories = scanDirectories
+        let configuredDirectories = scanLocationConfiguration.customDirectories
 
         var accessibleRoots = enabledBuiltInRoots
         var inaccessibleCount = 0
@@ -699,7 +809,7 @@ final class ScanScheduler: ObservableObject {
 
         for directory in configuredDirectories {
             if let url = resolvedURL(for: directory) {
-                let path = ScanLocationProvider.normalizePersistedPath(url.path)
+                let path = ScanLocationProvider.canonicalExistingFilePath(url.path)
                 guard !isAppContainerPath(path) else {
                     containerPathCount += 1
                     continue
@@ -712,7 +822,7 @@ final class ScanScheduler: ObservableObject {
                 continue
             }
 
-            let normalizedPath = ScanLocationProvider.normalizePersistedPath(directory.path)
+            let normalizedPath = ScanLocationProvider.canonicalExistingFilePath(directory.path)
             guard !isAppContainerPath(normalizedPath) else {
                 containerPathCount += 1
                 continue
@@ -1095,30 +1205,25 @@ final class ScanScheduler: ObservableObject {
         lastSystemSleepAt = nil
 
         if decision.shouldRefreshImmediately {
-            if isScanning {
-                pendingWakeRefresh = true
-                pendingWakeRefreshForceRepositoryDiscovery = decision.forceRepositoryDiscovery
-            } else {
-                scanNow(forceRepositoryDiscovery: decision.forceRepositoryDiscovery)
-            }
-        } else {
-            pendingWakeRefresh = false
-            pendingWakeRefreshForceRepositoryDiscovery = false
+            requestWakeRefresh(forceRepositoryDiscovery: decision.forceRepositoryDiscovery)
         }
 
         scheduleNextTimer()
     }
 
     private func triggerPendingWakeRefreshIfNeeded() {
-        guard pendingWakeRefresh else { return }
+        _ = refreshCoordinator.completeCurrent()
+        startNextCoalescedScanIfNeeded()
+    }
 
-        let forceRepositoryDiscovery = pendingWakeRefreshForceRepositoryDiscovery
-        pendingWakeRefresh = false
-        pendingWakeRefreshForceRepositoryDiscovery = false
-
-        Task { @MainActor in
-            self.scanNow(forceRepositoryDiscovery: forceRepositoryDiscovery)
+    private func requestWakeRefresh(forceRepositoryDiscovery: Bool) {
+        let signature = ScanSchedulerPolicy.scanRootsSignature(scanRoots().roots)
+        if forceRepositoryDiscovery {
+            refreshCoordinator.requestForced(signature: signature)
+        } else {
+            refreshCoordinator.request(signature: signature, forceRepositoryDiscovery: false)
         }
+        startNextCoalescedScanIfNeeded()
     }
 
     /// Check if the machine is running on battery via IOKit.
@@ -1176,16 +1281,10 @@ final class ScanScheduler: ObservableObject {
 
     // MARK: - Config persistence
 
-    private func persistConfig() {
-        guard let data = try? JSONEncoder().encode(config) else { return }
+    private func persistScanLocations() {
+        guard let data = try? JSONEncoder().encode(scanLocationConfiguration) else { return }
         UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
-            .set(data, forKey: configKey)
-    }
-
-    private func persistScanDirectories() {
-        guard let data = try? JSONEncoder().encode(scanDirectories) else { return }
-        UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
-            .set(data, forKey: scanDirectoriesKey)
+            .set(data, forKey: scanLocationsKey)
     }
 
     private func loadConfig() {
@@ -1194,12 +1293,10 @@ final class ScanScheduler: ObservableObject {
               let decoded = try? JSONDecoder().decode(ScanConfig.self, from: data) else {
             configLoadedFromPersistence = false
             config = defaultScanConfig()
-            persistConfig()
             return
         }
         configLoadedFromPersistence = true
         config = normalizeConfig(decoded)
-        persistConfig()
 
         // Load last interval
         if let saved = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
@@ -1209,23 +1306,32 @@ final class ScanScheduler: ObservableObject {
     }
 
     private func loadScanDirectories() {
+        if let data = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?.data(forKey: scanLocationsKey),
+           let decoded = try? JSONDecoder().decode(ScanLocationConfiguration.self, from: data) {
+            scanLocationConfiguration = ScanLocationConfiguration(
+                enabledBuiltInPaths: Set(decoded.enabledBuiltInPaths.map(ScanLocationProvider.normalizePersistedPath).filter(ScanLocationProvider.isBuiltInPath)),
+                customDirectories: sanitizeScanDirectories(decoded.customDirectories)
+            )
+            scanRootAccessWarning = scanRoots().warning
+            return
+        }
         let configuredBuiltIns = config.enabledBuiltInPaths
             .map(ScanLocationProvider.normalizePersistedPath)
+        let customDirectories: [CustomScanDirectory]
         if let data = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
             .data(forKey: scanDirectoriesKey),
            let decoded = try? JSONDecoder().decode([CustomScanDirectory].self, from: data) {
             let sanitized = sanitizeScanDirectories(decoded)
             let builtInPaths = Set(sanitized.map(\.path).filter(ScanLocationProvider.isBuiltInPath))
-            scanDirectories = sanitized.filter { !ScanLocationProvider.isBuiltInPath($0.path) }
-            if !configLoadedFromPersistence {
-                config.enabledBuiltInPaths = sanitized.isEmpty ? ScanLocationProvider.builtInAbsoluteSet : builtInPaths
-            } else if configuredBuiltIns.isEmpty {
-                config.enabledBuiltInPaths = sanitized.isEmpty ? [] : builtInPaths
-            } else {
-                config.enabledBuiltInPaths = Set(configuredBuiltIns)
-            }
+            customDirectories = sanitized.filter { !ScanLocationProvider.isBuiltInPath($0.path) }
+            config.enabledBuiltInPaths = ScanSchedulerPolicy.migratedBuiltInPaths(
+                configWasLoaded: configLoadedFromPersistence,
+                configuredBuiltIns: Set(configuredBuiltIns),
+                directoryBuiltIns: builtInPaths,
+                defaultBuiltIns: ScanLocationProvider.builtInAbsoluteSet
+            )
         } else {
-            scanDirectories = sanitizeScanDirectories(
+            customDirectories = sanitizeScanDirectories(
                 config.customPaths.map { CustomScanDirectory(path: $0, bookmarkData: nil) }
             )
             if !configLoadedFromPersistence && configuredBuiltIns.isEmpty && config.customPaths.isEmpty {
@@ -1235,32 +1341,38 @@ final class ScanScheduler: ObservableObject {
             }
         }
 
-        syncConfigFromScanDirectories()
+        scanLocationConfiguration = ScanLocationConfiguration(
+            enabledBuiltInPaths: config.enabledBuiltInPaths,
+            customDirectories: customDirectories
+        )
         scanRootAccessWarning = scanRoots().warning
-        persistScanDirectories()
+        persistScanLocations()
     }
 
     // MARK: - Enabled toggles
 
     func isBuiltInEnabled(path: String) -> Bool {
         let normalized = ScanLocationProvider.normalizePersistedPath(path)
-        return config.enabledBuiltInPaths.contains(normalized)
+        return scanLocationConfiguration.enabledBuiltInPaths.contains(normalized)
     }
 
     func toggleBuiltIn(path: String, enabled: Bool) {
         let normalized = ScanLocationProvider.normalizePersistedPath(path)
-        var updatedConfig = config
+        var updated = scanLocationConfiguration
         if enabled {
-            updatedConfig.enabledBuiltInPaths.insert(normalized)
+            updated.enabledBuiltInPaths.insert(normalized)
         } else {
-            updatedConfig.enabledBuiltInPaths.remove(normalized)
+            updated.enabledBuiltInPaths.remove(normalized)
         }
-        config = updatedConfig
+        guard updated != scanLocationConfiguration else { return }
+        scanLocationConfiguration = updated
+        persistScanLocations()
         scanRootAccessWarning = scanRoots().warning
+        requestLocationRefresh()
     }
 
     func addCustomPath(_ path: String) {
-        let expanded = ScanLocationProvider.normalizePersistedPath(path)
+        let expanded = ScanLocationProvider.canonicalExistingFilePath(path)
         guard !expanded.isEmpty else { return }
         guard !ScanLocationProvider.isBuiltInPath(expanded) else {
             toggleBuiltIn(path: expanded, enabled: true)
@@ -1274,34 +1386,50 @@ final class ScanScheduler: ObservableObject {
             scanRootAccessWarning = "部分目录权限失效，请在 Settings 重新授权。"
             return
         }
-        if let existingIndex = scanDirectories.firstIndex(where: { $0.path == expanded }) {
-            if scanDirectories[existingIndex].bookmarkData == nil,
+        if let existingIndex = scanLocationConfiguration.customDirectories.firstIndex(where: { $0.path == expanded }) {
+            if scanLocationConfiguration.customDirectories[existingIndex].bookmarkData == nil,
                let refreshed = bookmarkData(for: URL(fileURLWithPath: expanded)) {
-                scanDirectories[existingIndex] = CustomScanDirectory(
-                    id: scanDirectories[existingIndex].id,
+                scanLocationConfiguration.customDirectories[existingIndex] = CustomScanDirectory(
+                    id: scanLocationConfiguration.customDirectories[existingIndex].id,
                     path: expanded,
                     bookmarkData: refreshed
                 )
-                syncConfigFromScanDirectories()
-                persistScanDirectories()
+                persistScanLocations()
+                requestLocationRefresh()
             }
             scanRootAccessWarning = nil
             return
         }
 
         let bookmarkData = bookmarkData(for: URL(fileURLWithPath: expanded))
-        let entry = CustomScanDirectory(path: expanded, bookmarkData: bookmarkData)
-        scanDirectories.append(entry)
-        syncConfigFromScanDirectories()
+        let provisionalEntry = CustomScanDirectory(path: expanded, bookmarkData: bookmarkData)
+        let entry = CustomScanDirectory(
+            path: ScanLocationProvider.canonicalExistingFilePath(resolvedURL(for: provisionalEntry)?.path ?? expanded),
+            bookmarkData: bookmarkData
+        )
+        scanLocationConfiguration.customDirectories.append(entry)
         scanRootAccessWarning = nil
-        persistScanDirectories()
+        persistScanLocations()
+        requestLocationRefresh()
     }
 
     func removeCustomPath(_ path: String) {
-        let normalized = ScanLocationProvider.normalizePersistedPath(path)
-        scanDirectories.removeAll { $0.path == normalized }
-        syncConfigFromScanDirectories()
-        persistScanDirectories()
+        let normalized = ScanLocationProvider.canonicalExistingFilePath(path)
+        scanLocationConfiguration.customDirectories.removeAll { $0.path == normalized }
+        persistScanLocations()
+        requestLocationRefresh()
+    }
+
+    private func requestLocationRefresh() {
+        let signature = ScanSchedulerPolicy.scanRootsSignature(scanRoots().roots)
+        refreshCoordinator.request(signature: signature, forceRepositoryDiscovery: true)
+        guard !locationRefreshDrainScheduled else { return }
+        locationRefreshDrainScheduled = true
+        Task { @MainActor in
+            await Task.yield()
+            self.locationRefreshDrainScheduled = false
+            self.startNextCoalescedScanIfNeeded()
+        }
     }
 
     private func normalizeConfig(_ config: ScanConfig) -> ScanConfig {
@@ -1317,21 +1445,17 @@ final class ScanScheduler: ObservableObject {
         return normalized
     }
 
-    private func syncConfigFromScanDirectories() {
-        var updatedConfig = config
-        updatedConfig.enabledBuiltInPaths = Set(
-            updatedConfig.enabledBuiltInPaths
-                .map(ScanLocationProvider.normalizePersistedPath)
-                .filter(ScanLocationProvider.isBuiltInPath)
-        )
-        updatedConfig.customPaths = scanDirectories.map(\.path).sorted()
-        config = updatedConfig
-    }
-
     private func defaultScanConfig() -> ScanConfig {
         var defaultConfig = ScanConfig.default
         defaultConfig.enabledBuiltInPaths = ScanLocationProvider.builtInAbsoluteSet
         return defaultConfig
+    }
+
+    private func scanConfigForExecution() -> ScanConfig {
+        var executionConfig = config
+        executionConfig.enabledBuiltInPaths = scanLocationConfiguration.enabledBuiltInPaths
+        executionConfig.customPaths = scanLocationConfiguration.customDirectories.map(\.path)
+        return executionConfig
     }
 
     private func sanitizeScanDirectories(_ directories: [CustomScanDirectory]) -> [CustomScanDirectory] {
@@ -1340,7 +1464,7 @@ final class ScanScheduler: ObservableObject {
         var containerCount = 0
 
         for directory in directories {
-            let normalizedPath = ScanLocationProvider.normalizePersistedPath(directory.path)
+            let normalizedPath = ScanLocationProvider.canonicalExistingFilePath(resolvedURL(for: directory)?.path ?? directory.path)
             if isAppContainerPath(normalizedPath) {
                 containerCount += 1
             } else if isAccessibleScanRoot(normalizedPath) {
@@ -1387,8 +1511,9 @@ final class ScanScheduler: ObservableObject {
               isDir.boolValue else {
             return false
         }
-        return (try? FileManager.default.contentsOfDirectory(atPath: path)) != nil
+        return true
     }
+
 
     private func bookmarkData(for url: URL) -> Data? {
         try? url.bookmarkData(
@@ -1400,13 +1525,13 @@ final class ScanScheduler: ObservableObject {
 
     private func updateBookmark(for path: String, with data: Data) {
         let normalized = ScanLocationProvider.normalizePersistedPath(path)
-        guard let index = scanDirectories.firstIndex(where: { $0.path == normalized }) else { return }
-        scanDirectories[index] = CustomScanDirectory(
-            id: scanDirectories[index].id,
+        guard let index = scanLocationConfiguration.customDirectories.firstIndex(where: { $0.path == normalized }) else { return }
+        scanLocationConfiguration.customDirectories[index] = CustomScanDirectory(
+            id: scanLocationConfiguration.customDirectories[index].id,
             path: normalized,
             bookmarkData: data
         )
-        persistScanDirectories()
+        persistScanLocations()
     }
 
     private func isAppContainerPath(_ path: String) -> Bool {

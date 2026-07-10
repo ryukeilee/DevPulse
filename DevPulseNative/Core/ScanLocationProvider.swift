@@ -64,6 +64,15 @@ enum ScanLocationProvider {
         return userHome + String(expanded.dropFirst(containerHome.count))
     }
 
+    static func canonicalExistingFilePath(_ path: String) -> String {
+        let normalized = normalizePersistedPath(path)
+        guard !isBuiltInPath(normalized),
+              FileManager.default.fileExists(atPath: normalized),
+              let resolved = realpath(normalized, nil) else { return normalized }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
     static func isLikelySandboxContainerPath(_ path: String) -> Bool {
         let normalized = path.trimmingCharacters(in: .whitespacesAndNewlines)
         return normalized.contains("/Library/Containers/")

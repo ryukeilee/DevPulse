@@ -3,6 +3,100 @@ import Testing
 @testable import DevPulse
 
 struct CommitReadinessEngineTests {
+    @Test func legacyBuiltInMigrationKeepsLoadedConfigAuthoritative() {
+        let defaultBuiltIns: Set<String> = ["D"]
+        #expect(ScanSchedulerPolicy.migratedBuiltInPaths(configWasLoaded: true, configuredBuiltIns: [], directoryBuiltIns: ["B"], defaultBuiltIns: defaultBuiltIns) == [])
+        #expect(ScanSchedulerPolicy.migratedBuiltInPaths(configWasLoaded: true, configuredBuiltIns: ["A"], directoryBuiltIns: ["B"], defaultBuiltIns: defaultBuiltIns) == ["A"])
+        #expect(ScanSchedulerPolicy.migratedBuiltInPaths(configWasLoaded: false, configuredBuiltIns: [], directoryBuiltIns: ["B"], defaultBuiltIns: defaultBuiltIns) == ["B"])
+        #expect(ScanSchedulerPolicy.migratedBuiltInPaths(configWasLoaded: false, configuredBuiltIns: [], directoryBuiltIns: [], defaultBuiltIns: defaultBuiltIns) == defaultBuiltIns)
+    }
+    @Test func scanRefreshCoordinatorFailureDrainsOnlyLatestPendingRequest() {
+        var coordinator = ScanRefreshCoordinator()
+        coordinator.request(signature: "A", forceRepositoryDiscovery: false)
+        _ = coordinator.beginNext()
+        coordinator.request(signature: "B", forceRepositoryDiscovery: true)
+        coordinator.request(signature: "C", forceRepositoryDiscovery: true)
+
+        #expect(coordinator.completeCurrent() == .init(signature: "C", forceRepositoryDiscovery: true))
+        _ = coordinator.beginNext()
+        #expect(coordinator.completeCurrent() == nil)
+    }
+
+    @Test func startupRefreshPolicyForcesFreshSnapshotWhenRootsSignatureChanges() {
+        #expect(
+            ScanSchedulerPolicy.startupRefreshDecision(
+                snapshotIsFresh: true,
+                currentRootsSignature: "A",
+                lastDiscoveryRootsSignature: "B"
+            ).forceRepositoryDiscovery
+        )
+    }
+
+    @Test func startupRefreshPolicyDoesNotForceMatchingOrAllOffRoots() {
+        #expect(!ScanSchedulerPolicy.startupRefreshDecision(snapshotIsFresh: true, currentRootsSignature: "A", lastDiscoveryRootsSignature: "A").forceRepositoryDiscovery)
+        #expect(ScanSchedulerPolicy.startupRefreshDecision(snapshotIsFresh: true, currentRootsSignature: "A", lastDiscoveryRootsSignature: nil).forceRepositoryDiscovery)
+        #expect(!ScanSchedulerPolicy.startupRefreshDecision(snapshotIsFresh: true, currentRootsSignature: "", lastDiscoveryRootsSignature: "").forceRepositoryDiscovery)
+    }
+    @Test func scanRefreshCoordinatorCoalescesBurstToLatestForcedRequest() {
+        var coordinator = ScanRefreshCoordinator()
+
+        coordinator.requestForced(signature: "A")
+        coordinator.request(signature: "B", forceRepositoryDiscovery: true)
+        coordinator.request(signature: "C", forceRepositoryDiscovery: true)
+
+        #expect(coordinator.beginNext() == .init(signature: "C", forceRepositoryDiscovery: true))
+        #expect(coordinator.beginNext() == nil)
+    }
+
+    @Test func scanRefreshCoordinatorQueuesOnlyLatestDifferentSignatureWhileRunning() {
+        var coordinator = ScanRefreshCoordinator()
+        coordinator.request(signature: "A", forceRepositoryDiscovery: false)
+        #expect(coordinator.beginNext() == .init(signature: "A", forceRepositoryDiscovery: false))
+
+        coordinator.request(signature: "B", forceRepositoryDiscovery: true)
+        coordinator.request(signature: "C", forceRepositoryDiscovery: true)
+        #expect(coordinator.completeCurrent() == .init(signature: "C", forceRepositoryDiscovery: true))
+    }
+
+    @Test func scanRefreshCoordinatorCancelsFollowUpWhenRootsReturnToRunningSignature() {
+        var coordinator = ScanRefreshCoordinator()
+        coordinator.request(signature: "A", forceRepositoryDiscovery: false)
+        _ = coordinator.beginNext()
+        coordinator.request(signature: "B", forceRepositoryDiscovery: true)
+        coordinator.request(signature: "A", forceRepositoryDiscovery: true)
+
+        #expect(coordinator.completeCurrent() == nil)
+    }
+
+    @Test func scanRefreshCoordinatorOrsForceForSameScheduledSignature() {
+        var coordinator = ScanRefreshCoordinator()
+        coordinator.request(signature: "A", forceRepositoryDiscovery: false)
+        coordinator.request(signature: "A", forceRepositoryDiscovery: true)
+
+        #expect(coordinator.beginNext() == .init(signature: "A", forceRepositoryDiscovery: true))
+    }
+
+    @Test func scanRefreshCoordinatorDrainsWakeAndConfigurationAsOneForcedLatestRequest() {
+        var coordinator = ScanRefreshCoordinator()
+        coordinator.request(signature: "A", forceRepositoryDiscovery: false)
+        _ = coordinator.beginNext()
+
+        coordinator.request(signature: "B", forceRepositoryDiscovery: false)
+        coordinator.request(signature: "C", forceRepositoryDiscovery: true)
+
+        #expect(coordinator.completeCurrent() == .init(signature: "C", forceRepositoryDiscovery: true))
+        #expect(coordinator.beginNext() == .init(signature: "C", forceRepositoryDiscovery: true))
+        #expect(coordinator.completeCurrent() == nil)
+    }
+
+    @Test func scanRefreshCoordinatorPreservesForcedWakeForRunningSignature() {
+        var coordinator = ScanRefreshCoordinator()
+        coordinator.request(signature: "A", forceRepositoryDiscovery: false)
+        _ = coordinator.beginNext()
+        coordinator.requestForced(signature: "A")
+
+        #expect(coordinator.completeCurrent() == .init(signature: "A", forceRepositoryDiscovery: true))
+    }
     @Test func refreshStatusIsFreshWithinTenMinutes() {
         let now = Date(timeIntervalSince1970: 1_718_000_000)
         let snapshot = now.addingTimeInterval(-9 * 60)
