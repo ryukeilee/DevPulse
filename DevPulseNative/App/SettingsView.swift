@@ -6,6 +6,7 @@ struct SettingsView: View {
     @EnvironmentObject var launchAtLoginController: LaunchAtLoginController
     @Binding var scrollTarget: SettingsScrollTarget?
     @State private var newCustomPath: String = ""
+    @State private var expandedDefaultScanPaths: Set<String> = []
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -1361,6 +1362,7 @@ struct SettingsView: View {
             DefaultScanGroup(
                 title: "开发工作区",
                 subtitle: "优先覆盖常见代码目录",
+                layout: .standard,
                 paths: [
                     ScanLocationProvider.expandTilde("~/Developer"),
                     ScanLocationProvider.expandTilde("~/Projects"),
@@ -1372,6 +1374,7 @@ struct SettingsView: View {
             DefaultScanGroup(
                 title: "常用位置",
                 subtitle: "补充桌面和文稿等常见入口",
+                layout: .compactDisclosure,
                 paths: [
                     ScanLocationProvider.expandTilde("~/Desktop"),
                     ScanLocationProvider.expandTilde("~/Documents")
@@ -1380,43 +1383,165 @@ struct SettingsView: View {
         ]
     }
 
+    @ViewBuilder
     private func defaultScanGroupSection(_ group: DefaultScanGroup) -> some View {
-        let visiblePaths = group.paths.filter { path in
-            return directoryExists(path) || scheduler.isBuiltInEnabled(path: path)
-        }
-        let missingPaths = group.paths.filter { path in
-            return !directoryExists(path) && !scheduler.isBuiltInEnabled(path: path)
-        }
-
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(group.title)
-                    .font(.caption.weight(.semibold))
-                Spacer()
-                Text(group.subtitle)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+        switch group.layout {
+        case .standard:
+            let visiblePaths = group.paths.filter { path in
+                return directoryExists(path) || scheduler.isBuiltInEnabled(path: path)
+            }
+            let missingPaths = group.paths.filter { path in
+                return !directoryExists(path) && !scheduler.isBuiltInEnabled(path: path)
             }
 
-            ForEach(visiblePaths, id: \.self) { path in
-                defaultScanToggleRow(for: path)
-            }
-
-            if !missingPaths.isEmpty {
-                DisclosureGroup("未找到的预设目录（\(missingPaths.count)）") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(missingPaths, id: \.self) { path in
-                            missingDefaultScanRow(for: path)
-                        }
-                    }
-                    .padding(.top, 6)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(group.title)
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Text(group.subtitle)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                 }
-                .font(.caption)
+
+                ForEach(visiblePaths, id: \.self) { path in
+                    defaultScanToggleRow(for: path)
+                }
+
+                if !missingPaths.isEmpty {
+                    DisclosureGroup("未找到的预设目录（\(missingPaths.count)）") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(missingPaths, id: \.self) { path in
+                                missingDefaultScanRow(for: path)
+                            }
+                        }
+                        .padding(.top, 6)
+                    }
+                    .font(.caption)
+                }
+            }
+            .padding(10)
+            .background(Color.secondary.opacity(0.06))
+            .cornerRadius(8)
+
+        case .compactDisclosure:
+            compactDefaultScanGroupSection(group)
+        }
+    }
+
+    private func compactDefaultScanGroupSection(_ group: DefaultScanGroup) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(group.title)
+                .font(.caption.weight(.semibold))
+                .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+                .padding(.horizontal, 10)
+
+            Divider()
+
+            ForEach(Array(group.paths.enumerated()), id: \.element) { index, path in
+                compactDefaultScanRow(for: path)
+
+                if index < group.paths.count - 1 {
+                    Divider()
+                        .padding(.leading, 10)
+                }
             }
         }
-        .padding(10)
         .background(Color.secondary.opacity(0.06))
-        .cornerRadius(8)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func compactDefaultScanRow(for path: String) -> some View {
+        let metadata = builtInDirectoryMetadata(for: path)
+        let exists = directoryExists(path)
+        let isExpanded = expandedDefaultScanPaths.contains(path)
+
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Button {
+                    toggleDefaultScanDetails(for: path)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.semibold))
+                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 10)
+
+                        Text(metadata.title)
+                            .font(.caption.weight(.semibold))
+
+                        defaultScanStatusBadge(exists: exists)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(isExpanded ? "收起" : "展开")\(metadata.title)详情")
+
+                Spacer(minLength: 8)
+
+                Toggle("启用\(metadata.title)扫描", isOn: Binding(
+                    get: { scheduler.isBuiltInEnabled(path: path) },
+                    set: { setBuiltInDirectoryEnabled(path, enabled: $0) }
+                ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .disabled(!exists && !scheduler.isBuiltInEnabled(path: path))
+            }
+            .frame(minHeight: 38)
+            .padding(.horizontal, 10)
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(metadata.subtitle)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    Text(compactHomeRelativePath(path))
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    if !exists {
+                        Text("路径不存在")
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+
+                        HStack(spacing: 8) {
+                            Button("创建并启用") {
+                                createBuiltInDirectoryAndEnable(path)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+
+                            Menu("更多") {
+                                Button("选择其他位置") {
+                                    chooseDirectoryAndRefresh()
+                                }
+                            }
+                            .controlSize(.small)
+                        }
+                        .padding(.top, 2)
+                    }
+                }
+                .padding(.leading, 26)
+                .padding(.trailing, 10)
+                .padding(.bottom, 10)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+    }
+
+    private func toggleDefaultScanDetails(for path: String) {
+        withAnimation(.easeInOut(duration: 0.16)) {
+            if expandedDefaultScanPaths.contains(path) {
+                expandedDefaultScanPaths.remove(path)
+            } else {
+                expandedDefaultScanPaths.insert(path)
+            }
+        }
     }
 
     @ViewBuilder
@@ -1568,5 +1693,11 @@ private struct DefaultScanGroup: Identifiable {
     let id = UUID()
     let title: String
     let subtitle: String
+    let layout: DefaultScanGroupLayout
     let paths: [String]
+}
+
+private enum DefaultScanGroupLayout {
+    case standard
+    case compactDisclosure
 }
