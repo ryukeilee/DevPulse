@@ -53,24 +53,21 @@ enum ScanLocationProvider {
         let userHome = resolvedUserHomeDirectory()
         let legacyContainerPrefix = legacyContainerHomePrefix()
 
-        if expanded.hasPrefix(legacyContainerPrefix) {
+        if RepositoryIdentity.isSameOrDescendantPath(expanded, of: legacyContainerPrefix) {
             return userHome + String(expanded.dropFirst(legacyContainerPrefix.count))
         }
 
         let containerHome = NSHomeDirectory()
         guard !containerHome.isEmpty,
               containerHome != userHome,
-              expanded.hasPrefix(containerHome) else { return expanded }
+              RepositoryIdentity.isSameOrDescendantPath(expanded, of: containerHome) else { return expanded }
         return userHome + String(expanded.dropFirst(containerHome.count))
     }
 
-    static func canonicalExistingFilePath(_ path: String) -> String {
+    static func canonicalExistingFilePath(_ path: String, resolveBuiltIn: Bool = false) -> String {
         let normalized = normalizePersistedPath(path)
-        guard !isBuiltInPath(normalized),
-              FileManager.default.fileExists(atPath: normalized),
-              let resolved = realpath(normalized, nil) else { return normalized }
-        defer { free(resolved) }
-        return String(cString: resolved)
+        guard resolveBuiltIn || !isBuiltInPath(normalized) else { return normalized }
+        return RepositoryIdentity.canonicalPath(normalized)
     }
 
     static func isLikelySandboxContainerPath(_ path: String) -> Bool {

@@ -142,7 +142,7 @@ enum GitRepositoryScanner {
             if let previous {
                 let changedPaths = Set(previous.repositories
                     .filter { $0.status == .changed || $0.status == .error }
-                    .map { $0.path })
+                    .map { RepositoryIdentity.canonicalPath($0.path) })
                 let active = pathsToScan.filter { changedPaths.contains($0) }
                 if !active.isEmpty {
                     warnings.append("Throttling: scanning \(active.count) active repos out of \(pathsToScan.count) total (threshold \(config.activeRepoThreshold))")
@@ -173,7 +173,9 @@ enum GitRepositoryScanner {
         }
 
         let retainedSnapshots = retainedPaths.compactMap { path in
-            previous?.repositories.first(where: { $0.path == path })
+            previous?.repositories.first(where: {
+                RepositoryIdentity.canonicalPath($0.path) == RepositoryIdentity.canonicalPath(path)
+            })
         }
         let completeSnapshots = mergeSnapshots(
             snapshots + retainedSnapshots,
@@ -247,7 +249,9 @@ enum GitRepositoryScanner {
                                              warnings: inout [String]) async -> [String] {
         var discovered = Set<String>()
         let allPaths = scanRoots ?? Array(config.enabledBuiltInPaths) + config.customPaths
-        let normalizedRoots = allPaths.map(ScanLocationProvider.expandTilde)
+        let normalizedRoots = Array(Set(allPaths.map {
+            ScanLocationProvider.canonicalExistingFilePath($0, resolveBuiltIn: true)
+        })).sorted()
         let cacheKey = discoveryCacheKey(for: normalizedRoots)
 
         if !forceRefresh,
@@ -294,10 +298,14 @@ enum GitRepositoryScanner {
         _ knownRepositoryPaths: [String],
         limitedTo scanRoots: [String]
     ) -> [String]? {
-        let normalizedRoots = scanRoots.map(ScanLocationProvider.expandTilde)
+        let normalizedRoots = scanRoots.map {
+            ScanLocationProvider.canonicalExistingFilePath($0, resolveBuiltIn: true)
+        }
         let filtered = Set(
             knownRepositoryPaths
-                .map(ScanLocationProvider.expandTilde)
+                .map {
+                    ScanLocationProvider.canonicalExistingFilePath($0, resolveBuiltIn: true)
+                }
                 .filter { path in
                     guard FileManager.default.fileExists(atPath: path) else {
                         return false
@@ -328,6 +336,8 @@ enum GitRepositoryScanner {
         guard !Task.isCancelled else { return }
         guard depth <= config.maxDepth else { return }
 
+        let directory = ScanLocationProvider.canonicalExistingFilePath(directory, resolveBuiltIn: true)
+
         if isGitRepository(directory) {
             discovered.insert(directory)
             return
@@ -349,7 +359,7 @@ enum GitRepositoryScanner {
 
         for entryURL in entries {
             if Task.isCancelled { return }
-            let fullPath = entryURL.path
+            let fullPath = ScanLocationProvider.canonicalExistingFilePath(entryURL.path, resolveBuiltIn: true)
             let entryName = entryURL.lastPathComponent
 
             guard !ExcludedDirectoryRules.isExcluded(dirName: entryName) else { continue }
@@ -387,7 +397,17 @@ enum GitRepositoryScanner {
                                              previousSnapshots: [RepositorySnapshot]) async -> [RepositorySnapshot] {
         guard !paths.isEmpty else { return [] }
 
-        let previousByPath = Dictionary(uniqueKeysWithValues: previousSnapshots.map { ($0.path, $0) })
+        var previousByPath: [String: RepositorySnapshot] = [:]
+        for previous in previousSnapshots {
+            let normalized = RepositoryIdentity.normalize(previous)
+            if let existing = previousByPath[normalized.path], existing.isPinned || normalized.isPinned {
+                var merged = existing
+                merged.isPinned = true
+                previousByPath[normalized.path] = merged
+            } else {
+                previousByPath[normalized.path] = normalized
+            }
+        }
         var resultsByIndex: [Int: SnapshotReadResult] = [:]
 
         // Filter out slow repos
@@ -496,7 +516,7 @@ enum GitRepositoryScanner {
                 continue
             }
 
-            if let previous = previousByPath[path] {
+            if let previous = previousByPath[RepositoryIdentity.canonicalPath(path)] {
                 results.append(previous)
                 continue
             }
@@ -530,8 +550,9 @@ enum GitRepositoryScanner {
     private static func readSingleSnapshot(repoPath: String,
                                            config: ScanConfig,
                                            overallDeadline: Date? = nil) -> RepositorySnapshot? {
+        let repoPath = RepositoryIdentity.canonicalPath(repoPath)
         let name = (repoPath as NSString).lastPathComponent
-        let id = stableHash(repoPath)
+        let id = RepositoryIdentity.id(for: repoPath)
         let cancellationCheck: @Sendable () -> Bool = { Task.isCancelled }
         func commandTimeout() -> TimeInterval {
             guard let overallDeadline else { return config.gitCommandTimeout }
@@ -617,8 +638,9 @@ enum GitRepositoryScanner {
     }
 
     private static func placeholderSnapshot(for path: String, errorMessage: String) -> RepositorySnapshot {
-        RepositorySnapshot(
-            id: stableHash(path),
+        let path = RepositoryIdentity.canonicalPath(path)
+        return RepositorySnapshot(
+            id: RepositoryIdentity.id(for: path),
             name: (path as NSString).lastPathComponent,
             path: path,
             branch: "unknown",
@@ -646,27 +668,46 @@ enum GitRepositoryScanner {
         discoveredPaths: [String],
         previousSnapshot: AppGroupData?
     ) -> [RepositorySnapshot] {
-        var byPath = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.path, $0) })
-        let previousByPath = Dictionary(uniqueKeysWithValues: (previousSnapshot?.repositories ?? []).map { ($0.path, $0) })
+        var byPath: [String: RepositorySnapshot] = [:]
+        for snapshot in snapshots.map(RepositoryIdentity.normalize) {
+            if let existing = byPath[snapshot.path], existing.isPinned || snapshot.isPinned {
+                var merged = existing
+                merged.isPinned = true
+                byPath[snapshot.path] = merged
+            } else {
+                byPath[snapshot.path] = snapshot
+            }
+        }
+        var previousByPath: [String: RepositorySnapshot] = [:]
+        for previous in previousSnapshot?.repositories ?? [] {
+            let normalized = RepositoryIdentity.normalize(previous)
+            if let existing = previousByPath[normalized.path], existing.isPinned || normalized.isPinned {
+                var merged = existing
+                merged.isPinned = true
+                previousByPath[normalized.path] = merged
+            } else {
+                previousByPath[normalized.path] = normalized
+            }
+        }
 
-        for path in discoveredPaths where byPath[path] == nil {
-            byPath[path] = previousByPath[path] ?? placeholderSnapshot(
-                for: path,
+        for path in discoveredPaths {
+            let normalizedPath = RepositoryIdentity.canonicalPath(path)
+            guard byPath[normalizedPath] == nil else { continue }
+            byPath[normalizedPath] = previousByPath[normalizedPath] ?? placeholderSnapshot(
+                for: normalizedPath,
                 errorMessage: "本轮未完成扫描"
             )
         }
 
-        return discoveredPaths.compactMap { byPath[$0] }
+        var seen = Set<String>()
+        return discoveredPaths.compactMap { path in
+            let normalizedPath = RepositoryIdentity.canonicalPath(path)
+            guard seen.insert(normalizedPath).inserted else { return nil }
+            return byPath[normalizedPath]
+        }
     }
 
     // MARK: - Helpers
-
-    private static func stableHash(_ input: String) -> String {
-        var hasher = Hasher()
-        hasher.combine(input)
-        let hashValue = hasher.finalize()
-        return String(format: "%08x", hashValue)
-    }
 
     private static func discoveryCacheKey(for roots: [String]) -> String {
         roots.sorted().joined(separator: "\n")

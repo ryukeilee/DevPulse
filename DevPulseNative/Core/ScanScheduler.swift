@@ -481,7 +481,7 @@ final class ScanScheduler: ObservableObject {
         }
         set {
             UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
-                .set(Array(newValue), forKey: pinnedKey)
+                .set(newValue.sorted(), forKey: pinnedKey)
         }
     }
 
@@ -924,30 +924,49 @@ final class ScanScheduler: ObservableObject {
         syncStoreInspection()
         switch AppGroupStore.read() {
         case .success(let snapshot):
-            let pinned = applyPins(snapshot)
+            let migration = RepositoryIdentityMigration.migrate(
+                snapshot: snapshot,
+                pinnedIDs: pinnedRepoIDs
+            )
+            if migration.pinnedIDs != pinnedRepoIDs {
+                pinnedRepoIDs = migration.pinnedIDs
+            }
+
+            let migratedPinnedSnapshot = applyPins(migration.snapshot)
+            var restoredSnapshot = migration.snapshot
+            if migration.changed {
+                let written = migratedPinnedSnapshot.withWrittenAt(
+                    snapshot.writtenAt ?? DateFormatting.nowISO()
+                )
+                if case .success(let verified) = AppGroupStore.write(written) {
+                    restoredSnapshot = verified
+                }
+            }
+
+            let pinned = applyPins(restoredSnapshot)
             lastResult = pinned
             diagnostics.lastSnapshotStoreTrigger = "startup"
             diagnostics.lastSnapshotStoreState = .restored
-            diagnostics.lastSnapshotStoreDetail = "启动时已恢复 \(snapshot.repositories.count) 个仓库的共享快照。"
-            diagnostics.sharedDataSnapshot = snapshot
+            diagnostics.lastSnapshotStoreDetail = "启动时已恢复 \(restoredSnapshot.repositories.count) 个仓库的共享快照。"
+            diagnostics.sharedDataSnapshot = restoredSnapshot
             diagnostics.snapshotDecodable = true
             let now = Date()
             diagnostics.sharedDataReadAt = now
             diagnostics.sharedDataReadError = nil
-            diagnostics.lastGeneratedAt = snapshot.generatedAt
-            diagnostics.lastWrittenAt = snapshot.writtenAt
-            if let writtenAt = snapshot.writtenAt.flatMap(DateFormatting.date(from:)) {
+            diagnostics.lastGeneratedAt = restoredSnapshot.generatedAt
+            diagnostics.lastWrittenAt = restoredSnapshot.writtenAt
+            if let writtenAt = restoredSnapshot.writtenAt.flatMap(DateFormatting.date(from:)) {
                 diagnostics.lastSharedWriteAt = writtenAt
             }
-            if let generatedAt = DateFormatting.date(from: snapshot.generatedAt) {
+            if let generatedAt = DateFormatting.date(from: restoredSnapshot.generatedAt) {
                 lastScanAt = generatedAt
                 diagnostics.lastScanAt = generatedAt
             }
             refreshPhase = .idle
             refreshFailureMessage = nil
             warnings = []
-            setWidgetReadableSnapshot(snapshot, readAt: now)
-            validateConsistency(expected: pinned, shared: snapshot, widget: diagnostics.widgetSnapshot, reason: "startup")
+            setWidgetReadableSnapshot(restoredSnapshot, readAt: now)
+            validateConsistency(expected: pinned, shared: restoredSnapshot, widget: diagnostics.widgetSnapshot, reason: "startup")
         case .failure(.snapshotMissing):
             diagnostics.snapshotDecodable = false
             diagnostics.sharedDataSnapshot = nil
@@ -1319,8 +1338,15 @@ final class ScanScheduler: ObservableObject {
     // MARK: - Pins
 
     private func applyPins(_ data: AppGroupData) -> AppGroupData {
-        let pinnedIDs = pinnedRepoIDs
-        var repos = data.repositories.map { repo -> RepositorySnapshot in
+        let migration = RepositoryIdentityMigration.migrate(
+            snapshot: data,
+            pinnedIDs: pinnedRepoIDs
+        )
+        if migration.pinnedIDs != pinnedRepoIDs {
+            pinnedRepoIDs = migration.pinnedIDs
+        }
+        let pinnedIDs = migration.pinnedIDs
+        var repos = migration.snapshot.repositories.map { repo -> RepositorySnapshot in
             var copy = repo
             copy.isPinned = pinnedIDs.contains(repo.id)
             return copy
@@ -1328,10 +1354,10 @@ final class ScanScheduler: ObservableObject {
         repos = RepositorySorter.sort(repos)
 
         return AppGroupData(
-            schemaVersion: data.schemaVersion,
-            generatedAt: data.generatedAt,
-            writtenAt: data.writtenAt,
-            scanSummary: data.scanSummary,
+            schemaVersion: migration.snapshot.schemaVersion,
+            generatedAt: migration.snapshot.generatedAt,
+            writtenAt: migration.snapshot.writtenAt,
+            scanSummary: migration.snapshot.scanSummary,
             repositories: repos
         )
     }

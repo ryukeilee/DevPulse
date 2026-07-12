@@ -86,6 +86,81 @@ struct RepositoryDiscoveryExperienceTests {
         #expect(count == 0)
     }
     @MainActor
+    @Test func schedulerRebuildMigratesLegacyPinsAndSharedSnapshotIdentity() throws {
+        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let pinnedKey = "pinned_repo_ids"
+        let previousPinned = defaults.stringArray(forKey: pinnedKey)
+        let previousSnapshot = try? AppGroupStore.read().get()
+        defer {
+            if let previousPinned {
+                defaults.set(previousPinned, forKey: pinnedKey)
+            } else {
+                defaults.removeObject(forKey: pinnedKey)
+            }
+            if let previousSnapshot {
+                _ = AppGroupStore.write(previousSnapshot)
+            } else if let url = AppGroupStore.snapshotURL {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+
+        let root = try temporaryDirectory(named: "legacy-pin-rebuild")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let now = DateFormatting.nowISO()
+        let legacySnapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: now,
+            writtenAt: now,
+            scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 0, totalChangedFiles: 0, errorRepositories: 0),
+            repositories: [RepositorySnapshot(
+                id: "legacy-pin-id",
+                name: "legacy-pin-repo",
+                path: root.path,
+                branch: "main",
+                status: .clean,
+                modifiedFileCount: 0,
+                addedFileCount: 0,
+                deletedFileCount: 0,
+                untrackedFileCount: 0,
+                stagedFileCount: 0,
+                unstagedFileCount: 0,
+                conflictedFileCount: 0,
+                aheadCount: 0,
+                changedFileCount: 0,
+                changedFilesPreview: [],
+                risk: .low,
+                lastScannedAt: now,
+                lastChangedAt: nil,
+                errorMessage: nil,
+                isPinned: false
+            )]
+        )
+        _ = AppGroupStore.write(legacySnapshot)
+        defaults.set(["legacy-pin-id", "legacy-unknown"], forKey: pinnedKey)
+
+        let scheduler = ScanScheduler()
+        defer { scheduler.stopBackgroundScanning() }
+        let expectedID = RepositoryIdentity.id(for: root.path)
+        let restored = try #require(scheduler.lastResult.repositories.first)
+
+        #expect(restored.id == expectedID)
+        #expect(restored.path == RepositoryIdentity.canonicalPath(root.path))
+        #expect(restored.isPinned)
+        #expect(scheduler.pinnedRepoIDs.contains(expectedID))
+        #expect(scheduler.pinnedRepoIDs.contains("legacy-unknown"))
+        #expect(!scheduler.pinnedRepoIDs.contains("legacy-pin-id"))
+
+        let rebuilt = ScanScheduler()
+        defer { rebuilt.stopBackgroundScanning() }
+        let rebuiltRepository = try #require(rebuilt.lastResult.repositories.first)
+        #expect(rebuiltRepository.id == expectedID)
+        #expect(rebuiltRepository.isPinned)
+        let persistedSnapshot = try #require(try? AppGroupStore.read().get())
+        let persisted = try #require(persistedSnapshot.repositories.first)
+        #expect(persisted.id == expectedID)
+        #expect(persisted.isPinned)
+    }
+    @MainActor
     @Test func startupRootsMismatchForcesDiscoveryEvenWithFreshSnapshot() async throws {
         let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
         let locationsKey = "scan_locations_v1_json"

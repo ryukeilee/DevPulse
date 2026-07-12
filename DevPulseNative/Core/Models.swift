@@ -1,9 +1,237 @@
 import Foundation
+import CryptoKit
+import Darwin
 
 // MARK: - Schema constants
 
 enum RepositorySnapshotSchema {
     static let version = 1
+}
+
+/// Stable repository identity shared by the app, scheduler, and Widget.
+///
+/// The identity is deliberately based on a canonical filesystem path rather
+/// than process-seeded hashing. The version prefix makes future
+/// migrations explicit and keeps IDs from older algorithms distinguishable.
+enum RepositoryIdentity {
+    static let version = 1
+    private static let prefix = "repo-v\(version)-"
+
+    static func isSameOrDescendantPath(_ path: String, of prefix: String) -> Bool {
+        let normalizedPrefix: String
+        if prefix.count > 1, prefix.hasSuffix("/") {
+            normalizedPrefix = String(prefix.dropLast())
+        } else {
+            normalizedPrefix = prefix
+        }
+        guard !normalizedPrefix.isEmpty else { return false }
+        if normalizedPrefix == "/" {
+            return path.hasPrefix("/")
+        }
+        return path == normalizedPrefix || path.hasPrefix(normalizedPrefix + "/")
+    }
+
+    static func canonicalPath(_ rawPath: String) -> String {
+        let expanded: String
+        if rawPath == "~" {
+            expanded = resolvedUserHomeDirectory()
+        } else if rawPath.hasPrefix("~/") {
+            expanded = resolvedUserHomeDirectory() + String(rawPath.dropFirst(1))
+        } else {
+            expanded = rawPath
+        }
+
+        let home = resolvedUserHomeDirectory()
+        let legacyContainerPrefix = home + "/Library/Containers/local.devpulse.app/Data"
+        let sandboxHome = NSHomeDirectory()
+        let migratedPath: String
+        if isSameOrDescendantPath(expanded, of: legacyContainerPrefix) {
+            migratedPath = home + String(expanded.dropFirst(legacyContainerPrefix.count))
+        } else if sandboxHome != home, isSameOrDescendantPath(expanded, of: sandboxHome) {
+            migratedPath = home + String(expanded.dropFirst(sandboxHome.count))
+        } else {
+            migratedPath = expanded
+        }
+
+        let standardized = URL(fileURLWithPath: migratedPath).standardizedFileURL.path
+        guard FileManager.default.fileExists(atPath: standardized) else {
+            return standardized
+        }
+        return URL(fileURLWithPath: standardized)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .path
+    }
+
+    private static func resolvedUserHomeDirectory() -> String {
+        let candidates: [String?] = [
+            passwdHomeDirectory(),
+            ProcessInfo.processInfo.environment["HOME"],
+            NSHomeDirectory()
+        ]
+        for candidate in candidates.compactMap({ $0 }) {
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  !trimmed.contains("/Library/Containers/"),
+                  !trimmed.contains("/Containers/local.devpulse.app/") else { continue }
+            return trimmed
+        }
+        let username = NSUserName()
+        return username.isEmpty ? "/Users" : "/Users/\(username)"
+    }
+
+    private static func passwdHomeDirectory() -> String? {
+        let uid = getuid()
+        guard let entry = getpwuid(uid), let home = entry.pointee.pw_dir else { return nil }
+        return String(cString: home)
+    }
+
+    static func id(for rawPath: String) -> String {
+        let path = canonicalPath(rawPath)
+        let digest = SHA256.hash(data: Data(path.utf8))
+        return prefix + digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func normalize(_ snapshot: RepositorySnapshot) -> RepositorySnapshot {
+        let path = canonicalPath(snapshot.path)
+        return RepositorySnapshot(
+            id: id(for: path),
+            name: snapshot.name,
+            path: path,
+            branch: snapshot.branch,
+            status: snapshot.status,
+            modifiedFileCount: snapshot.modifiedFileCount,
+            addedFileCount: snapshot.addedFileCount,
+            deletedFileCount: snapshot.deletedFileCount,
+            untrackedFileCount: snapshot.untrackedFileCount,
+            stagedFileCount: snapshot.stagedFileCount,
+            unstagedFileCount: snapshot.unstagedFileCount,
+            conflictedFileCount: snapshot.conflictedFileCount,
+            aheadCount: snapshot.aheadCount,
+            changedFileCount: snapshot.changedFileCount,
+            changedFilesPreview: snapshot.changedFilesPreview,
+            risk: snapshot.risk,
+            lastScannedAt: snapshot.lastScannedAt,
+            lastChangedAt: snapshot.lastChangedAt,
+            errorMessage: snapshot.errorMessage,
+            isPinned: snapshot.isPinned
+        )
+    }
+
+    static func normalize(_ data: AppGroupData) -> AppGroupData {
+        var byPath: [String: RepositorySnapshot] = [:]
+        for repository in data.repositories {
+            let normalized = normalize(repository)
+            if let existing = byPath[normalized.path] {
+                byPath[normalized.path] = mergeDuplicate(existing, normalized)
+            } else {
+                byPath[normalized.path] = normalized
+            }
+        }
+
+        var repositories: [RepositorySnapshot] = []
+        var seenPaths: Set<String> = []
+        for repository in data.repositories {
+            let path = canonicalPath(repository.path)
+            guard seenPaths.insert(path).inserted, let normalized = byPath[path] else { continue }
+            repositories.append(normalized)
+        }
+
+        let summary = ScanSummary(
+            totalRepositories: repositories.count,
+            changedRepositories: repositories.filter { $0.status == .changed }.count,
+            totalChangedFiles: repositories.reduce(0) { $0 + $1.changedFileCount },
+            errorRepositories: repositories.filter { $0.status == .error }.count
+        )
+        return AppGroupData(
+            schemaVersion: data.schemaVersion,
+            generatedAt: data.generatedAt,
+            writtenAt: data.writtenAt,
+            scanSummary: summary,
+            repositories: repositories
+        )
+    }
+
+    private static func mergeDuplicate(_ lhs: RepositorySnapshot,
+                                       _ rhs: RepositorySnapshot) -> RepositorySnapshot {
+        guard !lhs.isPinned || rhs.isPinned else { return lhs }
+        return RepositorySnapshot(
+            id: lhs.id,
+            name: lhs.name,
+            path: lhs.path,
+            branch: lhs.branch,
+            status: lhs.status,
+            modifiedFileCount: lhs.modifiedFileCount,
+            addedFileCount: lhs.addedFileCount,
+            deletedFileCount: lhs.deletedFileCount,
+            untrackedFileCount: lhs.untrackedFileCount,
+            stagedFileCount: lhs.stagedFileCount,
+            unstagedFileCount: lhs.unstagedFileCount,
+            conflictedFileCount: lhs.conflictedFileCount,
+            aheadCount: lhs.aheadCount,
+            changedFileCount: lhs.changedFileCount,
+            changedFilesPreview: lhs.changedFilesPreview,
+            risk: lhs.risk,
+            lastScannedAt: lhs.lastScannedAt,
+            lastChangedAt: lhs.lastChangedAt,
+            errorMessage: lhs.errorMessage,
+            isPinned: true
+        )
+    }
+}
+
+struct RepositoryIdentityMigrationResult: Equatable {
+    let snapshot: AppGroupData
+    let pinnedIDs: Set<String>
+    let changed: Bool
+}
+
+enum RepositoryIdentityMigration {
+    /// Normalize one persisted snapshot and safely translate pins that can be
+    /// unambiguously mapped from legacy ID -> path relationships.
+    static func migrate(snapshot: AppGroupData,
+                        pinnedIDs: Set<String>) -> RepositoryIdentityMigrationResult {
+        var pathsByLegacyID: [String: Set<String>] = [:]
+        var pinsFromSnapshot: Set<String> = []
+        for repository in snapshot.repositories {
+            let path = RepositoryIdentity.canonicalPath(repository.path)
+            pathsByLegacyID[repository.id, default: []].insert(path)
+            if repository.isPinned {
+                pinsFromSnapshot.insert(RepositoryIdentity.id(for: path))
+            }
+        }
+
+        var migratedPins = pinsFromSnapshot
+        for pinnedID in pinnedIDs {
+            guard let paths = pathsByLegacyID[pinnedID], paths.count == 1,
+                  let path = paths.first else {
+                // Preserve unknown or ambiguous values. They cannot safely be
+                // attached to a new repository identity yet.
+                migratedPins.insert(pinnedID)
+                continue
+            }
+            migratedPins.insert(RepositoryIdentity.id(for: path))
+        }
+
+        let normalizedSnapshot = RepositoryIdentity.normalize(snapshot)
+        let pinnedSnapshot = AppGroupData(
+            schemaVersion: normalizedSnapshot.schemaVersion,
+            generatedAt: normalizedSnapshot.generatedAt,
+            writtenAt: normalizedSnapshot.writtenAt,
+            scanSummary: normalizedSnapshot.scanSummary,
+            repositories: normalizedSnapshot.repositories.map { repository in
+                var copy = repository
+                copy.isPinned = migratedPins.contains(repository.id)
+                return copy
+            }
+        )
+
+        return RepositoryIdentityMigrationResult(
+            snapshot: pinnedSnapshot,
+            pinnedIDs: migratedPins,
+            changed: pinnedSnapshot != snapshot || migratedPins != pinnedIDs
+        )
+    }
 }
 
 enum SharedSnapshotLocation {

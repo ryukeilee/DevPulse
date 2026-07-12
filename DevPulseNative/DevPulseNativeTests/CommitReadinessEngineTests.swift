@@ -1231,6 +1231,58 @@ struct CommitReadinessEngineTests {
         #expect(repo.changedFileCount == 0)
     }
 
+    @Test func gitScannerDeduplicatesSymlinkRootsAndKeepsIdentityAcrossRescan() async throws {
+        let root = try temporaryDirectory(named: "scanner-identity-symlink")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repo")
+        let alias = root.appendingPathComponent("repo-alias")
+        try createCommittedRepository(at: repository)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: repository)
+
+        let first = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [repository.path, alias.path],
+            forceRepositoryDiscovery: true
+        )
+        let second = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [alias.path],
+            forceRepositoryDiscovery: true,
+            previousSnapshot: first.data
+        )
+        let timeoutConfig = ScanConfig(
+            enabledBuiltInPaths: [],
+            customPaths: [],
+            maxDepth: testScanConfig.maxDepth,
+            changedPreviewLimit: testScanConfig.changedPreviewLimit,
+            maxConcurrentGitOps: testScanConfig.maxConcurrentGitOps,
+            gitCommandTimeout: testScanConfig.gitCommandTimeout,
+            scanTimeout: 0,
+            slowReposkipSeconds: testScanConfig.slowReposkipSeconds,
+            activeRepoThreshold: testScanConfig.activeRepoThreshold
+        )
+        let timedOut = await GitRepositoryScanner.scan(
+            config: timeoutConfig,
+            scanRoots: [alias.path],
+            knownRepositoryPaths: [alias.path],
+            forceRepositoryDiscovery: true,
+            previousSnapshot: first.data
+        )
+        let firstRepo = try #require(first.data.repositories.first)
+        let secondRepo = try #require(second.data.repositories.first)
+        let timedOutRepo = try #require(timedOut.data.repositories.first)
+
+        #expect(first.data.repositories.count == 1)
+        #expect(second.data.repositories.count == 1)
+        #expect(firstRepo.path == RepositoryIdentity.canonicalPath(repository.path))
+        #expect(secondRepo.path == firstRepo.path)
+        #expect(secondRepo.id == firstRepo.id)
+        #expect(secondRepo.id == RepositoryIdentity.id(for: repository.path))
+        #expect(ScanLocationProvider.canonicalExistingFilePath(alias.path, resolveBuiltIn: true) == firstRepo.path)
+        #expect(timedOutRepo.path == firstRepo.path)
+        #expect(timedOutRepo.id == firstRepo.id)
+    }
+
     @Test func gitScannerMarksMixedStagedRepositoryForReview() async throws {
         let root = try temporaryDirectory(named: "scanner-mixed")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1487,6 +1539,7 @@ struct CommitReadinessEngineTests {
         #expect(retained == baselineRepo)
         #expect(timedOut.data.repositories.count == 1)
         #expect(timedOut.warnings.contains { $0.contains("timeout") })
+        #expect(retained.id == RepositoryIdentity.id(for: retained.path))
     }
 
     @Test func processRunnerStopsCancelledCommand() async throws {
@@ -1774,9 +1827,111 @@ struct CommitReadinessEngineTests {
         )
     }
 
+    @Test func repositoryIdentityUsesStableVersionedVectorsAndSeparatesPaths() {
+        #expect(RepositoryIdentity.version == 1)
+        #expect(
+            RepositoryIdentity.id(for: "/tmp/devpulse/repo-a")
+                == "repo-v1-9daedea3d77b063f6e809b4aa098d6dbc4310c076f6e803c08a5dcc93cab70df"
+        )
+        #expect(
+            RepositoryIdentity.id(for: "/tmp/devpulse/repo-b")
+                == "repo-v1-859523e533d3e1b18365db670bd71098f137e2832bad6881cd761bb96b6081b8"
+        )
+        #expect(RepositoryIdentity.id(for: "/tmp/devpulse/repo-a") != RepositoryIdentity.id(for: "/tmp/devpulse/repo-b"))
+    }
+
+    @Test func repositoryIdentityResolvesExistingSymlinkAliases() throws {
+        let root = try temporaryDirectory(named: "identity-symlink")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repository")
+        let alias = root.appendingPathComponent("alias")
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: repository)
+
+        #expect(RepositoryIdentity.canonicalPath(alias.path) == RepositoryIdentity.canonicalPath(repository.path))
+        #expect(RepositoryIdentity.id(for: alias.path) == RepositoryIdentity.id(for: repository.path))
+    }
+
+    @Test func repositoryIdentityLegacyContainerMigrationRequiresComponentBoundary() {
+        let home = ScanLocationProvider.resolvedUserHomeDirectory()
+        let suffix = "/DevPulseTests-boundary-\(UUID().uuidString)"
+        let legacyDataPrefix = home + "/Library/Containers/local.devpulse.app/Data"
+        let validLegacyPath = legacyDataPrefix + suffix
+        let dataBackupPath = legacyDataPrefix + "Backup" + suffix
+        let databasePath = legacyDataPrefix + "Database" + suffix
+
+        #expect(RepositoryIdentity.canonicalPath(validLegacyPath) == home + suffix)
+        #expect(RepositoryIdentity.canonicalPath(dataBackupPath) == dataBackupPath)
+        #expect(RepositoryIdentity.canonicalPath(databasePath) == databasePath)
+        #expect(ScanLocationProvider.normalizePersistedPath(validLegacyPath) == home + suffix)
+        #expect(ScanLocationProvider.normalizePersistedPath(dataBackupPath) == dataBackupPath)
+        #expect(ScanLocationProvider.normalizePersistedPath(databasePath) == databasePath)
+    }
+
+    @Test func repositoryIdentityMigrationPreservesSafePinsAndAmbiguity() throws {
+        let root = try temporaryDirectory(named: "identity-migration")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let safe = root.appendingPathComponent("safe")
+        let safeAlias = root.appendingPathComponent("safe-alias")
+        let ambiguousA = root.appendingPathComponent("ambiguous-a")
+        let ambiguousB = root.appendingPathComponent("ambiguous-b")
+        try [safe, ambiguousA, ambiguousB].forEach {
+            try FileManager.default.createDirectory(at: $0, withIntermediateDirectories: true)
+        }
+        try FileManager.default.createSymbolicLink(at: safeAlias, withDestinationURL: safe)
+
+        let now = DateFormatting.nowISO()
+        let repositories = [
+            snapshot(id: "legacy-safe", name: "safe", path: safe.path),
+            snapshot(id: "legacy-safe", name: "safe-alias", path: safeAlias.path),
+            snapshot(id: "legacy-ambiguous", name: "ambiguous-a", path: ambiguousA.path),
+            snapshot(id: "legacy-ambiguous", name: "ambiguous-b", path: ambiguousB.path)
+        ]
+        let data = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: now,
+            writtenAt: now,
+            scanSummary: ScanSummary(totalRepositories: repositories.count, changedRepositories: 0, totalChangedFiles: 0, errorRepositories: 0),
+            repositories: repositories
+        )
+
+        let unknown = "legacy-unknown"
+        let migration = RepositoryIdentityMigration.migrate(
+            snapshot: data,
+            pinnedIDs: ["legacy-safe", "legacy-ambiguous", unknown]
+        )
+        let safeID = RepositoryIdentity.id(for: safe.path)
+
+        #expect(migration.snapshot.repositories.count == 3)
+        #expect(migration.pinnedIDs.contains(safeID))
+        #expect(!migration.pinnedIDs.contains("legacy-safe"))
+        #expect(migration.pinnedIDs.contains("legacy-ambiguous"))
+        #expect(migration.pinnedIDs.contains(unknown))
+        #expect(migration.snapshot.repositories.filter { $0.id == safeID }.count == 1)
+        #expect(migration.snapshot.repositories.first(where: { $0.id == safeID })?.isPinned == true)
+    }
+
+    @Test func repositoryIdentityRoundTripsThroughWidgetSnapshotCodable() throws {
+        let repository = snapshot(id: "legacy", name: "widget-repo")
+        let data = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-07-12T00:00:00Z",
+            writtenAt: "2026-07-12T00:00:00Z",
+            scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 1, totalChangedFiles: 1, errorRepositories: 0),
+            repositories: [RepositoryIdentity.normalize(repository)]
+        )
+        let encoded = try JSONEncoder().encode(data)
+        let decoded = try JSONDecoder().decode(AppGroupData.self, from: encoded)
+
+        #expect(decoded.repositories.count == 1)
+        #expect(decoded.repositories[0].id == RepositoryIdentity.id(for: decoded.repositories[0].path))
+        #expect(decoded.repositories[0].path == RepositoryIdentity.canonicalPath(repository.path))
+    }
+
     private func snapshot(
         id: String = "repo-1",
         name: String = "repo-1",
+        path: String? = nil,
         modified: Int = 0,
         added: Int = 0,
         deleted: Int = 0,
@@ -1795,7 +1950,7 @@ struct CommitReadinessEngineTests {
         RepositorySnapshot(
             id: id,
             name: name,
-            path: "/tmp/\(name)",
+            path: path ?? "/tmp/\(name)",
             branch: branch,
             status: status,
             modifiedFileCount: modified,
