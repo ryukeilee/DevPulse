@@ -1396,6 +1396,116 @@ struct CommitReadinessEngineTests {
         )
     }
 
+    @Test func gitScannerFindsChangesAcrossManyRepositoriesWithinOneRefresh() async throws {
+        let root = try temporaryDirectory(named: "scanner-many-repos")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        for index in 0..<50 {
+            try createCommittedRepository(at: root.appendingPathComponent("repo-\(index)"))
+        }
+
+        let config = ScanConfig(
+            enabledBuiltInPaths: [],
+            customPaths: [],
+            maxDepth: testScanConfig.maxDepth,
+            changedPreviewLimit: testScanConfig.changedPreviewLimit,
+            maxConcurrentGitOps: 6,
+            gitCommandTimeout: testScanConfig.gitCommandTimeout,
+            scanTimeout: 60,
+            slowReposkipSeconds: testScanConfig.slowReposkipSeconds,
+            activeRepoThreshold: 100
+        )
+
+        let first = await GitRepositoryScanner.scan(
+            config: config,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true
+        )
+        #expect(first.data.repositories.count == 50)
+
+        let changedRepo = root.appendingPathComponent("repo-25")
+        try "new change\n".write(
+            to: changedRepo.appendingPathComponent("changed.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let refreshed = await GitRepositoryScanner.scan(
+            config: config,
+            scanRoots: [root.path],
+            knownRepositoryPaths: first.discoveredRepositoryPaths
+        )
+        let changed = try #require(refreshed.data.repositories.first(where: { $0.name == "repo-25" }))
+        #expect(changed.status == .changed)
+        #expect(changed.untrackedFileCount == 1)
+        #expect(refreshed.data.repositories.count == 50)
+    }
+
+    @Test func gitScannerTimeoutRetainsPriorRepositorySnapshot() async throws {
+        let root = try temporaryDirectory(named: "scanner-timeout-retain")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = root.appendingPathComponent("repo")
+        try createCommittedRepository(at: repo)
+
+        let baselineConfig = ScanConfig(
+            enabledBuiltInPaths: [],
+            customPaths: [],
+            maxDepth: testScanConfig.maxDepth,
+            changedPreviewLimit: testScanConfig.changedPreviewLimit,
+            maxConcurrentGitOps: testScanConfig.maxConcurrentGitOps,
+            gitCommandTimeout: testScanConfig.gitCommandTimeout,
+            scanTimeout: testScanConfig.scanTimeout,
+            slowReposkipSeconds: testScanConfig.slowReposkipSeconds,
+            activeRepoThreshold: 100
+        )
+        let baseline = await GitRepositoryScanner.scan(
+            config: baselineConfig,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true
+        )
+        let baselineRepo = try #require(baseline.data.repositories.first)
+
+        let timeoutConfig = ScanConfig(
+            enabledBuiltInPaths: baselineConfig.enabledBuiltInPaths,
+            customPaths: baselineConfig.customPaths,
+            maxDepth: baselineConfig.maxDepth,
+            changedPreviewLimit: baselineConfig.changedPreviewLimit,
+            maxConcurrentGitOps: baselineConfig.maxConcurrentGitOps,
+            gitCommandTimeout: baselineConfig.gitCommandTimeout,
+            scanTimeout: 0,
+            slowReposkipSeconds: baselineConfig.slowReposkipSeconds,
+            activeRepoThreshold: baselineConfig.activeRepoThreshold
+        )
+        let timedOut = await GitRepositoryScanner.scan(
+            config: timeoutConfig,
+            scanRoots: [root.path],
+            knownRepositoryPaths: baseline.discoveredRepositoryPaths,
+            previousSnapshot: baseline.data
+        )
+
+        let retained = try #require(timedOut.data.repositories.first)
+        #expect(retained == baselineRepo)
+        #expect(timedOut.data.repositories.count == 1)
+        #expect(timedOut.warnings.contains { $0.contains("timeout") })
+    }
+
+    @Test func processRunnerStopsCancelledCommand() async throws {
+        let task = Task.detached {
+            ProcessRunner.run(
+                executable: "/bin/sh",
+                arguments: ["-c", "sleep 5"],
+                workingDirectory: "/tmp",
+                timeout: 30,
+                isCancelled: { Task.isCancelled }
+            )
+        }
+
+        try await Task.sleep(for: .milliseconds(100))
+        task.cancel()
+        let result = await task.value
+        #expect(result == nil)
+    }
+
     @Test func schedulerPolicySkipsRediscoveryInsideCooldown() {
         let now = Date(timeIntervalSince1970: 1_720_000_000)
 
