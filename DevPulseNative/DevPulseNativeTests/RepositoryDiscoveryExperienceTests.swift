@@ -222,6 +222,25 @@ struct RepositoryDiscoveryExperienceTests {
         }
     }
 
+    actor CancellableScanRequestRecorder {
+        private var requests: [ScanExecutionRequest] = []
+        private var waiter: CheckedContinuation<[ScanExecutionRequest], Never>?
+
+        func record(_ request: ScanExecutionRequest) -> Int {
+            requests.append(request)
+            if let waiter {
+                self.waiter = nil
+                waiter.resume(returning: requests)
+            }
+            return requests.count
+        }
+
+        func waitForCount(_ count: Int) async -> [ScanExecutionRequest] {
+            if requests.count >= count { return requests }
+            return await withCheckedContinuation { waiter = $0 }
+        }
+    }
+
 
     @MainActor
     @Test func schedulerUsesInjectedExecutionForForcedScan() async throws {
@@ -323,6 +342,37 @@ struct RepositoryDiscoveryExperienceTests {
         #expect(requests[1].roots == [ScanLocationProvider.canonicalExistingFilePath(second.path)])
         #expect(requests[0].forceRepositoryDiscovery)
         #expect(requests[1].forceRepositoryDiscovery)
+    }
+
+    @MainActor
+    @Test func newerLocationRefreshCancelsInFlightExecutionBeforeStartingLatest() async throws {
+        let root = try temporaryDirectory(named: "cancel-in-flight")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = root.appendingPathComponent("first")
+        let second = root.appendingPathComponent("second")
+        try FileManager.default.createDirectory(at: first, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: second, withIntermediateDirectories: true)
+
+        let recorder = CancellableScanRequestRecorder()
+        let scheduler = ScanScheduler(commandMode: true) { request in
+            let count = await recorder.record(request)
+            if count == 1 {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(10))
+                }
+            }
+            return (.empty(), [], [])
+        }
+
+        scheduler.addCustomPath(first.path)
+        _ = await recorder.waitForCount(1)
+        scheduler.removeCustomPath(first.path)
+        scheduler.addCustomPath(second.path)
+
+        let requests = await recorder.waitForCount(2)
+        #expect(requests.count == 2)
+        #expect(requests[0].roots == [ScanLocationProvider.canonicalExistingFilePath(first.path)])
+        #expect(requests[1].roots == [ScanLocationProvider.canonicalExistingFilePath(second.path)])
     }
 
     @MainActor

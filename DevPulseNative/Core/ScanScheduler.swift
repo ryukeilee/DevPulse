@@ -15,12 +15,27 @@ private enum PowerState {
     case onBattery
 }
 
-struct ScanExecutionRequest {
+struct ScanExecutionRequest: Sendable {
     let config: ScanConfig
     let roots: [String]
     let rootsSignature: String
     let knownRepositoryPaths: [String]
     let forceRepositoryDiscovery: Bool
+    let previousSnapshot: AppGroupData?
+
+    init(config: ScanConfig,
+         roots: [String],
+         rootsSignature: String,
+         knownRepositoryPaths: [String],
+         forceRepositoryDiscovery: Bool,
+         previousSnapshot: AppGroupData? = nil) {
+        self.config = config
+        self.roots = roots
+        self.rootsSignature = rootsSignature
+        self.knownRepositoryPaths = knownRepositoryPaths
+        self.forceRepositoryDiscovery = forceRepositoryDiscovery
+        self.previousSnapshot = previousSnapshot
+    }
 }
 typealias ScanExecution = @Sendable (ScanExecutionRequest) async -> (data: AppGroupData, warnings: [String], discoveredRepositoryPaths: [String])
 
@@ -35,10 +50,11 @@ struct ScanRefreshCoordinator {
     private var scheduled: Request?
     private var running: Request?
 
-    mutating func request(signature: String, forceRepositoryDiscovery: Bool) {
+    @discardableResult
+    mutating func request(signature: String, forceRepositoryDiscovery: Bool) -> Bool {
         if let running, signature == running.signature {
             scheduled = nil
-            return
+            return false
         }
 
         if var scheduled {
@@ -47,28 +63,30 @@ struct ScanRefreshCoordinator {
                 forceRepositoryDiscovery: scheduled.forceRepositoryDiscovery || forceRepositoryDiscovery
             )
             self.scheduled = scheduled
-            return
+            return true
         }
 
         guard let running else {
             scheduled = Request(signature: signature, forceRepositoryDiscovery: forceRepositoryDiscovery)
-            return
+            return true
         }
 
         guard signature != running.signature else {
             scheduled = nil
-            return
+            return false
         }
 
         scheduled = Request(signature: signature, forceRepositoryDiscovery: forceRepositoryDiscovery)
+        return true
     }
 
-    mutating func requestForced(signature: String) {
+    @discardableResult
+    mutating func requestForced(signature: String) -> Bool {
         if let running, running.signature == signature {
             scheduled = Request(signature: signature, forceRepositoryDiscovery: true)
-            return
+            return true
         }
-        request(signature: signature, forceRepositoryDiscovery: true)
+        return request(signature: signature, forceRepositoryDiscovery: true)
     }
 
     mutating func beginNext() -> Request? {
@@ -426,6 +444,8 @@ final class ScanScheduler: ObservableObject {
     private var workspaceWakeObserver: NSObjectProtocol?
     private var lastSystemSleepAt: Date?
     private var refreshCoordinator = ScanRefreshCoordinator()
+    private var scanTask: Task<Void, Never>?
+    private var scanGeneration = 0
     private var locationRefreshDrainScheduled = false
     private let scanExecution: ScanExecution
     private var configLoadedFromPersistence = false
@@ -466,7 +486,13 @@ final class ScanScheduler: ObservableObject {
     }
 
     init(commandMode: Bool = false, scanExecution: @escaping ScanExecution = { request in
-        await GitRepositoryScanner.scan(config: request.config, scanRoots: request.roots, knownRepositoryPaths: request.knownRepositoryPaths, forceRepositoryDiscovery: request.forceRepositoryDiscovery)
+        await GitRepositoryScanner.scan(
+            config: request.config,
+            scanRoots: request.roots,
+            knownRepositoryPaths: request.knownRepositoryPaths,
+            forceRepositoryDiscovery: request.forceRepositoryDiscovery,
+            previousSnapshot: request.previousSnapshot
+        )
     }) {
         self.scanExecution = scanExecution
         if commandMode {
@@ -485,6 +511,10 @@ final class ScanScheduler: ObservableObject {
         updatePowerState()
         startPowerMonitoring()
         startSleepWakeMonitoring()
+    }
+
+    deinit {
+        scanTask?.cancel()
     }
 
     var snapshotFreshness: SnapshotFreshness? {
@@ -523,21 +553,34 @@ final class ScanScheduler: ObservableObject {
 
     func scanNow(forceRepositoryDiscovery: Bool = false) {
         let signature = ScanSchedulerPolicy.scanRootsSignature(scanRoots().roots)
-        refreshCoordinator.request(signature: signature, forceRepositoryDiscovery: forceRepositoryDiscovery)
+        let queued: Bool
+        if forceRepositoryDiscovery {
+            queued = refreshCoordinator.requestForced(signature: signature)
+        } else {
+            queued = refreshCoordinator.request(signature: signature, forceRepositoryDiscovery: false)
+        }
+        if queued, isScanning {
+            // A newer roots/configuration request supersedes the current scan.
+            // The scanner propagates cancellation into its Git processes, so
+            // the old run stops before the queued request starts.
+            scanTask?.cancel()
+        }
         startNextCoalescedScanIfNeeded()
     }
 
     private func startNextCoalescedScanIfNeeded() {
         guard let request = refreshCoordinator.beginNext() else { return }
-        performScanNow(forceRepositoryDiscovery: request.forceRepositoryDiscovery)
+        performScanNow(request: request)
     }
 
-    private func performScanNow(forceRepositoryDiscovery: Bool) {
+    private func performScanNow(request: ScanRefreshCoordinator.Request) {
         guard !isScanning else { return }
 
         gitAvailable = ProcessRunner.isGitAvailable()
         guard gitAvailable else {
             failRefresh("Git 不可用")
+            _ = refreshCoordinator.completeCurrent()
+            startNextCoalescedScanIfNeeded()
             return
         }
 
@@ -557,7 +600,7 @@ final class ScanScheduler: ObservableObject {
         let knownRepositoryPaths = lastDiscoveredRepositoryPaths
         let currentScanRootsSignature = ScanSchedulerPolicy.scanRootsSignature(currentScanRoots.roots)
         let shouldRediscoverRepositories = ScanSchedulerPolicy.shouldRediscoverRepositories(
-            forceRepositoryDiscovery: forceRepositoryDiscovery,
+            forceRepositoryDiscovery: request.forceRepositoryDiscovery,
             knownRepositoryPaths: knownRepositoryPaths,
             lastRepositoryDiscoveryAt: lastRepositoryDiscoveryAt,
             currentScanRootsSignature: currentScanRootsSignature,
@@ -566,11 +609,34 @@ final class ScanScheduler: ObservableObject {
         recordEvent(.scanStarted, "Scan started")
 
         let execution = scanExecution
-        let request = ScanExecutionRequest(config: currentConfig, roots: currentScanRoots.roots, rootsSignature: currentScanRootsSignature, knownRepositoryPaths: knownRepositoryPaths, forceRepositoryDiscovery: shouldRediscoverRepositories)
-        Task.detached(priority: .userInitiated) {
-            let result = await execution(request)
+        let executionRequest = ScanExecutionRequest(
+            config: currentConfig,
+            roots: currentScanRoots.roots,
+            rootsSignature: currentScanRootsSignature,
+            knownRepositoryPaths: knownRepositoryPaths,
+            forceRepositoryDiscovery: shouldRediscoverRepositories,
+            previousSnapshot: lastResult
+        )
+        scanGeneration &+= 1
+        let generation = scanGeneration
+        scanTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let result = await execution(executionRequest)
+            let wasCancelled = Task.isCancelled
 
-            await MainActor.run {
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                guard self.scanGeneration == generation else { return }
+                self.scanTask = nil
+
+                if wasCancelled {
+                    self.isScanning = false
+                    self.refreshPhase = .idle
+                    self.refreshFailureMessage = nil
+                    self.recordEvent(.scanFailed, "Scan cancelled by a newer refresh request")
+                    self.triggerPendingWakeRefreshIfNeeded()
+                    return
+                }
+
                 if let failureMessage = self.scanFailureMessage(
                     for: result.data,
                     scanRoots: currentScanRoots
@@ -1218,10 +1284,14 @@ final class ScanScheduler: ObservableObject {
 
     private func requestWakeRefresh(forceRepositoryDiscovery: Bool) {
         let signature = ScanSchedulerPolicy.scanRootsSignature(scanRoots().roots)
+        let queued: Bool
         if forceRepositoryDiscovery {
-            refreshCoordinator.requestForced(signature: signature)
+            queued = refreshCoordinator.requestForced(signature: signature)
         } else {
-            refreshCoordinator.request(signature: signature, forceRepositoryDiscovery: false)
+            queued = refreshCoordinator.request(signature: signature, forceRepositoryDiscovery: false)
+        }
+        if queued, isScanning {
+            scanTask?.cancel()
         }
         startNextCoalescedScanIfNeeded()
     }
@@ -1422,7 +1492,10 @@ final class ScanScheduler: ObservableObject {
 
     private func requestLocationRefresh() {
         let signature = ScanSchedulerPolicy.scanRootsSignature(scanRoots().roots)
-        refreshCoordinator.request(signature: signature, forceRepositoryDiscovery: true)
+        let queued = refreshCoordinator.request(signature: signature, forceRepositoryDiscovery: true)
+        if queued, isScanning {
+            scanTask?.cancel()
+        }
         guard !locationRefreshDrainScheduled else { return }
         locationRefreshDrainScheduled = true
         Task { @MainActor in

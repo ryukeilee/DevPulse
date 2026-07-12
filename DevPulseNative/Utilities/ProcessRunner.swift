@@ -22,10 +22,12 @@ enum ProcessRunner {
     static func run(executable: String? = nil,
                     arguments: [String],
                     workingDirectory: String,
-                    timeout: TimeInterval = gitTimeout) -> String? {
+                    timeout: TimeInterval = gitTimeout,
+                    isCancelled: @Sendable @escaping () -> Bool = { false }) -> String? {
         let executablePath = executable ?? gitExecutablePath()
         guard let executablePath,
-              FileManager.default.isExecutableFile(atPath: executablePath) else {
+              FileManager.default.isExecutableFile(atPath: executablePath),
+              !isCancelled() else {
             return nil
         }
 
@@ -48,8 +50,9 @@ enum ProcessRunner {
         // Wait with timeout
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning {
-            if Date() > deadline {
+            if Date() >= deadline || isCancelled() {
                 process.terminate()
+                process.waitUntilExit()
                 return nil
             }
             Thread.sleep(forTimeInterval: 0.05)

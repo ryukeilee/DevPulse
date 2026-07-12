@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - Scan configuration
 
-struct ScanConfig: Codable {
+struct ScanConfig: Codable, Sendable {
     var enabledBuiltInPaths: Set<String>
     var customPaths: [String]
     let maxDepth: Int
@@ -92,6 +92,12 @@ private actor RepositoryDiscoveryCache {
     }
 }
 
+private struct SnapshotReadResult: Sendable {
+    let index: Int
+    let snapshot: RepositorySnapshot
+    let elapsed: TimeInterval
+}
+
 // MARK: - Scanner
 
 enum GitRepositoryScanner {
@@ -106,9 +112,11 @@ enum GitRepositoryScanner {
     static func scan(config: ScanConfig = .default,
                      scanRoots: [String]? = nil,
                      knownRepositoryPaths: [String]? = nil,
-                     forceRepositoryDiscovery: Bool = false) async -> (data: AppGroupData, warnings: [String], discoveredRepositoryPaths: [String]) {
+                     forceRepositoryDiscovery: Bool = false,
+                     previousSnapshot: AppGroupData? = nil) async -> (data: AppGroupData, warnings: [String], discoveredRepositoryPaths: [String]) {
         let startTime = Date()
         var warnings: [String] = []
+        let previous = previousSnapshot ?? (try? AppGroupStore.read().get())
 
         // Phase 1: discover all git repositories
         let discoveredPaths = await discoverRepositories(
@@ -118,22 +126,31 @@ enum GitRepositoryScanner {
             forceRefresh: forceRepositoryDiscovery,
             warnings: &warnings
         )
+        if Task.isCancelled {
+            return partialResult(
+                discoveredPaths: discoveredPaths,
+                snapshots: [],
+                previousSnapshot: previous,
+                warnings: &warnings
+            )
+        }
         var pathsToScan = discoveredPaths
+        var retainedPaths: [String] = []
 
         // Throttle: if >30 repos, only scan changed/active ones
         if pathsToScan.count > config.activeRepoThreshold {
-            switch AppGroupStore.read() {
-            case .success(let previous):
+            if let previous {
                 let changedPaths = Set(previous.repositories
                     .filter { $0.status == .changed || $0.status == .error }
                     .map { $0.path })
                 let active = pathsToScan.filter { changedPaths.contains($0) }
                 if !active.isEmpty {
                     warnings.append("Throttling: scanning \(active.count) active repos out of \(pathsToScan.count) total (threshold \(config.activeRepoThreshold))")
+                    retainedPaths = pathsToScan.filter { !active.contains($0) }
                     pathsToScan = active
                 }
-            case .failure(let error):
-                warnings.append("Shared snapshot unavailable for throttling: \(error.localizedDescription)")
+            } else {
+                warnings.append("Shared snapshot unavailable for throttling; scanning all discovered repositories.")
             }
         }
 
@@ -142,11 +159,30 @@ enum GitRepositoryScanner {
             paths: pathsToScan,
             config: config,
             warnings: &warnings,
-            overallDeadline: startTime.addingTimeInterval(config.scanTimeout)
+            overallDeadline: startTime.addingTimeInterval(config.scanTimeout),
+            previousSnapshots: previous?.repositories ?? []
+        )
+        if Task.isCancelled {
+            warnings.append("Scan cancelled; returning the completed portion with prior snapshots retained.")
+            return partialResult(
+                discoveredPaths: discoveredPaths,
+                snapshots: snapshots,
+                previousSnapshot: previous,
+                warnings: &warnings
+            )
+        }
+
+        let retainedSnapshots = retainedPaths.compactMap { path in
+            previous?.repositories.first(where: { $0.path == path })
+        }
+        let completeSnapshots = mergeSnapshots(
+            snapshots + retainedSnapshots,
+            discoveredPaths: discoveredPaths,
+            previousSnapshot: previous
         )
 
         // Phase 3: sort
-        let sorted = RepositorySorter.sort(snapshots)
+        let sorted = RepositorySorter.sort(completeSnapshots)
 
         // Phase 4: build summary
         let changedCount = sorted.filter { $0.status == .changed }.count
@@ -169,6 +205,37 @@ enum GitRepositoryScanner {
         )
 
         return (result, warnings, discoveredPaths)
+    }
+
+    private static func partialResult(
+        discoveredPaths: [String],
+        snapshots: [RepositorySnapshot],
+        previousSnapshot: AppGroupData?,
+        warnings: inout [String]
+    ) -> (data: AppGroupData, warnings: [String], discoveredRepositoryPaths: [String]) {
+        let merged = mergeSnapshots(
+            snapshots,
+            discoveredPaths: discoveredPaths,
+            previousSnapshot: previousSnapshot
+        )
+        let sorted = RepositorySorter.sort(merged)
+        let summary = ScanSummary(
+            totalRepositories: discoveredPaths.count,
+            changedRepositories: sorted.filter { $0.status == .changed }.count,
+            totalChangedFiles: sorted.reduce(0) { $0 + $1.changedFileCount },
+            errorRepositories: sorted.filter { $0.status == .error }.count
+        )
+        return (
+            AppGroupData(
+                schemaVersion: RepositorySnapshotSchema.version,
+                generatedAt: DateFormatting.nowISO(),
+                writtenAt: nil,
+                scanSummary: summary,
+                repositories: sorted
+            ),
+            warnings,
+            discoveredPaths
+        )
     }
 
     // MARK: - Repository discovery
@@ -199,6 +266,7 @@ enum GitRepositoryScanner {
         }
 
         for root in normalizedRoots {
+            if Task.isCancelled { break }
             var isDir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: root, isDirectory: &isDir),
                   isDir.boolValue else {
@@ -257,6 +325,7 @@ enum GitRepositoryScanner {
                                       depth: Int = 0,
                                       discovered: inout Set<String>,
                                       warnings: inout [String]) {
+        guard !Task.isCancelled else { return }
         guard depth <= config.maxDepth else { return }
 
         if isGitRepository(directory) {
@@ -279,6 +348,7 @@ enum GitRepositoryScanner {
         }
 
         for entryURL in entries {
+            if Task.isCancelled { return }
             let fullPath = entryURL.path
             let entryName = entryURL.lastPathComponent
 
@@ -300,23 +370,11 @@ enum GitRepositoryScanner {
     static func isGitRepository(_ directory: String) -> Bool {
         let gitPath = (directory as NSString).appendingPathComponent(".git")
 
-        var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: gitPath, isDirectory: &isDir) {
-            return true
-        }
-
-        if let topLevel = ProcessRunner.run(
-            arguments: ["rev-parse", "--show-toplevel"],
-            workingDirectory: directory
-        ) {
-            let resolved = ScanLocationProvider.expandTilde(
-                (topLevel as NSString).resolvingSymlinksInPath
-            )
-            let dirResolved = (directory as NSString).resolvingSymlinksInPath
-            return resolved == dirResolved
-        }
-
-        return false
+        // Discovery is intentionally filesystem-only. A .git directory or
+        // worktree file is sufficient to identify a repository; invoking
+        // A Git discovery command for every ordinary directory turns a
+        // bounded walk into one process per directory.
+        return FileManager.default.fileExists(atPath: gitPath)
     }
 
     // MARK: - Batched snapshot reading
@@ -325,94 +383,135 @@ enum GitRepositoryScanner {
     private static func readSnapshotsBatched(paths: [String],
                                              config: ScanConfig,
                                              warnings: inout [String],
-                                             overallDeadline: Date) async -> [RepositorySnapshot] {
-        var results: [RepositorySnapshot] = []
-        results.reserveCapacity(paths.count)
+                                             overallDeadline: Date,
+                                             previousSnapshots: [RepositorySnapshot]) async -> [RepositorySnapshot] {
+        guard !paths.isEmpty else { return [] }
+
+        let previousByPath = Dictionary(uniqueKeysWithValues: previousSnapshots.map { ($0.path, $0) })
+        var resultsByIndex: [Int: SnapshotReadResult] = [:]
 
         // Filter out slow repos
         let (activePaths, skippedPaths) = await filterSlowRepos(paths)
-        let skippedSlow = skippedPaths
-        for skipped in skippedSlow {
-            let name = (skipped as NSString).lastPathComponent
-            results.append(RepositorySnapshot(
-                id: stableHash(skipped),
-                name: name,
-                path: skipped,
-                branch: "unknown",
-                status: .error,
-                modifiedFileCount: 0,
-                addedFileCount: 0,
-                deletedFileCount: 0,
-                untrackedFileCount: 0,
-                stagedFileCount: 0,
-                unstagedFileCount: 0,
-                conflictedFileCount: 0,
-                aheadCount: 0,
-                changedFileCount: 0,
-                changedFilesPreview: [],
-                risk: .low,
-                lastScannedAt: DateFormatting.nowISO(),
-                lastChangedAt: nil,
-                errorMessage: "扫描已跳过",
-                isPinned: false
-            ))
+        for skipped in skippedPaths {
+            let index = paths.firstIndex(of: skipped) ?? 0
+            let fallback = previousByPath[skipped] ?? placeholderSnapshot(
+                for: skipped,
+                errorMessage: "扫描已跳过"
+            )
+            resultsByIndex[index] = SnapshotReadResult(
+                index: index,
+                snapshot: fallback,
+                elapsed: 0
+            )
+            warnings.append(
+                previousByPath[skipped] == nil
+                    ? "扫描已跳过：\(skipped)"
+                    : "扫描已跳过：保留 \((skipped as NSString).lastPathComponent) 的上次结果"
+            )
         }
 
-        // Process in batches
-        let batchSize = max(1, config.maxConcurrentGitOps)
-        for batchStart in stride(from: 0, to: activePaths.count, by: batchSize) {
-            // Check overall timeout
-            if Date() > overallDeadline {
-                warnings.append("Scan timeout reached; \(activePaths.count - batchStart) repos skipped")
-                for i in batchStart..<activePaths.count {
-                    let path = activePaths[i]
-                    let name = (path as NSString).lastPathComponent
-                    results.append(RepositorySnapshot(
-                        id: stableHash(path),
-                        name: name,
-                        path: path,
-                        branch: "unknown",
-                        status: .error,
-                        modifiedFileCount: 0,
-                        addedFileCount: 0,
-                        deletedFileCount: 0,
-                        untrackedFileCount: 0,
-                        stagedFileCount: 0,
-                        unstagedFileCount: 0,
-                        conflictedFileCount: 0,
-                        aheadCount: 0,
-                        changedFileCount: 0,
-                        changedFilesPreview: [],
-                        risk: .low,
-                        lastScannedAt: DateFormatting.nowISO(),
-                        lastChangedAt: nil,
-                        errorMessage: "扫描超时",
-                        isPinned: false
-                    ))
-                }
-                break
+        // Keep at most maxConcurrentGitOps read tasks in flight. Each task
+        // invokes one Git command at a time, so this is also the process cap.
+        let concurrency = max(1, config.maxConcurrentGitOps)
+        var nextIndex = 0
+        var timedOut = false
+        var cancelled = false
+
+        await withTaskGroup(of: SnapshotReadResult?.self) { group in
+            if Task.isCancelled {
+                cancelled = true
+                group.cancelAll()
+                return
             }
 
-            let batchEnd = min(batchStart + batchSize, activePaths.count)
-            let batch = Array(activePaths[batchStart..<batchEnd])
+            func addNextTask() {
+                guard nextIndex < activePaths.count else { return }
+                let index = nextIndex
+                let path = activePaths[index]
+                nextIndex += 1
+                group.addTask {
+                    guard !Task.isCancelled else { return nil }
+                    let remaining = overallDeadline.timeIntervalSinceNow
+                    guard remaining > 0 else { return nil }
+                    let startedAt = Date()
+                    guard let snapshot = readSingleSnapshot(
+                        repoPath: path,
+                        config: config,
+                        overallDeadline: overallDeadline
+                    ) else {
+                        return nil
+                    }
+                    return SnapshotReadResult(
+                        index: paths.firstIndex(of: path) ?? index,
+                        snapshot: snapshot,
+                        elapsed: Date().timeIntervalSince(startedAt)
+                    )
+                }
+            }
 
-            // Scan batch concurrently via serial iteration (Process is synchronous)
-            // Each git command has its own timeout
-            for path in batch {
-                let start = Date()
-                let snapshot = readSingleSnapshot(repoPath: path, config: config, warnings: &warnings)
-                let elapsed = Date().timeIntervalSince(start)
+            for _ in 0..<min(concurrency, activePaths.count) {
+                addNextTask()
+            }
 
-                // Track slow repos (>3s)
-                if elapsed > 3.0 {
+            while let result = await group.next() {
+                if let result {
+                    resultsByIndex[result.index] = result
+                }
+
+                if Task.isCancelled {
+                    cancelled = true
+                    group.cancelAll()
+                    break
+                }
+
+                if Date() >= overallDeadline {
+                    timedOut = true
+                    group.cancelAll()
+                    break
+                }
+
+                addNextTask()
+            }
+        }
+
+        if !cancelled && !timedOut && Date() >= overallDeadline {
+            timedOut = true
+        }
+
+        if timedOut {
+            warnings.append("Scan timeout reached; preserving completed results and prior snapshots for unfinished repositories.")
+        } else if cancelled {
+            warnings.append("Scan cancelled; preserving completed results and prior snapshots.")
+        }
+
+        var results: [RepositorySnapshot] = []
+        results.reserveCapacity(paths.count)
+        for (index, path) in paths.enumerated() {
+            if let result = resultsByIndex[index] {
+                if result.elapsed > 3.0 {
                     await trackSlowRepo(path, skipSeconds: config.slowReposkipSeconds)
-                    warnings.append("Slow repo: \(snapshot.name) (\(String(format: "%.1f", elapsed))s)")
+                    warnings.append("Slow repo: \(result.snapshot.name) (\(String(format: "%.1f", result.elapsed))s)")
                 }
-
-                results.append(snapshot)
+                results.append(result.snapshot)
+                continue
             }
+
+            if let previous = previousByPath[path] {
+                results.append(previous)
+                continue
+            }
+
+            let message = timedOut || Date() >= overallDeadline
+                ? "扫描超时"
+                : (cancelled ? "扫描已取消" : "读取失败")
+            results.append(placeholderSnapshot(for: path, errorMessage: message))
         }
 
+        // A cancellation can happen before a task group is entered. Keep the
+        // result shape complete so callers can still explain what was kept.
+        if results.count < paths.count {
+            warnings.append("扫描结果不完整：已为未完成仓库保留可解释占位结果。")
+        }
         return results
     }
 
@@ -430,15 +529,24 @@ enum GitRepositoryScanner {
 
     private static func readSingleSnapshot(repoPath: String,
                                            config: ScanConfig,
-                                           warnings: inout [String]) -> RepositorySnapshot {
+                                           overallDeadline: Date? = nil) -> RepositorySnapshot? {
         let name = (repoPath as NSString).lastPathComponent
         let id = stableHash(repoPath)
+        let cancellationCheck: @Sendable () -> Bool = { Task.isCancelled }
+        func commandTimeout() -> TimeInterval {
+            guard let overallDeadline else { return config.gitCommandTimeout }
+            return min(config.gitCommandTimeout, max(0, overallDeadline.timeIntervalSinceNow))
+        }
+
+        guard !Task.isCancelled else { return nil }
 
         guard let statusOutput = ProcessRunner.run(
             arguments: ["status", "--short", "--branch"],
             workingDirectory: repoPath,
-            timeout: config.gitCommandTimeout
+            timeout: commandTimeout(),
+            isCancelled: cancellationCheck
         ) else {
+            guard !Task.isCancelled else { return nil }
             return RepositorySnapshot(
                 id: id,
                 name: name,
@@ -475,8 +583,11 @@ enum GitRepositoryScanner {
         let lastCommitAt = ProcessRunner.run(
             arguments: ["log", "-1", "--pretty=%cI"],
             workingDirectory: repoPath,
-            timeout: config.gitCommandTimeout
+            timeout: commandTimeout(),
+            isCancelled: cancellationCheck
         )
+
+        guard !Task.isCancelled else { return nil }
 
         // Preview capped at 5
         let preview = Array(changedFiles.prefix(config.changedPreviewLimit))
@@ -503,6 +614,49 @@ enum GitRepositoryScanner {
             errorMessage: nil,
             isPinned: false
         )
+    }
+
+    private static func placeholderSnapshot(for path: String, errorMessage: String) -> RepositorySnapshot {
+        RepositorySnapshot(
+            id: stableHash(path),
+            name: (path as NSString).lastPathComponent,
+            path: path,
+            branch: "unknown",
+            status: .error,
+            modifiedFileCount: 0,
+            addedFileCount: 0,
+            deletedFileCount: 0,
+            untrackedFileCount: 0,
+            stagedFileCount: 0,
+            unstagedFileCount: 0,
+            conflictedFileCount: 0,
+            aheadCount: 0,
+            changedFileCount: 0,
+            changedFilesPreview: [],
+            risk: .low,
+            lastScannedAt: DateFormatting.nowISO(),
+            lastChangedAt: nil,
+            errorMessage: errorMessage,
+            isPinned: false
+        )
+    }
+
+    private static func mergeSnapshots(
+        _ snapshots: [RepositorySnapshot],
+        discoveredPaths: [String],
+        previousSnapshot: AppGroupData?
+    ) -> [RepositorySnapshot] {
+        var byPath = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.path, $0) })
+        let previousByPath = Dictionary(uniqueKeysWithValues: (previousSnapshot?.repositories ?? []).map { ($0.path, $0) })
+
+        for path in discoveredPaths where byPath[path] == nil {
+            byPath[path] = previousByPath[path] ?? placeholderSnapshot(
+                for: path,
+                errorMessage: "本轮未完成扫描"
+            )
+        }
+
+        return discoveredPaths.compactMap { byPath[$0] }
     }
 
     // MARK: - Helpers
