@@ -1,5 +1,12 @@
 import SwiftUI
 
+private enum RepositoryListMetrics {
+    static let pageInset: CGFloat = 16
+    static let cardSpacing: CGFloat = 10
+    static let cardPadding: CGFloat = 14
+    static let cardCornerRadius: CGFloat = 12
+}
+
 struct RepositoryListView: View {
     @EnvironmentObject var scheduler: ScanScheduler
 
@@ -13,6 +20,14 @@ struct RepositoryListView: View {
                 List {
                     ForEach(scheduler.lastResult.repositories) { repo in
                         RepositoryRow(repo: repo)
+                            .listRowInsets(EdgeInsets(
+                                top: RepositoryListMetrics.cardSpacing / 2,
+                                leading: RepositoryListMetrics.pageInset,
+                                bottom: RepositoryListMetrics.cardSpacing / 2,
+                                trailing: RepositoryListMetrics.pageInset
+                            ))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
                             .contextMenu {
                                 Button(repo.isPinned ? "取消置顶" : "置顶") {
                                     scheduler.togglePin(repoID: repo.id)
@@ -20,9 +35,12 @@ struct RepositoryListView: View {
                             }
                     }
                 }
-                .listStyle(.inset)
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     @ViewBuilder
@@ -46,9 +64,13 @@ struct RepositoryListView: View {
 
                 Spacer()
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(Color.secondary.opacity(0.05))
+            .padding(.horizontal, RepositoryListMetrics.pageInset)
+            .padding(.vertical, 8)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .overlay(alignment: .bottom) {
+                Divider()
+                    .opacity(0.45)
+            }
         }
     }
 
@@ -100,125 +122,179 @@ struct RepositoryRow: View {
     let repo: RepositorySnapshot
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            pinIndicator
-
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 8) {
+                HStack(spacing: 6) {
                     Text(repo.name)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.headline)
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                         .truncationMode(.tail)
 
-                    Spacer(minLength: 8)
-
-                    CommitReadinessBadge(level: repo.commitReadiness.level, compact: true)
+                    if repo.isPinned {
+                        Image(systemName: "pin.fill")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Color.accentColor)
+                            .accessibilityLabel("Pinned")
+                    }
                 }
+                .layoutPriority(1)
 
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    branchLabel
+                Spacer(minLength: 8)
 
-                    Text(repo.statusSummary)
-                        .font(.caption)
-                        .foregroundStyle(statusSummaryColor)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
+                RepositoryReadinessBadge(level: repo.commitReadiness.level)
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                branchLabel
+
+                localChangesLabel
+            }
+
+            Divider()
+                .opacity(0.45)
+
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "arrow.right.circle")
+                    .font(.caption)
+                    .accessibilityHidden(true)
 
                 Text(repo.nextActionHint)
                     .font(.caption)
-                    .foregroundStyle(nextActionColor)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 5)
-    }
-
-    @ViewBuilder
-    private var pinIndicator: some View {
-        if repo.isPinned {
-            Image(systemName: "pin.fill")
-                .font(.caption2)
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 12, height: 20)
-        } else {
-            Color.clear
-                .frame(width: 12, height: 20)
-        }
-    }
-
-    private var statusSummaryColor: Color {
-        switch repo.commitReadiness.level {
-        case .dirty, .unknown:
-            return .red
-        case .ready:
-            return .green
-        case .idle, .review:
-            return .secondary
-        }
-    }
-
-    private var nextActionColor: Color {
-        switch repo.commitReadiness.level {
-        case .unknown:
-            return .red
-        case .dirty, .review:
-            return .orange
-        case .ready:
-            return .green
-        case .idle:
-            return .secondary
-        }
+        .padding(RepositoryListMetrics.cardPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: RepositoryListMetrics.cardCornerRadius, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: RepositoryListMetrics.cardCornerRadius, style: .continuous)
+                .stroke(Color(nsColor: .separatorColor).opacity(0.65), lineWidth: 1)
+        )
+        .contentShape(
+            RoundedRectangle(cornerRadius: RepositoryListMetrics.cardCornerRadius, style: .continuous)
+        )
     }
 
     private var branchLabel: some View {
         HStack(spacing: 4) {
-            Image(systemName: branchIconName)
+            Image(systemName: "arrow.triangle.branch")
                 .font(.system(size: 10, weight: .medium))
+                .accessibilityHidden(true)
+
             Text(repo.branch)
                 .lineLimit(1)
+                .truncationMode(.middle)
         }
-        .font(.caption)
-        .foregroundStyle(branchColor)
-        .padding(.horizontal, 7)
-        .frame(height: 20)
+        .font(.caption.weight(.medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
         .background(
             Capsule()
-                .fill(branchColor.opacity(branchFillOpacity))
+                .fill(Color.secondary.opacity(0.08))
         )
+        .overlay(
+            Capsule()
+                .stroke(Color.secondary.opacity(0.12), lineWidth: 1)
+        )
+        .accessibilityLabel("Branch: \(repo.branch)")
+        .layoutPriority(1)
     }
 
-    private var branchIconName: String {
-        switch repo.commitReadiness.level {
-        case .dirty, .unknown:
-            return "exclamationmark.triangle.fill"
-        case .ready:
-            return "checkmark.circle.fill"
-        case .idle, .review:
-            return "arrow.triangle.branch"
+    private var localChangesLabel: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "doc.text")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(readinessTint)
+                .accessibilityHidden(true)
+
+            Text(repo.statusSummary)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
         }
+        .accessibilityLabel("Local changes: \(repo.statusSummary)")
     }
 
-    private var branchColor: Color {
+    private var readinessTint: Color {
         switch repo.commitReadiness.level {
-        case .dirty, .unknown:
-            return .red
+        case .idle:
+            return .secondary
+        case .review:
+            return .blue
         case .ready:
             return .green
-        case .idle, .review:
-            return .secondary
+        case .dirty:
+            return .orange
+        case .unknown:
+            return .red
+        }
+    }
+}
+
+private struct RepositoryReadinessBadge: View {
+    let level: CommitReadinessLevel
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: systemImage)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(tint)
+                .accessibilityHidden(true)
+
+            Text(level.shortLabel)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.primary)
+        }
+        .lineLimit(1)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            Capsule()
+                .fill(tint.opacity(0.09))
+        )
+        .overlay(
+            Capsule()
+                .stroke(tint.opacity(0.16), lineWidth: 1)
+        )
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityLabel("Commit readiness: \(level.shortLabel)")
+    }
+
+    private var systemImage: String {
+        switch level {
+        case .idle:
+            return "pause.circle.fill"
+        case .review:
+            return "eye.fill"
+        case .ready:
+            return "checkmark.circle.fill"
+        case .dirty:
+            return "exclamationmark.triangle.fill"
+        case .unknown:
+            return "questionmark.circle.fill"
         }
     }
 
-    private var branchFillOpacity: Double {
-        switch repo.commitReadiness.level {
-        case .dirty, .unknown:
-            return 0.14
+    private var tint: Color {
+        switch level {
+        case .idle:
+            return .secondary
+        case .review:
+            return .blue
         case .ready:
-            return 0.12
-        case .idle, .review:
-            return 0.08
+            return .green
+        case .dirty:
+            return .orange
+        case .unknown:
+            return .red
         }
     }
 }
