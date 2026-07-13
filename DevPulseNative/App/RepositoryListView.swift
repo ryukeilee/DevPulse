@@ -1,10 +1,10 @@
 import SwiftUI
 
 private enum RepositoryListMetrics {
-    static let pageInset: CGFloat = 16
-    static let cardSpacing: CGFloat = 10
-    static let cardPadding: CGFloat = 14
-    static let cardCornerRadius: CGFloat = 12
+    static let pageInset = DevPulseVisualStyle.pageInset
+    static let groupSpacing: CGFloat = 10
+    static let rowPadding: CGFloat = 14
+    static let groupCornerRadius = DevPulseVisualStyle.sectionCornerRadius
 }
 
 struct RepositoryListView: View {
@@ -17,26 +17,40 @@ struct RepositoryListView: View {
             if scheduler.lastResult.repositories.isEmpty {
                 emptyView
             } else {
-                List {
-                    ForEach(scheduler.lastResult.repositories) { repo in
-                        RepositoryRow(repo: repo)
-                            .listRowInsets(EdgeInsets(
-                                top: RepositoryListMetrics.cardSpacing / 2,
-                                leading: RepositoryListMetrics.pageInset,
-                                bottom: RepositoryListMetrics.cardSpacing / 2,
-                                trailing: RepositoryListMetrics.pageInset
-                            ))
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(Color.clear)
-                            .contextMenu {
-                                Button(repo.isPinned ? "取消置顶" : "置顶") {
-                                    scheduler.togglePin(repoID: repo.id)
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(scheduler.lastResult.repositories) { repo in
+                            RepositoryRow(repo: repo)
+                                .contextMenu {
+                                    Button(repo.isPinned ? "取消置顶" : "置顶") {
+                                        scheduler.togglePin(repoID: repo.id)
+                                    }
                                 }
+
+                            if repo.id != scheduler.lastResult.repositories.last?.id {
+                                Divider()
+                                    .overlay(DevPulseVisualStyle.separator)
+                                    .padding(.leading, RepositoryListMetrics.rowPadding)
                             }
+                        }
                     }
+                    .background(
+                        RoundedRectangle(
+                            cornerRadius: RepositoryListMetrics.groupCornerRadius,
+                            style: .continuous
+                        )
+                        .fill(DevPulseVisualStyle.surface)
+                    )
+                    .clipShape(
+                        RoundedRectangle(
+                            cornerRadius: RepositoryListMetrics.groupCornerRadius,
+                            style: .continuous
+                        )
+                    )
+                    .padding(.horizontal, RepositoryListMetrics.pageInset)
+                    .padding(.top, RepositoryListMetrics.groupSpacing)
+                    .padding(.bottom, RepositoryListMetrics.pageInset)
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -46,10 +60,16 @@ struct RepositoryListView: View {
     @ViewBuilder
     private var refreshHint: some View {
         if scheduler.lastScanAt != nil || scheduler.refreshPhase != .idle {
-            HStack(spacing: 6) {
+            HStack(spacing: 7) {
                 if scheduler.refreshPhase == .refreshing {
                     ProgressView()
-                        .scaleEffect(0.7)
+                        .controlSize(.small)
+                        .scaleEffect(0.75)
+                } else {
+                    Circle()
+                        .fill(refreshHintTint.opacity(0.8))
+                        .frame(width: 6, height: 6)
+                        .accessibilityHidden(true)
                 }
 
                 Text(scheduler.refreshStatusText)
@@ -57,20 +77,20 @@ struct RepositoryListView: View {
                     .foregroundStyle(refreshHintTint)
 
                 if let detail = scheduler.refreshDetailText {
-                    Text(detail)
+                    Text("· \(detail)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
 
                 Spacer()
+
+                Text("\(scheduler.lastResult.repositories.count) 个仓库")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, RepositoryListMetrics.pageInset)
-            .padding(.vertical, 8)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .overlay(alignment: .bottom) {
-                Divider()
-                    .opacity(0.45)
-            }
+            .padding(.top, 11)
+            .padding(.bottom, 1)
         }
     }
 
@@ -122,7 +142,7 @@ struct RepositoryRow: View {
     let repo: RepositorySnapshot
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 8) {
                 HStack(spacing: 6) {
                     Text(repo.name)
@@ -151,12 +171,9 @@ struct RepositoryRow: View {
                 localChangesLabel
             }
 
-            Divider()
-                .opacity(0.45)
-
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Image(systemName: "arrow.right.circle")
-                    .font(.caption)
+                Image(systemName: "arrow.right")
+                    .font(.caption2.weight(.semibold))
                     .accessibilityHidden(true)
 
                 Text(repo.nextActionHint)
@@ -166,19 +183,10 @@ struct RepositoryRow: View {
             }
             .foregroundStyle(.secondary)
         }
-        .padding(RepositoryListMetrics.cardPadding)
+        .padding(.horizontal, RepositoryListMetrics.rowPadding)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: RepositoryListMetrics.cardCornerRadius, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: RepositoryListMetrics.cardCornerRadius, style: .continuous)
-                .stroke(Color(nsColor: .separatorColor).opacity(0.65), lineWidth: 1)
-        )
-        .contentShape(
-            RoundedRectangle(cornerRadius: RepositoryListMetrics.cardCornerRadius, style: .continuous)
-        )
+        .contentShape(Rectangle())
     }
 
     private var branchLabel: some View {
@@ -197,11 +205,7 @@ struct RepositoryRow: View {
         .padding(.vertical, 4)
         .background(
             Capsule()
-                .fill(Color.secondary.opacity(0.08))
-        )
-        .overlay(
-            Capsule()
-                .stroke(Color.secondary.opacity(0.12), lineWidth: 1)
+                .fill(DevPulseVisualStyle.strongerSurface)
         )
         .accessibilityLabel("Branch: \(repo.branch)")
         .layoutPriority(1)
@@ -251,18 +255,14 @@ private struct RepositoryReadinessBadge: View {
 
             Text(level.shortLabel)
                 .font(.caption2.weight(.semibold))
-                .foregroundStyle(.primary)
+                .foregroundStyle(tint)
         }
         .lineLimit(1)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(
             Capsule()
-                .fill(tint.opacity(0.09))
-        )
-        .overlay(
-            Capsule()
-                .stroke(tint.opacity(0.16), lineWidth: 1)
+                .fill(tint.opacity(0.11))
         )
         .fixedSize(horizontal: true, vertical: false)
         .accessibilityLabel("Commit readiness: \(level.shortLabel)")

@@ -1,34 +1,51 @@
 import SwiftUI
 
+enum DevPulseVisualStyle {
+    static let pageInset: CGFloat = 20
+    static let sectionCornerRadius: CGFloat = 12
+
+    static var surface: Color {
+        Color.primary.opacity(0.045)
+    }
+
+    static var strongerSurface: Color {
+        Color.primary.opacity(0.075)
+    }
+
+    static var separator: Color {
+        Color.primary.opacity(0.09)
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var scheduler: ScanScheduler
     @State private var selectedTab: AppTab = .overview
     @State private var settingsScrollTarget: SettingsScrollTarget?
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            StatusTab(
-                openRepositories: openRepositories,
-                openSettings: openSettings,
-                openDiagnostics: openDiagnostics
-            )
-                .tabItem {
-                    Label("Overview", systemImage: "square.grid.2x2")
-                }
-                .tag(AppTab.overview)
+        VStack(spacing: 0) {
+            AppSectionBar(selection: $selectedTab)
 
-            RepositoryListView()
-                .tabItem {
-                    Label("Repositories", systemImage: "list.bullet.rectangle")
-                }
-                .tag(AppTab.repositories)
+            Divider()
+                .overlay(DevPulseVisualStyle.separator)
 
-            SettingsView(scrollTarget: $settingsScrollTarget)
-                .tabItem {
-                    Label("Settings", systemImage: "gearshape")
-                }
-                .tag(AppTab.settings)
+            ZStack {
+                StatusTab(
+                    openRepositories: openRepositories,
+                    openSettings: openSettings,
+                    openDiagnostics: openDiagnostics
+                )
+                .tabContentVisibility(selectedTab == .overview)
+
+                RepositoryListView()
+                    .tabContentVisibility(selectedTab == .repositories)
+
+                SettingsView(scrollTarget: $settingsScrollTarget)
+                    .tabContentVisibility(selectedTab == .settings)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .background(Color(nsColor: .windowBackgroundColor))
         .environmentObject(scheduler)
     }
 
@@ -47,6 +64,74 @@ struct ContentView: View {
     }
 }
 
+private extension View {
+    func tabContentVisibility(_ isVisible: Bool) -> some View {
+        opacity(isVisible ? 1 : 0)
+            .allowsHitTesting(isVisible)
+            .disabled(!isVisible)
+            .accessibilityHidden(!isVisible)
+    }
+}
+
+private struct AppSectionBar: View {
+    @Binding var selection: AppTab
+
+    var body: some View {
+        HStack {
+            Spacer()
+
+            HStack(spacing: 2) {
+                sectionButton(
+                    tab: .overview,
+                    title: "Overview",
+                    systemImage: "square.grid.2x2"
+                )
+                sectionButton(
+                    tab: .repositories,
+                    title: "Repositories",
+                    systemImage: "list.bullet.rectangle"
+                )
+                sectionButton(
+                    tab: .settings,
+                    title: "Settings",
+                    systemImage: "gearshape"
+                )
+            }
+            .padding(4)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(DevPulseVisualStyle.surface)
+            )
+
+            Spacer()
+        }
+        .padding(.horizontal, DevPulseVisualStyle.pageInset)
+        .padding(.vertical, 8)
+    }
+
+    private func sectionButton(tab: AppTab, title: String, systemImage: String) -> some View {
+        let isSelected = selection == tab
+
+        return Button {
+            selection = tab
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.callout.weight(isSelected ? .semibold : .medium))
+                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(isSelected ? Color.accentColor.opacity(0.14) : Color.clear)
+        )
+        .help(title)
+        .animation(.easeOut(duration: 0.14), value: selection)
+    }
+}
+
 // MARK: - Status tab (overview)
 
 struct StatusTab: View {
@@ -57,25 +142,43 @@ struct StatusTab: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 12) {
                 OverviewFocusCard(
                     openRepositories: openRepositories,
                     openSettings: openSettings,
                     openDiagnostics: openDiagnostics
                 )
 
-                if let detail = scheduler.refreshDetailText {
-                    Text("\(scheduler.refreshStatusText) · \(detail)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text(scheduler.refreshStatusText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                refreshStatus
             }
-            .padding(20)
+            .padding(DevPulseVisualStyle.pageInset)
         }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var refreshStatus: some View {
+        HStack(spacing: 7) {
+            if scheduler.isScanning {
+                ProgressView()
+                    .controlSize(.small)
+                    .scaleEffect(0.75)
+            } else {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.caption)
+                    .accessibilityHidden(true)
+            }
+
+            if let detail = scheduler.refreshDetailText {
+                Text("\(scheduler.refreshStatusText) · \(detail)")
+            } else {
+                Text(scheduler.refreshStatusText)
+            }
+
+            Spacer()
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 4)
     }
 }
 
@@ -86,48 +189,81 @@ private struct OverviewFocusCard: View {
     let openDiagnostics: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .center, spacing: 10) {
-                Image(systemName: severitySymbol)
-                    .font(.headline.weight(.semibold))
-                    .foregroundStyle(severityColor)
-                    .frame(width: 26, height: 26)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(severityColor.opacity(0.12))
 
-                Text(focus.title)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.primary)
+                    Image(systemName: severitySymbol)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(severityColor)
+                }
+                .frame(width: 36, height: 36)
 
-                Spacer()
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(focus.title)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.primary)
+
+                    Text(focus.summary)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .layoutPriority(1)
+
+                Spacer(minLength: 12)
+
+                primaryActionButton
             }
 
-            Text(focus.summary)
-                .font(.body)
-                .foregroundStyle(.primary)
-
             if let detail = focus.detail {
-                Text(detail)
+                Divider()
+                    .overlay(DevPulseVisualStyle.separator)
+                    .padding(.top, 14)
+                    .padding(.bottom, 11)
+
+                Label(detail, systemImage: "info.circle")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-
-            Button(action: performPrimaryAction) {
-                Label(focus.action.title, systemImage: focus.action.systemImage)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.regular)
-            .disabled(isActionDisabled)
         }
-        .padding(20)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(severityBackground)
+            RoundedRectangle(cornerRadius: DevPulseVisualStyle.sectionCornerRadius, style: .continuous)
+                .fill(DevPulseVisualStyle.surface)
+        )
+        .overlay(alignment: .leading) {
+            Capsule()
+                .fill(severityColor)
+                .frame(width: 3)
+                .padding(.vertical, 12)
+        }
+    }
+
+    private var primaryActionButton: some View {
+        Button(action: performPrimaryAction) {
+            Label(focus.action.title, systemImage: focus.action.systemImage)
+                .font(.callout.weight(.semibold))
+                .padding(.horizontal, 11)
+                .padding(.vertical, 7)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(severityColor)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(severityColor.opacity(0.11))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(severityColor.opacity(0.18), lineWidth: 1)
         )
+        .opacity(isActionDisabled ? 0.48 : 1)
+        .disabled(isActionDisabled)
     }
 
     private var focus: OverviewFocusModel {
@@ -188,17 +324,6 @@ private struct OverviewFocusCard: View {
             return .orange
         case .error:
             return .red
-        }
-    }
-
-    private var severityBackground: Color {
-        switch focus.severity {
-        case .normal:
-            return Color.green.opacity(0.08)
-        case .warning:
-            return Color.orange.opacity(0.08)
-        case .error:
-            return Color.red.opacity(0.08)
         }
     }
 
