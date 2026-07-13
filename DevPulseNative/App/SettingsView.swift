@@ -11,27 +11,14 @@ struct SettingsView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    // Section: Default scan locations
+                VStack(alignment: .leading, spacing: 12) {
                     defaultScanLocationsSection
-
-                    Divider()
-
-                    // Section: Custom scan directories
                     customScanDirectoriesSection
-
-                    Divider()
-
-                    // Section: Launch At Login
                     launchAtLoginSection
-
-                    Divider()
-
-                    // Section: Diagnostics
                     diagnosticsSection
                         .id(SettingsScrollTarget.diagnostics)
                 }
-                .padding(20)
+                .padding(DevPulseVisualStyle.pageInset)
                 .onAppear {
                     launchAtLoginController.refreshStatus()
                     scrollToTargetIfNeeded(using: proxy)
@@ -56,89 +43,121 @@ struct SettingsView: View {
 
     private var defaultScanLocationsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("默认扫描目录", systemImage: "house")
-                .font(.headline)
-
-            Text("按分组启用常见目录；未找到的目录会直接提示，并提供可执行操作。")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            settingsSectionHeader(
+                title: "默认扫描目录",
+                subtitle: "按分组启用常见目录；未找到的目录会直接提示，并提供可执行操作。",
+                systemImage: "house"
+            )
 
             ForEach(defaultScanGroups) { group in
                 defaultScanGroupSection(group)
             }
         }
+        .settingsSectionSurface()
     }
 
     // MARK: - Custom scan directories
 
     private var customScanDirectoriesSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("自定义扫描目录", systemImage: "folder.badge.plus")
-                .font(.headline)
+        VStack(alignment: .leading, spacing: 12) {
+            settingsSectionHeader(
+                title: "自定义扫描目录",
+                subtitle: "添加需要持续扫描的本地仓库根目录。",
+                systemImage: "folder.badge.plus"
+            )
 
             if scheduler.scanDirectories.isEmpty {
                 Text("还没有添加自定义目录。")
                     .font(.caption)
                     .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .settingsInnerSurface()
             } else {
-                ForEach(scheduler.scanDirectories) { directory in
-                    HStack {
-                        Image(systemName: "folder")
-                            .font(.caption)
-                        Text(directory.path)
-                            .font(.caption)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        if !directoryExists(directory.path) {
-                            Text("当前不存在")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.secondary.opacity(0.08))
-                                .cornerRadius(6)
-                        }
-                        Spacer()
-                        Button(role: .destructive) {
-                            scheduler.removeCustomPath(directory.path)
-                        } label: {
-                            Image(systemName: "trash")
+                VStack(spacing: 0) {
+                    ForEach(Array(scheduler.scanDirectories.enumerated()), id: \.element.id) { index, directory in
+                        HStack(spacing: 8) {
+                            Image(systemName: "folder")
                                 .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(directory.path)
+                                .font(.caption)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            if !directoryExists(directory.path) {
+                                Text("当前不存在")
+                                    .font(.caption2.weight(.medium))
+                                    .foregroundStyle(.red)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.red.opacity(0.08))
+                                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            }
+                            Spacer()
+                            Button(role: .destructive) {
+                                scheduler.removeCustomPath(directory.path)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                            .help("移除扫描目录")
                         }
-                        .buttonStyle(.plain)
+                        .frame(minHeight: 36)
+                        .padding(.horizontal, 10)
+
+                        if index < scheduler.scanDirectories.count - 1 {
+                            Divider()
+                                .overlay(DevPulseVisualStyle.separator)
+                                .padding(.leading, 32)
+                        }
                     }
                 }
+                .settingsInnerSurface()
             }
 
-            HStack {
+            HStack(spacing: 8) {
                 TextField("输入仓库根目录路径", text: $newCustomPath)
-                    .textFieldStyle(.roundedBorder)
                     .font(.caption)
+                    .textFieldStyle(.plain)
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(DevPulseVisualStyle.strongerSurface)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(DevPulseVisualStyle.separator, lineWidth: 0.5)
+                    }
                 Button("添加") {
                     let trimmed = newCustomPath.trimmingCharacters(in: .whitespaces)
                     guard !trimmed.isEmpty else { return }
                     scheduler.addCustomPath(trimmed)
                     newCustomPath = ""
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .buttonStyle(SettingsCompactButtonStyle())
                 .disabled(newCustomPath.trimmingCharacters(in: .whitespaces).isEmpty)
 
                 Button("选择…") {
                     chooseDirectory()
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .buttonStyle(SettingsCompactButtonStyle())
             }
         }
+        .settingsSectionSurface()
     }
 
     // MARK: - Launch At Login
 
     private var launchAtLoginSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("登录后启动", systemImage: "power.circle")
-                .font(.headline)
+        VStack(alignment: .leading, spacing: 12) {
+            settingsSectionHeader(
+                title: "登录后启动",
+                subtitle: "控制 DevPulse 是否在登录 macOS 后自动运行。",
+                systemImage: "power.circle"
+            )
 
             Toggle(isOn: Binding(
                 get: { launchAtLoginController.isEnabled },
@@ -154,6 +173,8 @@ struct SettingsView: View {
                 }
             }
             .disabled(launchAtLoginController.isUpdating)
+            .padding(10)
+            .settingsInnerSurface()
 
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: severitySymbol(launchAtLoginSeverity))
@@ -167,25 +188,34 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-            }
 
-            if launchAtLoginController.status == .requiresApproval || launchAtLoginController.status == .notFound {
-                Button("打开系统设置中的登录项") {
-                    launchAtLoginController.openSystemSettings()
+                Spacer(minLength: 12)
+
+                if launchAtLoginController.status == .requiresApproval || launchAtLoginController.status == .notFound {
+                    Button("打开系统设置中的登录项") {
+                        launchAtLoginController.openSystemSettings()
+                    }
+                    .buttonStyle(SettingsCompactButtonStyle(tint: severityColor(launchAtLoginSeverity)))
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(severityBackground(launchAtLoginSeverity))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
+        .settingsSectionSurface()
     }
 
     // MARK: - Diagnostics
 
     private var diagnosticsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label("状态诊断", systemImage: "stethoscope")
-                    .font(.headline)
+            HStack(alignment: .top, spacing: 12) {
+                settingsSectionHeader(
+                    title: "状态诊断",
+                    subtitle: "查看共享快照、Widget 与扫描链路的运行状态。",
+                    systemImage: "stethoscope"
+                )
                 Spacer()
                 Button(action: { scheduler.scanNow() }) {
                     Label(
@@ -193,8 +223,7 @@ struct SettingsView: View {
                         systemImage: "arrow.triangle.2.circlepath"
                     )
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .buttonStyle(SettingsCompactButtonStyle())
                 .disabled(scheduler.isScanning)
             }
 
@@ -210,7 +239,7 @@ struct SettingsView: View {
                         }
                         .padding(10)
                         .background(Color.red.opacity(0.08))
-                        .cornerRadius(8)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
 
                     diagnosticsTopSummaryStrip
@@ -223,6 +252,32 @@ struct SettingsView: View {
                 .padding(.top, 8)
             }
             .font(.caption)
+        }
+        .settingsSectionSurface()
+    }
+
+    private func settingsSectionHeader(title: String, subtitle: String, systemImage: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.12))
+
+                Image(systemName: systemImage)
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+            }
+            .frame(width: 36, height: 36)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -250,8 +305,7 @@ struct SettingsView: View {
             }
         }
         .padding(10)
-        .background(Color.secondary.opacity(0.06))
-        .cornerRadius(8)
+        .settingsInnerSurface()
     }
 
     private var diagnosticsEventsSection: some View {
@@ -292,8 +346,7 @@ struct SettingsView: View {
             }
         }
         .padding(10)
-        .background(Color.secondary.opacity(0.06))
-        .cornerRadius(8)
+        .settingsInnerSurface()
     }
 
     private var diagnosticsTopSummaryStrip: some View {
@@ -330,7 +383,7 @@ struct SettingsView: View {
         }
         .padding(8)
         .background(severityBackground(diagnosticsOverview.severity))
-        .cornerRadius(8)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private var diagnosticsScanRootsSection: some View {
@@ -364,8 +417,7 @@ struct SettingsView: View {
             }
         }
         .padding(10)
-        .background(Color.secondary.opacity(0.06))
-        .cornerRadius(8)
+        .settingsInnerSurface()
     }
 
     private var diagnosticsStatusGrid: some View {
@@ -574,8 +626,7 @@ struct SettingsView: View {
             .font(.caption)
         }
         .padding(10)
-        .background(Color.secondary.opacity(0.06))
-        .cornerRadius(8)
+        .settingsInnerSurface()
     }
 
     private var diagnosticsSections: some View {
@@ -750,8 +801,7 @@ struct SettingsView: View {
             .font(.caption)
         }
         .padding(10)
-        .background(Color.secondary.opacity(0.06))
-        .cornerRadius(8)
+        .settingsInnerSurface()
     }
 
     private func diagnosticsCompactBadge(title: String, value: String, severity: DiagnosticsSeverity) -> some View {
@@ -766,8 +816,8 @@ struct SettingsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(8)
-        .background(Color.white.opacity(0.35))
-        .cornerRadius(6)
+        .background(DevPulseVisualStyle.strongerSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 
     private func diagnosticsInlineStatusPill(title: String, value: String, severity: DiagnosticsSeverity) -> some View {
@@ -783,8 +833,8 @@ struct SettingsView: View {
         .padding(.horizontal, 7)
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white.opacity(0.3))
-        .cornerRadius(6)
+        .background(DevPulseVisualStyle.strongerSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 
     private func diagnosticsSectionTimeHint(_ section: DiagnosticsSectionModel) -> String? {
@@ -975,8 +1025,8 @@ struct SettingsView: View {
             .foregroundColor(.secondary)
         }
         .padding(8)
-        .background(Color.white.opacity(0.35))
-        .cornerRadius(6)
+        .background(DevPulseVisualStyle.strongerSurface)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 
     private func diagnosticsRepositoryBranchLabel(_ repo: RepositorySnapshot) -> some View {
@@ -1421,8 +1471,7 @@ struct SettingsView: View {
                 }
             }
             .padding(10)
-            .background(Color.secondary.opacity(0.06))
-            .cornerRadius(8)
+            .settingsInnerSurface()
 
         case .compactDisclosure:
             compactDefaultScanGroupSection(group)
@@ -1437,18 +1486,19 @@ struct SettingsView: View {
                 .padding(.horizontal, 10)
 
             Divider()
+                .overlay(DevPulseVisualStyle.separator)
 
             ForEach(Array(group.paths.enumerated()), id: \.element) { index, path in
                 compactDefaultScanRow(for: path)
 
                 if index < group.paths.count - 1 {
                     Divider()
+                        .overlay(DevPulseVisualStyle.separator)
                         .padding(.leading, 10)
                 }
             }
         }
-        .background(Color.secondary.opacity(0.06))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .settingsInnerSurface()
     }
 
     private func compactDefaultScanRow(for path: String) -> some View {
@@ -1513,15 +1563,17 @@ struct SettingsView: View {
                             Button("创建并启用") {
                                 createBuiltInDirectoryAndEnable(path)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
+                            .buttonStyle(SettingsCompactButtonStyle())
 
-                            Menu("更多") {
+                            Menu {
                                 Button("选择其他位置") {
                                     chooseDirectoryAndRefresh()
                                 }
+                            } label: {
+                                settingsMoreMenuLabel
                             }
-                            .controlSize(.small)
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
                         }
                         .padding(.top, 2)
                     }
@@ -1572,15 +1624,17 @@ struct SettingsView: View {
                             Button("创建并启用") {
                                 createBuiltInDirectoryAndEnable(path)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
+                            .buttonStyle(SettingsCompactButtonStyle())
 
-                            Menu("更多") {
+                            Menu {
                                 Button("选择其他位置") {
                                     chooseDirectoryAndRefresh()
                                 }
+                            } label: {
+                                settingsMoreMenuLabel
                             }
-                            .controlSize(.small)
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
                         }
                     }
                 }
@@ -1604,17 +1658,31 @@ struct SettingsView: View {
                 Button("创建并启用") {
                     createBuiltInDirectoryAndEnable(path)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                .buttonStyle(SettingsCompactButtonStyle())
 
-                Menu("更多") {
+                Menu {
                     Button("选择其他位置") {
                         chooseDirectoryAndRefresh()
                     }
+                } label: {
+                    settingsMoreMenuLabel
                 }
-                .controlSize(.small)
+                .menuStyle(.borderlessButton)
+                .fixedSize()
             }
         }
+    }
+
+    private var settingsMoreMenuLabel: some View {
+        Label("更多", systemImage: "ellipsis")
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(DevPulseVisualStyle.strongerSurface)
+            )
     }
 
     private func defaultScanDirectoryDetails(title: String,
@@ -1686,6 +1754,52 @@ struct SettingsView: View {
     private func directoryExists(_ path: String) -> Bool {
         var isDir: ObjCBool = false
         return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+    }
+}
+
+private extension View {
+    func settingsSectionSurface() -> some View {
+        padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: DevPulseVisualStyle.sectionCornerRadius, style: .continuous)
+                    .fill(DevPulseVisualStyle.surface)
+            )
+    }
+
+    func settingsInnerSurface(cornerRadius: CGFloat = 8) -> some View {
+        background(
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(DevPulseVisualStyle.strongerSurface)
+        )
+    }
+}
+
+private struct SettingsCompactButtonStyle: ButtonStyle {
+    let tint: Color
+
+    @Environment(\.isEnabled) private var isEnabled
+
+    init(tint: Color = .accentColor) {
+        self.tint = tint
+    }
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(tint.opacity(configuration.isPressed ? 0.17 : 0.11))
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(tint.opacity(0.16), lineWidth: 0.5)
+            }
+            .opacity(isEnabled ? 1 : 0.42)
     }
 }
 
