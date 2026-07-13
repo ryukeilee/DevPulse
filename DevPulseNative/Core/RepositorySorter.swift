@@ -1,15 +1,15 @@
 import Foundation
 
 enum RepositorySorter {
-    /// Sort repositories for widget display.
+    /// Sort repositories as an action queue while preserving explicit pins.
     ///
     /// Priority order:
     /// 1. Pinned repos first
-    /// 2. Changed repos before clean repos
-    /// 3. High risk > medium > low
-    /// 4. More changed files first
-    /// 5. Most recently changed first
-    /// 6. Error repos last (unless all failed)
+    /// 2. Read failures and other abnormal states
+    /// 3. Unpushed commits
+    /// 4. Local working-tree changes
+    /// 5. Remote-tracking updates
+    /// 6. Risk, relevant counts, recent activity, then name
     static func sort(_ repos: [RepositorySnapshot]) -> [RepositorySnapshot] {
         repos.sorted { a, b in
             // Pinned first
@@ -17,17 +17,10 @@ enum RepositorySorter {
                 return a.isPinned
             }
 
-            let aReadinessPriority = readinessPriority(a.commitReadiness.level)
-            let bReadinessPriority = readinessPriority(b.commitReadiness.level)
-            if aReadinessPriority != bReadinessPriority {
-                return aReadinessPriority < bReadinessPriority
-            }
-
-            // Changed before clean
-            let aChanged = a.status == .changed
-            let bChanged = b.status == .changed
-            if aChanged != bChanged {
-                return aChanged
+            let aActionPriority = a.actionState.sortPriority
+            let bActionPriority = b.actionState.sortPriority
+            if aActionPriority != bActionPriority {
+                return aActionPriority < bActionPriority
             }
 
             // Higher risk first
@@ -35,17 +28,25 @@ enum RepositorySorter {
                 return a.risk > b.risk
             }
 
-            // More changed files first
+            // More actionable work first within the same action state.
+            if (a.aheadCount ?? 0) != (b.aheadCount ?? 0) {
+                return (a.aheadCount ?? 0) > (b.aheadCount ?? 0)
+            }
             if a.changedFileCount != b.changedFileCount {
                 return a.changedFileCount > b.changedFileCount
             }
+            if (a.behindCount ?? 0) != (b.behindCount ?? 0) {
+                return (a.behindCount ?? 0) > (b.behindCount ?? 0)
+            }
 
-            // More recent lastChangedAt first
-            if let aDate = isoDate(a.lastChangedAt), let bDate = isoDate(b.lastChangedAt) {
+            // More recent observed activity first.
+            let aActivityAt = a.lastActivityAt ?? a.lastChangedAt
+            let bActivityAt = b.lastActivityAt ?? b.lastChangedAt
+            if let aDate = isoDate(aActivityAt), let bDate = isoDate(bActivityAt) {
                 return aDate > bDate
             }
-            if a.lastChangedAt != nil { return true }
-            if b.lastChangedAt != nil { return false }
+            if aActivityAt != nil { return true }
+            if bActivityAt != nil { return false }
 
             return a.name.localizedStandardCompare(b.name) == .orderedAscending
         }
@@ -58,18 +59,4 @@ enum RepositorySorter {
         return formatter.date(from: string) ?? ISO8601DateFormatter().date(from: string)
     }
 
-    private static func readinessPriority(_ level: CommitReadinessLevel) -> Int {
-        switch level {
-        case .unknown:
-            return 0
-        case .dirty:
-            return 1
-        case .review:
-            return 2
-        case .ready:
-            return 3
-        case .idle:
-            return 4
-        }
-    }
 }

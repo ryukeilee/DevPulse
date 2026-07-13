@@ -5,27 +5,53 @@ enum GitStatusParser {
         let branch: String
         let aheadCount: Int
         let behindCount: Int
+        let hasUpstream: Bool
         let isDetached: Bool
+    }
+
+    struct LastCommitMetadata: Equatable {
+        let committedAt: String?
+        let summary: String?
     }
 
     /// Parse `git status --short --branch` output into branch metadata.
     static func parseBranchMetadata(_ output: String) -> BranchMetadata {
         guard let firstLine = output.split(separator: "\n", omittingEmptySubsequences: false).first else {
-            return BranchMetadata(branch: "unknown", aheadCount: 0, behindCount: 0, isDetached: false)
+            return BranchMetadata(
+                branch: "unknown",
+                aheadCount: 0,
+                behindCount: 0,
+                hasUpstream: false,
+                isDetached: false
+            )
         }
 
         let line = String(firstLine)
         guard line.hasPrefix("## ") else {
-            return BranchMetadata(branch: "unknown", aheadCount: 0, behindCount: 0, isDetached: false)
+            return BranchMetadata(
+                branch: "unknown",
+                aheadCount: 0,
+                behindCount: 0,
+                hasUpstream: false,
+                isDetached: false
+            )
         }
 
         let descriptor = String(line.dropFirst(3))
-        let branchSegment = descriptor
+        let rawBranchSegment = descriptor
             .components(separatedBy: "...")
             .first?
             .components(separatedBy: " [")
             .first?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
+        let branchSegment: String
+        if rawBranchSegment.hasPrefix("No commits yet on ") {
+            branchSegment = String(rawBranchSegment.dropFirst("No commits yet on ".count))
+        } else if rawBranchSegment.hasPrefix("Initial commit on ") {
+            branchSegment = String(rawBranchSegment.dropFirst("Initial commit on ".count))
+        } else {
+            branchSegment = rawBranchSegment
+        }
 
         let isDetached = branchSegment.hasPrefix("HEAD (") || branchSegment == "HEAD"
         let branch = isDetached ? "detached" : (branchSegment.isEmpty ? "unknown" : branchSegment)
@@ -34,8 +60,29 @@ enum GitStatusParser {
             branch: branch,
             aheadCount: extractCount(label: "ahead", from: descriptor),
             behindCount: extractCount(label: "behind", from: descriptor),
+            hasUpstream: descriptor.contains("..."),
             isDetached: isDetached
         )
+    }
+
+    /// Parse `git log -1 --pretty=%cI%x00%s` into optional commit metadata.
+    static func parseLastCommitMetadata(_ output: String?) -> LastCommitMetadata? {
+        guard let output, !output.isEmpty else { return nil }
+
+        let datePart: String
+        let summaryPart: String
+        if let separator = output.firstIndex(of: "\0") {
+            datePart = String(output[..<separator])
+            summaryPart = String(output[output.index(after: separator)...])
+        } else {
+            datePart = output
+            summaryPart = ""
+        }
+
+        let committedAt = normalized(datePart)
+        let summary = normalized(summaryPart)
+        guard committedAt != nil || summary != nil else { return nil }
+        return LastCommitMetadata(committedAt: committedAt, summary: summary)
     }
 
     /// Parse `git status --short` output into an array of file paths.
@@ -196,5 +243,10 @@ enum GitStatusParser {
         let suffix = descriptor[range.upperBound...]
         let digits = suffix.prefix { $0.isNumber }
         return Int(digits) ?? 0
+    }
+
+    private static func normalized(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

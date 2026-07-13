@@ -141,8 +141,12 @@ struct RepositoryListView: View {
 struct RepositoryRow: View {
     let repo: RepositorySnapshot
 
+    private var presentation: RepositoryListItemPresentation {
+        RepositoryListItemPresentationBuilder.build(snapshot: repo)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .center, spacing: 8) {
                 HStack(spacing: 6) {
                     Text(repo.name)
@@ -162,26 +166,47 @@ struct RepositoryRow: View {
 
                 Spacer(minLength: 8)
 
-                RepositoryReadinessBadge(level: repo.commitReadiness.level)
+                RepositoryActionBadge(action: presentation.action)
+                    .help(repo.nextActionHint)
             }
 
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Text("最近提交")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: true, vertical: false)
+
+                Text(presentation.latestCommit)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .accessibilityElement(children: .combine)
+
+            HStack(alignment: .center, spacing: 12) {
                 branchLabel
 
-                localChangesLabel
-            }
+                metadataLabel(
+                    title: "本地",
+                    value: presentation.localChanges,
+                    systemImage: "doc.text"
+                )
 
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Image(systemName: "arrow.right")
-                    .font(.caption2.weight(.semibold))
-                    .accessibilityHidden(true)
+                metadataLabel(
+                    title: "同步",
+                    value: presentation.synchronization,
+                    systemImage: "arrow.up.arrow.down"
+                )
 
-                Text(repo.nextActionHint)
-                    .font(.caption)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 4)
+
+                metadataLabel(
+                    title: "活跃",
+                    value: presentation.recentActivity,
+                    systemImage: "clock"
+                )
             }
-            .foregroundStyle(.secondary)
         }
         .padding(.horizontal, RepositoryListMetrics.rowPadding)
         .padding(.vertical, 12)
@@ -208,43 +233,27 @@ struct RepositoryRow: View {
                 .fill(DevPulseVisualStyle.strongerSurface)
         )
         .accessibilityLabel("Branch: \(repo.branch)")
-        .layoutPriority(1)
     }
 
-    private var localChangesLabel: some View {
-        HStack(spacing: 5) {
-            Image(systemName: "doc.text")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(readinessTint)
+    private func metadataLabel(title: String, value: String, systemImage: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: systemImage)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.tertiary)
                 .accessibilityHidden(true)
 
-            Text(repo.statusSummary)
-                .font(.caption.weight(.medium))
+            Text("\(title) \(value)")
+                .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
         }
-        .accessibilityLabel("Local changes: \(repo.statusSummary)")
-    }
-
-    private var readinessTint: Color {
-        switch repo.commitReadiness.level {
-        case .idle:
-            return .secondary
-        case .review:
-            return .blue
-        case .ready:
-            return .green
-        case .dirty:
-            return .orange
-        case .unknown:
-            return .red
-        }
+        .accessibilityLabel("\(title)：\(value)")
     }
 }
 
-private struct RepositoryReadinessBadge: View {
-    let level: CommitReadinessLevel
+private struct RepositoryActionBadge: View {
+    let action: RepositoryActionState
 
     var body: some View {
         HStack(spacing: 5) {
@@ -253,7 +262,7 @@ private struct RepositoryReadinessBadge: View {
                 .foregroundStyle(tint)
                 .accessibilityHidden(true)
 
-            Text(level.shortLabel)
+            Text(action.title)
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(tint)
         }
@@ -265,36 +274,44 @@ private struct RepositoryReadinessBadge: View {
                 .fill(tint.opacity(0.11))
         )
         .fixedSize(horizontal: true, vertical: false)
-        .accessibilityLabel("Commit readiness: \(level.shortLabel)")
+        .accessibilityLabel("建议操作：\(action.title)")
     }
 
     private var systemImage: String {
-        switch level {
-        case .idle:
-            return "pause.circle.fill"
-        case .review:
-            return "eye.fill"
-        case .ready:
-            return "checkmark.circle.fill"
-        case .dirty:
+        switch action.kind {
+        case .diagnoseReadFailure:
+            return "exclamationmark.octagon.fill"
+        case .resolveConflicts:
             return "exclamationmark.triangle.fill"
-        case .unknown:
+        case .confirmBranch:
             return "questionmark.circle.fill"
+        case .synchronizeDivergedBranch:
+            return "arrow.triangle.branch"
+        case .pushLocalCommits:
+            return "arrow.up.circle.fill"
+        case .commitStagedChanges:
+            return "checkmark.circle.fill"
+        case .reviewLocalChanges:
+            return "eye.fill"
+        case .pullRemoteUpdates:
+            return "arrow.down.circle.fill"
+        case .noActionNeeded:
+            return "checkmark.circle"
         }
     }
 
     private var tint: Color {
-        switch level {
-        case .idle:
-            return .secondary
-        case .review:
-            return .blue
-        case .ready:
-            return .green
-        case .dirty:
-            return .orange
-        case .unknown:
+        switch action.kind {
+        case .diagnoseReadFailure:
             return .red
+        case .resolveConflicts, .confirmBranch, .synchronizeDivergedBranch, .reviewLocalChanges:
+            return .orange
+        case .pushLocalCommits, .pullRemoteUpdates:
+            return .blue
+        case .commitStagedChanges:
+            return .green
+        case .noActionNeeded:
+            return .secondary
         }
     }
 }

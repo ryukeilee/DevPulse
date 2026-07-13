@@ -311,10 +311,15 @@ enum ScanSchedulerPolicy {
             && previous.unstagedFileCount == next.unstagedFileCount
             && previous.conflictedFileCount == next.conflictedFileCount
             && previous.aheadCount == next.aheadCount
+            && previous.behindCount == next.behindCount
+            && previous.hasUpstream == next.hasUpstream
             && previous.changedFileCount == next.changedFileCount
             && previous.changedFilesPreview == next.changedFilesPreview
             && previous.risk == next.risk
             && previous.lastChangedAt == next.lastChangedAt
+            && previous.lastCommitSummary == next.lastCommitSummary
+            && previous.lastCommitMetadataAvailable == next.lastCommitMetadataAvailable
+            && previous.lastActivityAt == next.lastActivityAt
             && previous.errorMessage == next.errorMessage
             && previous.isPinned == next.isPinned
     }
@@ -857,9 +862,10 @@ final class ScanScheduler: ObservableObject {
     // MARK: - Change detection
 
     private func hadChanges(before: AppGroupData, after: AppGroupData) -> Bool {
-        before.scanSummary.totalChangedFiles != after.scanSummary.totalChangedFiles
-            || before.scanSummary.changedRepositories != after.scanSummary.changedRepositories
-            || before.scanSummary.totalRepositories != after.scanSummary.totalRepositories
+        ScanSchedulerPolicy.hasMeaningfulSnapshotChanges(
+            previousSnapshot: before,
+            nextSnapshot: after
+        )
     }
 
     private func scanRoots() -> (roots: [String], warning: String?) {

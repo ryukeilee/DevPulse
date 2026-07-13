@@ -108,11 +108,16 @@ enum RepositoryIdentity {
             unstagedFileCount: snapshot.unstagedFileCount,
             conflictedFileCount: snapshot.conflictedFileCount,
             aheadCount: snapshot.aheadCount,
+            behindCount: snapshot.behindCount,
+            hasUpstream: snapshot.hasUpstream,
             changedFileCount: snapshot.changedFileCount,
             changedFilesPreview: snapshot.changedFilesPreview,
             risk: snapshot.risk,
             lastScannedAt: snapshot.lastScannedAt,
             lastChangedAt: snapshot.lastChangedAt,
+            lastCommitSummary: snapshot.lastCommitSummary,
+            lastCommitMetadataAvailable: snapshot.lastCommitMetadataAvailable,
+            lastActivityAt: snapshot.lastActivityAt,
             errorMessage: snapshot.errorMessage,
             isPinned: snapshot.isPinned
         )
@@ -169,11 +174,16 @@ enum RepositoryIdentity {
             unstagedFileCount: lhs.unstagedFileCount,
             conflictedFileCount: lhs.conflictedFileCount,
             aheadCount: lhs.aheadCount,
+            behindCount: lhs.behindCount,
+            hasUpstream: lhs.hasUpstream,
             changedFileCount: lhs.changedFileCount,
             changedFilesPreview: lhs.changedFilesPreview,
             risk: lhs.risk,
             lastScannedAt: lhs.lastScannedAt,
             lastChangedAt: lhs.lastChangedAt,
+            lastCommitSummary: lhs.lastCommitSummary,
+            lastCommitMetadataAvailable: lhs.lastCommitMetadataAvailable,
+            lastActivityAt: lhs.lastActivityAt,
             errorMessage: lhs.errorMessage,
             isPinned: true
         )
@@ -294,13 +304,70 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
     let unstagedFileCount: Int?
     let conflictedFileCount: Int?
     let aheadCount: Int?
+    let behindCount: Int?
+    let hasUpstream: Bool?
     let changedFileCount: Int
     let changedFilesPreview: [String]
     let risk: RiskLevel
     let lastScannedAt: String
     let lastChangedAt: String?
+    let lastCommitSummary: String?
+    let lastCommitMetadataAvailable: Bool?
+    var lastActivityAt: String?
     let errorMessage: String?
     var isPinned: Bool
+
+    init(id: String,
+         name: String,
+         path: String,
+         branch: String,
+         status: RepositoryStatus,
+         modifiedFileCount: Int,
+         addedFileCount: Int,
+         deletedFileCount: Int,
+         untrackedFileCount: Int,
+         stagedFileCount: Int?,
+         unstagedFileCount: Int?,
+         conflictedFileCount: Int?,
+         aheadCount: Int?,
+         behindCount: Int? = nil,
+         hasUpstream: Bool? = nil,
+         changedFileCount: Int,
+         changedFilesPreview: [String],
+         risk: RiskLevel,
+         lastScannedAt: String,
+         lastChangedAt: String?,
+         lastCommitSummary: String? = nil,
+         lastCommitMetadataAvailable: Bool? = nil,
+         lastActivityAt: String? = nil,
+         errorMessage: String?,
+         isPinned: Bool) {
+        self.id = id
+        self.name = name
+        self.path = path
+        self.branch = branch
+        self.status = status
+        self.modifiedFileCount = modifiedFileCount
+        self.addedFileCount = addedFileCount
+        self.deletedFileCount = deletedFileCount
+        self.untrackedFileCount = untrackedFileCount
+        self.stagedFileCount = stagedFileCount
+        self.unstagedFileCount = unstagedFileCount
+        self.conflictedFileCount = conflictedFileCount
+        self.aheadCount = aheadCount
+        self.behindCount = behindCount
+        self.hasUpstream = hasUpstream
+        self.changedFileCount = changedFileCount
+        self.changedFilesPreview = changedFilesPreview
+        self.risk = risk
+        self.lastScannedAt = lastScannedAt
+        self.lastChangedAt = lastChangedAt
+        self.lastCommitSummary = lastCommitSummary
+        self.lastCommitMetadataAvailable = lastCommitMetadataAvailable
+        self.lastActivityAt = lastActivityAt
+        self.errorMessage = errorMessage
+        self.isPinned = isPinned
+    }
 
     static func == (lhs: RepositorySnapshot, rhs: RepositorySnapshot) -> Bool {
         lhs.id == rhs.id
@@ -316,11 +383,16 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
             && lhs.unstagedFileCount == rhs.unstagedFileCount
             && lhs.conflictedFileCount == rhs.conflictedFileCount
             && lhs.aheadCount == rhs.aheadCount
+            && lhs.behindCount == rhs.behindCount
+            && lhs.hasUpstream == rhs.hasUpstream
             && lhs.changedFileCount == rhs.changedFileCount
             && lhs.changedFilesPreview == rhs.changedFilesPreview
             && lhs.risk == rhs.risk
             && lhs.lastScannedAt == rhs.lastScannedAt
             && lhs.lastChangedAt == rhs.lastChangedAt
+            && lhs.lastCommitSummary == rhs.lastCommitSummary
+            && lhs.lastCommitMetadataAvailable == rhs.lastCommitMetadataAvailable
+            && lhs.lastActivityAt == rhs.lastActivityAt
             && lhs.errorMessage == rhs.errorMessage
             && lhs.isPinned == rhs.isPinned
     }
@@ -348,6 +420,179 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
     var statusSummary: String {
         RepositoryStatusSummaryBuilder.build(snapshot: self)
     }
+
+    var actionState: RepositoryActionState {
+        RepositoryActionStateBuilder.build(snapshot: self)
+    }
+}
+
+enum RepositoryActionKind: Equatable {
+    case diagnoseReadFailure
+    case resolveConflicts
+    case confirmBranch
+    case synchronizeDivergedBranch
+    case pushLocalCommits
+    case commitStagedChanges
+    case reviewLocalChanges
+    case pullRemoteUpdates
+    case noActionNeeded
+}
+
+struct RepositoryActionState: Equatable {
+    let kind: RepositoryActionKind
+    let title: String
+    let sortPriority: Int
+}
+
+enum RepositoryActionStateBuilder {
+    static func build(snapshot: RepositorySnapshot) -> RepositoryActionState {
+        if snapshot.status == .error || snapshot.errorMessage != nil {
+            return action(.diagnoseReadFailure, title: "检查读取异常", priority: 0)
+        }
+
+        if (snapshot.conflictedFileCount ?? 0) > 0 {
+            return action(.resolveConflicts, title: "先解决合并冲突", priority: 1)
+        }
+
+        let normalizedBranch = snapshot.branch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalizedBranch.isEmpty || normalizedBranch == "unknown" || normalizedBranch == "detached" {
+            return action(.confirmBranch, title: "确认当前分支", priority: 2)
+        }
+
+        let aheadCount = snapshot.aheadCount ?? 0
+        let behindCount = snapshot.behindCount ?? 0
+        if aheadCount > 0, behindCount > 0 {
+            return action(.synchronizeDivergedBranch, title: "同步分叉分支", priority: 3)
+        }
+
+        if aheadCount > 0 {
+            return action(
+                .pushLocalCommits,
+                title: "推送 \(aheadCount) 个本地提交",
+                priority: 4
+            )
+        }
+
+        if snapshot.changedFileCount > 0 {
+            let stagedCount = snapshot.stagedFileCount ?? 0
+            let looseCount = (snapshot.unstagedFileCount ?? 0) + snapshot.untrackedFileCount
+            if stagedCount > 0, looseCount == 0 {
+                return action(
+                    .commitStagedChanges,
+                    title: "提交 \(stagedCount) 个已暂存改动",
+                    priority: 5
+                )
+            }
+
+            return action(
+                .reviewLocalChanges,
+                title: "检查 \(snapshot.changedFileCount) 个本地改动",
+                priority: 5
+            )
+        }
+
+        if behindCount > 0 {
+            return action(
+                .pullRemoteUpdates,
+                title: "拉取 \(behindCount) 个远端更新",
+                priority: 6
+            )
+        }
+
+        return action(.noActionNeeded, title: "无需处理", priority: 7)
+    }
+
+    private static func action(_ kind: RepositoryActionKind,
+                               title: String,
+                               priority: Int) -> RepositoryActionState {
+        RepositoryActionState(kind: kind, title: title, sortPriority: priority)
+    }
+}
+
+struct RepositoryListItemPresentation: Equatable {
+    let action: RepositoryActionState
+    let latestCommit: String
+    let localChanges: String
+    let synchronization: String
+    let recentActivity: String
+}
+
+enum RepositoryListItemPresentationBuilder {
+    static func build(snapshot: RepositorySnapshot, now: Date = Date()) -> RepositoryListItemPresentation {
+        RepositoryListItemPresentation(
+            action: snapshot.actionState,
+            latestCommit: latestCommitLabel(snapshot: snapshot, now: now),
+            localChanges: localChangesLabel(snapshot: snapshot),
+            synchronization: synchronizationLabel(snapshot: snapshot),
+            recentActivity: recentActivityLabel(snapshot: snapshot, now: now)
+        )
+    }
+
+    private static func latestCommitLabel(snapshot: RepositorySnapshot, now: Date) -> String {
+        let time = relativeTime(snapshot.lastChangedAt, now: now)
+        let summary = snapshot.lastCommitSummary?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
+
+        if snapshot.lastCommitMetadataAvailable == false {
+            guard time != nil || summary != nil else { return "提交信息暂不可用" }
+            return "上次记录 · \(time ?? "时间未知") · \(summary ?? "摘要不可用")"
+        }
+
+        if time == nil, summary == nil {
+            if snapshot.status == .error {
+                return "提交信息暂不可用"
+            }
+            return snapshot.lastCommitMetadataAvailable == true
+                ? "暂无提交记录"
+                : "提交信息待刷新"
+        }
+
+        return "\(time ?? "时间未知") · \(summary ?? "摘要不可用")"
+    }
+
+    private static func localChangesLabel(snapshot: RepositorySnapshot) -> String {
+        guard snapshot.status != .error else { return "本地改动未知" }
+        return "\(snapshot.changedFileCount) 个文件"
+    }
+
+    private static func synchronizationLabel(snapshot: RepositorySnapshot) -> String {
+        guard snapshot.status != .error else { return "同步状态未知" }
+
+        if snapshot.hasUpstream == false {
+            return "未关联上游"
+        }
+
+        if snapshot.hasUpstream == true,
+           let aheadCount = snapshot.aheadCount,
+           let behindCount = snapshot.behindCount {
+            return "领先 \(aheadCount) · 落后 \(behindCount)"
+        }
+
+        if let aheadCount = snapshot.aheadCount,
+           let behindCount = snapshot.behindCount {
+            return "领先 \(aheadCount) · 落后 \(behindCount)"
+        }
+
+        return "同步状态待刷新"
+    }
+
+    private static func recentActivityLabel(snapshot: RepositorySnapshot, now: Date) -> String {
+        let timestamp = snapshot.lastActivityAt ?? snapshot.lastChangedAt
+        guard let timestamp else { return "暂无活动记录" }
+        return relativeTime(timestamp, now: now) ?? "时间未知"
+    }
+
+    private static func relativeTime(_ timestamp: String?, now: Date) -> String? {
+        guard let timestamp else { return nil }
+        return DateFormatting.relativeTimeChinese(from: timestamp, relativeTo: now)
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
 }
 
 enum RepositoryNextActionHintBuilder {
@@ -366,8 +611,17 @@ enum RepositoryNextActionHintBuilder {
             return "先确认当前分支，再决定是否继续审查或提交。"
         }
 
+        let aheadCount = snapshot.aheadCount ?? 0
+        let behindCount = snapshot.behindCount ?? 0
+        if aheadCount > 0, behindCount > 0 {
+            return "本地和远端都有新提交，先确认分叉范围再同步。"
+        }
+
+        if behindCount > 0 {
+            return "先拉取 \(countLabel(behindCount, unit: "个远端更新"))，再继续本地工作。"
+        }
+
         if readiness.reasons.contains(.localAhead),
-           let aheadCount = snapshot.aheadCount,
            aheadCount > 0 {
             return "确认准备好后 push \(countLabel(aheadCount, unit: "个本地提交"))。"
         }

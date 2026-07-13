@@ -826,6 +826,111 @@ struct CommitReadinessEngineTests {
         #expect(repo.nextActionHint == "先拆清已暂存和未暂存改动，再决定是否提交。")
     }
 
+    @Test func gitMetadataParserKeepsAheadBehindAndUpstreamAvailabilityDistinct() {
+        let tracked = GitStatusParser.parseBranchMetadata(
+            "## main...origin/main [ahead 2, behind 3]\n"
+        )
+        let localOnly = GitStatusParser.parseBranchMetadata("## feature/local\n")
+        let initial = GitStatusParser.parseBranchMetadata("## No commits yet on trunk\n")
+
+        #expect(tracked.branch == "main")
+        #expect(tracked.aheadCount == 2)
+        #expect(tracked.behindCount == 3)
+        #expect(tracked.hasUpstream)
+        #expect(localOnly.branch == "feature/local")
+        #expect(localOnly.hasUpstream == false)
+        #expect(initial.branch == "trunk")
+        #expect(initial.hasUpstream == false)
+    }
+
+    @Test func gitMetadataParserReadsCommitTimeAndSummaryTogether() {
+        let metadata = GitStatusParser.parseLastCommitMetadata(
+            "2026-07-13T09:30:00+08:00\0修复项目优先级"
+        )
+
+        #expect(metadata?.committedAt == "2026-07-13T09:30:00+08:00")
+        #expect(metadata?.summary == "修复项目优先级")
+        #expect(GitStatusParser.parseLastCommitMetadata(nil) == nil)
+    }
+
+    @Test func repositoryListPresentationShowsRequiredSignalsWithoutEnglishReadinessLabels() {
+        let repo = snapshot(
+            modified: 0,
+            ahead: 2,
+            behind: 1,
+            hasUpstream: true,
+            status: .clean,
+            lastChangedAt: "2026-07-13T08:00:00Z",
+            lastCommitSummary: "Refine repository dashboard",
+            lastActivityAt: "2026-07-13T09:30:00Z"
+        )
+        let presentation = RepositoryListItemPresentationBuilder.build(
+            snapshot: repo,
+            now: DateFormatting.date(from: "2026-07-13T10:00:00Z")!
+        )
+
+        #expect(presentation.action.kind == .synchronizeDivergedBranch)
+        #expect(presentation.action.title == "同步分叉分支")
+        #expect(presentation.latestCommit == "2 小时前 · Refine repository dashboard")
+        #expect(presentation.localChanges == "0 个文件")
+        #expect(presentation.synchronization == "领先 2 · 落后 1")
+        #expect(presentation.recentActivity == "30 分钟前")
+    }
+
+    @Test func repositoryListPresentationUsesExplicitMissingDataFallbacks() {
+        let failed = snapshot(
+            modified: 0,
+            ahead: nil,
+            status: .error,
+            branch: "unknown",
+            errorMessage: "读取失败"
+        )
+        let failedPresentation = RepositoryListItemPresentationBuilder.build(snapshot: failed)
+        let localOnlyPresentation = RepositoryListItemPresentationBuilder.build(
+            snapshot: snapshot(
+                modified: 0,
+                ahead: nil,
+                behind: nil,
+                hasUpstream: false,
+                status: .clean
+            )
+        )
+        let lastKnownPresentation = RepositoryListItemPresentationBuilder.build(
+            snapshot: snapshot(
+                modified: 0,
+                status: .clean,
+                lastChangedAt: "2026-07-13T08:00:00Z",
+                lastCommitSummary: "Last known subject",
+                lastCommitMetadataAvailable: false
+            ),
+            now: DateFormatting.date(from: "2026-07-13T10:00:00Z")!
+        )
+
+        #expect(failedPresentation.action.title == "检查读取异常")
+        #expect(failedPresentation.latestCommit == "提交信息暂不可用")
+        #expect(failedPresentation.localChanges == "本地改动未知")
+        #expect(failedPresentation.synchronization == "同步状态未知")
+        #expect(failedPresentation.recentActivity == "暂无活动记录")
+        #expect(localOnlyPresentation.synchronization == "未关联上游")
+        #expect(localOnlyPresentation.action.title == "无需处理")
+        #expect(lastKnownPresentation.latestCommit == "上次记录 · 2 小时前 · Last known subject")
+    }
+
+    @Test func repositorySorterPreservesPinsThenOrdersTheActionQueue() {
+        let repositories = [
+            snapshot(id: "clean", name: "clean", modified: 0, ahead: 0, behind: 0, hasUpstream: true, status: .clean),
+            snapshot(id: "behind", name: "behind", modified: 0, ahead: 0, behind: 2, hasUpstream: true, status: .clean),
+            snapshot(id: "changed", name: "changed", modified: 1, ahead: 0, behind: 0, hasUpstream: true),
+            snapshot(id: "ahead", name: "ahead", modified: 0, ahead: 2, behind: 0, hasUpstream: true, status: .clean),
+            snapshot(id: "error", name: "error", modified: 0, ahead: nil, status: .error, branch: "unknown", errorMessage: "读取失败"),
+            snapshot(id: "pinned", name: "pinned", modified: 0, ahead: 0, behind: 0, hasUpstream: true, status: .clean, isPinned: true)
+        ]
+
+        let sorted = RepositorySorter.sort(repositories)
+
+        #expect(sorted.map(\.name) == ["pinned", "error", "ahead", "changed", "behind", "clean"])
+    }
+
     @Test func overviewFocusPrioritizesWidgetTrustErrors() {
         var diagnostics = DiagnosticsSnapshot()
         diagnostics.scanRoots = ["/tmp/projects"]
@@ -1229,6 +1334,152 @@ struct CommitReadinessEngineTests {
         #expect(repo.status == .clean)
         #expect(repo.commitReadiness.level == .idle)
         #expect(repo.changedFileCount == 0)
+        #expect(repo.lastChangedAt != nil)
+        #expect(repo.lastCommitSummary == "Initial commit")
+        #expect(repo.lastCommitMetadataAvailable == true)
+        #expect(repo.lastActivityAt == repo.lastChangedAt)
+        #expect(repo.hasUpstream == false)
+        #expect(repo.aheadCount == nil)
+        #expect(repo.behindCount == nil)
+    }
+
+    @Test func gitScannerKeepsActivityStableUntilRepositoryStateChanges() async throws {
+        let root = try temporaryDirectory(named: "scanner-activity")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repository = root.appendingPathComponent("repo")
+        try createCommittedRepository(at: repository)
+        let first = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path]
+        )
+        let firstRepo = try #require(first.data.repositories.first)
+
+        let second = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            knownRepositoryPaths: first.discoveredRepositoryPaths,
+            previousSnapshot: first.data
+        )
+        let secondRepo = try #require(second.data.repositories.first)
+
+        try await Task.sleep(nanoseconds: 1_100_000_000)
+        try "local work\n".write(
+            to: repository.appendingPathComponent("local.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let changed = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            knownRepositoryPaths: first.discoveredRepositoryPaths,
+            previousSnapshot: second.data
+        )
+        let changedRepo = try #require(changed.data.repositories.first)
+
+        #expect(secondRepo.lastActivityAt == firstRepo.lastActivityAt)
+        #expect(changedRepo.status == .changed)
+        #expect(changedRepo.lastActivityAt != secondRepo.lastActivityAt)
+        #expect(changedRepo.lastCommitSummary == "Initial commit")
+    }
+
+    @Test func gitScannerPublishesAheadAndBehindFromLocalTrackingReferences() async throws {
+        let root = try temporaryDirectory(named: "scanner-sync-state")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let remote = root.appendingPathComponent("remote.git")
+        let local = root.appendingPathComponent("local")
+        let peer = root.appendingPathComponent("peer")
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        try runGit(["init", "--bare"], in: remote)
+        try createCommittedRepository(at: local)
+        try runGit(["remote", "add", "origin", remote.path], in: local)
+        try runGit(["push", "-u", "origin", "HEAD:main"], in: local)
+        try runGit(["clone", "--branch", "main", remote.path, peer.path], in: root)
+        try runGit(["config", "user.name", "DevPulse Tests"], in: peer)
+        try runGit(["config", "user.email", "devpulse-tests@example.com"], in: peer)
+
+        try "local commit\n".write(
+            to: local.appendingPathComponent("local.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "local.txt"], in: local)
+        try runGit(["commit", "-m", "Local only commit"], in: local)
+
+        try "remote commit\n".write(
+            to: peer.appendingPathComponent("remote.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "remote.txt"], in: peer)
+        try runGit(["commit", "-m", "Remote tracking commit"], in: peer)
+        try runGit(["push", "origin", "main"], in: peer)
+        try runGit(["fetch", "origin"], in: local)
+
+        let result = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true
+        )
+        let repository = try #require(
+            result.data.repositories.first(where: { $0.name == "local" })
+        )
+
+        #expect(repository.hasUpstream == true)
+        #expect(repository.aheadCount == 1)
+        #expect(repository.behindCount == 1)
+        #expect(repository.actionState.kind == .synchronizeDivergedBranch)
+    }
+
+    @Test func gitScannerRefreshesPreviouslyCleanRepositoriesAboveActiveThreshold() async throws {
+        let root = try temporaryDirectory(named: "scanner-full-refresh")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let alreadyChanged = root.appendingPathComponent("already-changed")
+        let newlyChanged = root.appendingPathComponent("newly-changed")
+        try createCommittedRepository(at: alreadyChanged)
+        try createCommittedRepository(at: newlyChanged)
+        try "first change\n".write(
+            to: alreadyChanged.appendingPathComponent("first.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let config = ScanConfig(
+            enabledBuiltInPaths: [],
+            customPaths: [],
+            maxDepth: testScanConfig.maxDepth,
+            changedPreviewLimit: testScanConfig.changedPreviewLimit,
+            maxConcurrentGitOps: testScanConfig.maxConcurrentGitOps,
+            gitCommandTimeout: testScanConfig.gitCommandTimeout,
+            scanTimeout: testScanConfig.scanTimeout,
+            slowReposkipSeconds: testScanConfig.slowReposkipSeconds,
+            activeRepoThreshold: 1
+        )
+        let first = await GitRepositoryScanner.scan(
+            config: config,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true
+        )
+        try "second change\n".write(
+            to: newlyChanged.appendingPathComponent("second.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let refreshed = await GitRepositoryScanner.scan(
+            config: config,
+            scanRoots: [root.path],
+            knownRepositoryPaths: first.discoveredRepositoryPaths,
+            previousSnapshot: first.data
+        )
+        let refreshedRepo = try #require(
+            refreshed.data.repositories.first(where: { $0.name == "newly-changed" })
+        )
+
+        #expect(refreshedRepo.status == .changed)
+        #expect(refreshedRepo.changedFileCount == 1)
     }
 
     @Test func gitScannerDeduplicatesSymlinkRootsAndKeepsIdentityAcrossRescan() async throws {
@@ -1939,13 +2190,19 @@ struct CommitReadinessEngineTests {
         staged: Int = 0,
         unstaged: Int? = nil,
         conflicted: Int = 0,
-        ahead: Int = 0,
+        ahead: Int? = 0,
+        behind: Int? = nil,
+        hasUpstream: Bool? = nil,
         risk: RiskLevel = .low,
         status: RepositoryStatus = .changed,
         branch: String = "main",
         lastScannedAt: String = "2026-06-19T00:00:00Z",
         lastChangedAt: String? = nil,
-        errorMessage: String? = nil
+        lastCommitSummary: String? = nil,
+        lastCommitMetadataAvailable: Bool? = nil,
+        lastActivityAt: String? = nil,
+        errorMessage: String? = nil,
+        isPinned: Bool = false
     ) -> RepositorySnapshot {
         RepositorySnapshot(
             id: id,
@@ -1961,13 +2218,18 @@ struct CommitReadinessEngineTests {
             unstagedFileCount: unstaged ?? (modified + added + deleted),
             conflictedFileCount: conflicted,
             aheadCount: ahead,
+            behindCount: behind,
+            hasUpstream: hasUpstream,
             changedFileCount: modified + added + deleted + untracked,
             changedFilesPreview: [],
             risk: risk,
             lastScannedAt: lastScannedAt,
             lastChangedAt: lastChangedAt,
+            lastCommitSummary: lastCommitSummary,
+            lastCommitMetadataAvailable: lastCommitMetadataAvailable,
+            lastActivityAt: lastActivityAt,
             errorMessage: errorMessage,
-            isPinned: false
+            isPinned: isPinned
         )
     }
 

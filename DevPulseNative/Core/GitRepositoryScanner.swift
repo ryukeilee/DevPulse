@@ -134,29 +134,9 @@ enum GitRepositoryScanner {
                 warnings: &warnings
             )
         }
-        var pathsToScan = discoveredPaths
-        var retainedPaths: [String] = []
-
-        // Throttle: if >30 repos, only scan changed/active ones
-        if pathsToScan.count > config.activeRepoThreshold {
-            if let previous {
-                let changedPaths = Set(previous.repositories
-                    .filter { $0.status == .changed || $0.status == .error }
-                    .map { RepositoryIdentity.canonicalPath($0.path) })
-                let active = pathsToScan.filter { changedPaths.contains($0) }
-                if !active.isEmpty {
-                    warnings.append("Throttling: scanning \(active.count) active repos out of \(pathsToScan.count) total (threshold \(config.activeRepoThreshold))")
-                    retainedPaths = pathsToScan.filter { !active.contains($0) }
-                    pathsToScan = active
-                }
-            } else {
-                warnings.append("Shared snapshot unavailable for throttling; scanning all discovered repositories.")
-            }
-        }
-
         // Phase 2: read git status in batches
         let snapshots = await readSnapshotsBatched(
-            paths: pathsToScan,
+            paths: discoveredPaths,
             config: config,
             warnings: &warnings,
             overallDeadline: startTime.addingTimeInterval(config.scanTimeout),
@@ -172,13 +152,8 @@ enum GitRepositoryScanner {
             )
         }
 
-        let retainedSnapshots = retainedPaths.compactMap { path in
-            previous?.repositories.first(where: {
-                RepositoryIdentity.canonicalPath($0.path) == RepositoryIdentity.canonicalPath(path)
-            })
-        }
         let completeSnapshots = mergeSnapshots(
-            snapshots + retainedSnapshots,
+            snapshots,
             discoveredPaths: discoveredPaths,
             previousSnapshot: previous
         )
@@ -448,6 +423,7 @@ enum GitRepositoryScanner {
                 guard nextIndex < activePaths.count else { return }
                 let index = nextIndex
                 let path = activePaths[index]
+                let previousSnapshot = previousByPath[RepositoryIdentity.canonicalPath(path)]
                 nextIndex += 1
                 group.addTask {
                     guard !Task.isCancelled else { return nil }
@@ -457,7 +433,8 @@ enum GitRepositoryScanner {
                     guard let snapshot = readSingleSnapshot(
                         repoPath: path,
                         config: config,
-                        overallDeadline: overallDeadline
+                        overallDeadline: overallDeadline,
+                        previousSnapshot: previousSnapshot
                     ) else {
                         return nil
                     }
@@ -549,7 +526,8 @@ enum GitRepositoryScanner {
 
     private static func readSingleSnapshot(repoPath: String,
                                            config: ScanConfig,
-                                           overallDeadline: Date? = nil) -> RepositorySnapshot? {
+                                           overallDeadline: Date? = nil,
+                                           previousSnapshot: RepositorySnapshot? = nil) -> RepositorySnapshot? {
         let repoPath = RepositoryIdentity.canonicalPath(repoPath)
         let name = (repoPath as NSString).lastPathComponent
         let id = RepositoryIdentity.id(for: repoPath)
@@ -568,27 +546,10 @@ enum GitRepositoryScanner {
             isCancelled: cancellationCheck
         ) else {
             guard !Task.isCancelled else { return nil }
-            return RepositorySnapshot(
-                id: id,
-                name: name,
-                path: repoPath,
-                branch: "unknown",
-                status: .error,
-                modifiedFileCount: 0,
-                addedFileCount: 0,
-                deletedFileCount: 0,
-                untrackedFileCount: 0,
-                stagedFileCount: 0,
-                unstagedFileCount: 0,
-                conflictedFileCount: 0,
-                aheadCount: 0,
-                changedFileCount: 0,
-                changedFilesPreview: [],
-                risk: .low,
-                lastScannedAt: DateFormatting.nowISO(),
-                lastChangedAt: nil,
-                errorMessage: "读取失败",
-                isPinned: false
+            return failedSnapshot(
+                for: repoPath,
+                previousSnapshot: previousSnapshot,
+                errorMessage: "读取失败"
             )
         }
 
@@ -601,19 +562,30 @@ enum GitRepositoryScanner {
         let status: RepositoryStatus = changedCount > 0 ? .changed : .clean
         let risk = RiskHintEngine.assess(changedFiles: changedFiles)
 
-        let lastCommitAt = ProcessRunner.run(
-            arguments: ["log", "-1", "--pretty=%cI"],
+        let commitOutput = ProcessRunner.run(
+            arguments: ["log", "-1", "--pretty=%cI%x00%s"],
             workingDirectory: repoPath,
             timeout: commandTimeout(),
             isCancelled: cancellationCheck
         )
+        let commitMetadata = GitStatusParser.parseLastCommitMetadata(commitOutput)
+        let hasNoCommits = statusOutput.contains("No commits yet on ")
+            || statusOutput.contains("Initial commit on ")
+        let lastCommitMetadataAvailable = commitMetadata != nil || hasNoCommits
+        let lastCommitAt = commitMetadata?.committedAt
+            ?? (hasNoCommits ? nil : previousSnapshot?.lastChangedAt)
+        let lastCommitSummary = commitMetadata?.summary
+            ?? (hasNoCommits ? nil : previousSnapshot?.lastCommitSummary)
 
         guard !Task.isCancelled else { return nil }
 
         // Preview capped at 5
         let preview = Array(changedFiles.prefix(config.changedPreviewLimit))
+        let aheadCount = branchMetadata.hasUpstream ? branchMetadata.aheadCount : nil
+        let behindCount = branchMetadata.hasUpstream ? branchMetadata.behindCount : nil
+        let scannedAt = DateFormatting.nowISO()
 
-        return RepositorySnapshot(
+        var snapshot = RepositorySnapshot(
             id: id,
             name: name,
             path: repoPath,
@@ -626,41 +598,101 @@ enum GitRepositoryScanner {
             stagedFileCount: summary.staged,
             unstagedFileCount: summary.unstaged,
             conflictedFileCount: summary.conflicted,
-            aheadCount: branchMetadata.aheadCount,
+            aheadCount: aheadCount,
+            behindCount: behindCount,
+            hasUpstream: branchMetadata.hasUpstream,
             changedFileCount: changedCount,
             changedFilesPreview: preview,
             risk: risk.level,
-            lastScannedAt: DateFormatting.nowISO(),
+            lastScannedAt: scannedAt,
             lastChangedAt: lastCommitAt,
+            lastCommitSummary: lastCommitSummary,
+            lastCommitMetadataAvailable: lastCommitMetadataAvailable,
+            lastActivityAt: nil,
             errorMessage: nil,
-            isPinned: false
+            isPinned: previousSnapshot?.isPinned ?? false
         )
+        snapshot.lastActivityAt = resolvedActivityTimestamp(
+            previousSnapshot: previousSnapshot,
+            currentSnapshot: snapshot,
+            observedAt: scannedAt
+        )
+        return snapshot
     }
 
     private static func placeholderSnapshot(for path: String, errorMessage: String) -> RepositorySnapshot {
+        failedSnapshot(for: path, previousSnapshot: nil, errorMessage: errorMessage)
+    }
+
+    private static func failedSnapshot(for path: String,
+                                       previousSnapshot: RepositorySnapshot?,
+                                       errorMessage: String) -> RepositorySnapshot {
         let path = RepositoryIdentity.canonicalPath(path)
+        let previous = previousSnapshot.map(RepositoryIdentity.normalize)
         return RepositorySnapshot(
             id: RepositoryIdentity.id(for: path),
-            name: (path as NSString).lastPathComponent,
+            name: previous?.name ?? (path as NSString).lastPathComponent,
             path: path,
-            branch: "unknown",
+            branch: previous?.branch ?? "unknown",
             status: .error,
-            modifiedFileCount: 0,
-            addedFileCount: 0,
-            deletedFileCount: 0,
-            untrackedFileCount: 0,
-            stagedFileCount: 0,
-            unstagedFileCount: 0,
-            conflictedFileCount: 0,
-            aheadCount: 0,
-            changedFileCount: 0,
-            changedFilesPreview: [],
-            risk: .low,
+            modifiedFileCount: previous?.modifiedFileCount ?? 0,
+            addedFileCount: previous?.addedFileCount ?? 0,
+            deletedFileCount: previous?.deletedFileCount ?? 0,
+            untrackedFileCount: previous?.untrackedFileCount ?? 0,
+            stagedFileCount: previous?.stagedFileCount,
+            unstagedFileCount: previous?.unstagedFileCount,
+            conflictedFileCount: previous?.conflictedFileCount,
+            aheadCount: previous?.aheadCount,
+            behindCount: previous?.behindCount,
+            hasUpstream: previous?.hasUpstream,
+            changedFileCount: previous?.changedFileCount ?? 0,
+            changedFilesPreview: previous?.changedFilesPreview ?? [],
+            risk: previous?.risk ?? .low,
             lastScannedAt: DateFormatting.nowISO(),
-            lastChangedAt: nil,
+            lastChangedAt: previous?.lastChangedAt,
+            lastCommitSummary: previous?.lastCommitSummary,
+            lastCommitMetadataAvailable: false,
+            lastActivityAt: previous?.lastActivityAt ?? previous?.lastChangedAt,
             errorMessage: errorMessage,
-            isPinned: false
+            isPinned: previous?.isPinned ?? false
         )
+    }
+
+    private static func resolvedActivityTimestamp(
+        previousSnapshot: RepositorySnapshot?,
+        currentSnapshot: RepositorySnapshot,
+        observedAt: String
+    ) -> String? {
+        guard let previousSnapshot else {
+            return currentSnapshot.status == .changed
+                ? observedAt
+                : currentSnapshot.lastChangedAt
+        }
+
+        let statusChanged = previousSnapshot.status != .error
+            && previousSnapshot.status != currentSnapshot.status
+        let stateChanged = previousSnapshot.branch != currentSnapshot.branch
+            || statusChanged
+            || previousSnapshot.modifiedFileCount != currentSnapshot.modifiedFileCount
+            || previousSnapshot.addedFileCount != currentSnapshot.addedFileCount
+            || previousSnapshot.deletedFileCount != currentSnapshot.deletedFileCount
+            || previousSnapshot.untrackedFileCount != currentSnapshot.untrackedFileCount
+            || previousSnapshot.stagedFileCount != currentSnapshot.stagedFileCount
+            || previousSnapshot.unstagedFileCount != currentSnapshot.unstagedFileCount
+            || previousSnapshot.conflictedFileCount != currentSnapshot.conflictedFileCount
+            || previousSnapshot.aheadCount != currentSnapshot.aheadCount
+            || previousSnapshot.behindCount != currentSnapshot.behindCount
+            || previousSnapshot.hasUpstream != currentSnapshot.hasUpstream
+            || previousSnapshot.lastChangedAt != currentSnapshot.lastChangedAt
+            || previousSnapshot.lastCommitSummary != currentSnapshot.lastCommitSummary
+
+        if stateChanged {
+            return observedAt
+        }
+
+        return previousSnapshot.lastActivityAt
+            ?? previousSnapshot.lastChangedAt
+            ?? currentSnapshot.lastChangedAt
     }
 
     private static func mergeSnapshots(
