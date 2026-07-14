@@ -66,14 +66,7 @@ struct SettingsView: View {
                 systemImage: "folder.badge.plus"
             )
 
-            if scheduler.scanDirectories.isEmpty {
-                Text("还没有添加自定义目录。")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
-                    .padding(.horizontal, 10)
-                    .settingsInnerSurface()
-            } else {
+            if !scheduler.scanDirectories.isEmpty {
                 VStack(spacing: 0) {
                     ForEach(Array(scheduler.scanDirectories.enumerated()), id: \.element.id) { index, directory in
                         HStack(spacing: 8) {
@@ -159,43 +152,36 @@ struct SettingsView: View {
                 systemImage: "power.circle"
             )
 
-            Toggle(isOn: Binding(
-                get: { launchAtLoginController.isEnabled },
-                set: { launchAtLoginController.setEnabled($0) }
-            )) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("登录 macOS 后自动启动 DevPulse")
-                        .font(.caption.weight(.semibold))
-                    Text(launchAtLoginController.diagnostics.detail)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .center, spacing: 12) {
+                Toggle(isOn: Binding(
+                    get: { launchAtLoginController.isEnabled },
+                    set: { launchAtLoginController.setEnabled($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("自动启动 DevPulse")
+                            .font(.caption.weight(.semibold))
+                        Text(launchAtLoginStatusDetail)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                    }
                 }
-            }
-            .disabled(launchAtLoginController.isUpdating)
-            .padding(10)
-            .settingsInnerSurface()
+                .disabled(launchAtLoginController.isUpdating)
+                .layoutPriority(1)
 
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: severitySymbol(launchAtLoginSeverity))
+                Spacer(minLength: 8)
+
+                Label(launchAtLoginStatusLabel, systemImage: severitySymbol(launchAtLoginSeverity))
+                    .font(.caption.weight(.semibold))
                     .foregroundColor(severityColor(launchAtLoginSeverity))
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(launchAtLoginStatusLabel)
-                        .font(.caption.weight(.semibold))
-                        .foregroundColor(severityColor(launchAtLoginSeverity))
-                    Text(launchAtLoginOperationDetail)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                Spacer(minLength: 12)
+                    .fixedSize()
 
                 if launchAtLoginController.status == .requiresApproval || launchAtLoginController.status == .notFound {
-                    Button("打开系统设置中的登录项") {
+                    Button("打开系统设置") {
                         launchAtLoginController.openSystemSettings()
                     }
                     .buttonStyle(SettingsCompactButtonStyle(tint: severityColor(launchAtLoginSeverity)))
+                    .fixedSize()
                 }
             }
             .padding(10)
@@ -739,17 +725,11 @@ struct SettingsView: View {
         }
     }
 
-    private var launchAtLoginOperationDetail: String {
+    private var launchAtLoginStatusDetail: String {
         if launchAtLoginController.isUpdating {
             return "正在更新系统登录项状态。"
         }
-        if let lastError = launchAtLoginController.lastError {
-            return lastError
-        }
-        if launchAtLoginController.lastOperationSucceeded == true {
-            return "最近一次切换已被系统接受，并已刷新当前状态。"
-        }
-        return "尚未在本次启动中切换过开机启动。"
+        return launchAtLoginController.diagnostics.detail
     }
 
     private func diagnosticsRow(title: String, value: String, detail: String, isError: Bool) -> some View {
