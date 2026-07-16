@@ -60,6 +60,7 @@ targets:
       - path: Widget/DevPulseWidget.swift
       - path: Core/CommitReadinessEngine.swift
       - path: Core/CommitReadinessBadge.swift
+      - path: Core/ActivityEvent.swift
       - path: Core/Models.swift
       - path: Utilities/DateFormatting.swift
     settings:

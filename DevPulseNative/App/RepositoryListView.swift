@@ -9,6 +9,7 @@ private enum RepositoryListMetrics {
 
 struct RepositoryListView: View {
     @EnvironmentObject var scheduler: ScanScheduler
+    @State private var selectedRepository: RepositorySnapshot?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,7 +21,13 @@ struct RepositoryListView: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(scheduler.lastResult.repositories) { repo in
-                            RepositoryRow(repo: repo)
+                            Button {
+                                selectedRepository = repo
+                            } label: {
+                                RepositoryRow(repo: repo)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityHint("打开只读仓库详情")
                                 .contextMenu {
                                     Button(repo.isPinned ? "取消置顶" : "置顶") {
                                         scheduler.togglePin(repoID: repo.id)
@@ -55,6 +62,9 @@ struct RepositoryListView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
+        .sheet(item: $selectedRepository) { repository in
+            RepositoryDetailView(repository: repository)
+        }
     }
 
     @ViewBuilder

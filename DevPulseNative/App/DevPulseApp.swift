@@ -11,7 +11,13 @@ struct DevPulseApp: App {
 
     init() {
         let startupCommand = AppCommand(arguments: ProcessInfo.processInfo.arguments)
-        let scheduler = ScanScheduler(commandMode: startupCommand != nil)
+        let eventStore = startupCommand == nil && !Self.isRunningTests
+            ? ActivityEventStore.live()
+            : nil
+        let scheduler = ScanScheduler(
+            commandMode: startupCommand != nil,
+            activityEventStore: eventStore
+        )
         let launchAtLoginController = LaunchAtLoginController()
         if startupCommand == nil && !Self.isRunningTests {
             scheduler.startBackgroundScanning()
@@ -99,7 +105,7 @@ final class StartupCommandDelegate: NSObject, NSApplicationDelegate {
                 fflush(stdout)
                 Darwin.exit(EXIT_SUCCESS)
             case .selfCheck:
-                let scheduler = ScanScheduler()
+                let scheduler = ScanScheduler(activityEventStore: ActivityEventStore.live())
                 let report = await scheduler.runSelfCheck()
                 print(report.renderedOutput)
                 fflush(stdout)

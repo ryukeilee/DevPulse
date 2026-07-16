@@ -117,6 +117,7 @@ enum RepositoryIdentity {
             dataSource: snapshot.resolvedDataSource,
             lastSuccessfulScanAt: snapshot.resolvedLastSuccessfulScanAt,
             lastChangedAt: snapshot.lastChangedAt,
+            lastCommitID: snapshot.lastCommitID,
             lastCommitSummary: snapshot.lastCommitSummary,
             lastCommitMetadataAvailable: snapshot.lastCommitMetadataAvailable,
             lastActivityAt: snapshot.lastActivityAt,
@@ -150,7 +151,8 @@ enum RepositoryIdentity {
             generatedAt: data.generatedAt,
             writtenAt: data.writtenAt,
             scanSummary: summary,
-            repositories: repositories
+            repositories: repositories,
+            recentActivityEvents: data.recentActivityEvents
         )
     }
 
@@ -180,6 +182,7 @@ enum RepositoryIdentity {
             dataSource: lhs.resolvedDataSource,
             lastSuccessfulScanAt: lhs.resolvedLastSuccessfulScanAt,
             lastChangedAt: lhs.lastChangedAt,
+            lastCommitID: lhs.lastCommitID,
             lastCommitSummary: lhs.lastCommitSummary,
             lastCommitMetadataAvailable: lhs.lastCommitMetadataAvailable,
             lastActivityAt: lhs.lastActivityAt,
@@ -232,7 +235,8 @@ enum RepositoryIdentityMigration {
                 var copy = repository
                 copy.isPinned = migratedPins.contains(repository.id)
                 return copy
-            }
+            },
+            recentActivityEvents: normalizedSnapshot.recentActivityEvents
         )
 
         return RepositoryIdentityMigrationResult(
@@ -329,6 +333,7 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
     let dataSource: RepositoryDataSource?
     let lastSuccessfulScanAt: String?
     let lastChangedAt: String?
+    let lastCommitID: String?
     let lastCommitSummary: String?
     let lastCommitMetadataAvailable: Bool?
     var lastActivityAt: String?
@@ -357,6 +362,7 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
          dataSource: RepositoryDataSource? = nil,
          lastSuccessfulScanAt: String? = nil,
          lastChangedAt: String?,
+         lastCommitID: String? = nil,
          lastCommitSummary: String? = nil,
          lastCommitMetadataAvailable: Bool? = nil,
          lastActivityAt: String? = nil,
@@ -387,6 +393,7 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
         self.lastSuccessfulScanAt = lastSuccessfulScanAt
             ?? (resolvedDataSource == .current ? lastScannedAt : nil)
         self.lastChangedAt = lastChangedAt
+        self.lastCommitID = lastCommitID
         self.lastCommitSummary = lastCommitSummary
         self.lastCommitMetadataAvailable = lastCommitMetadataAvailable
         self.lastActivityAt = lastActivityAt
@@ -417,6 +424,7 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
             && lhs.dataSource == rhs.dataSource
             && lhs.lastSuccessfulScanAt == rhs.lastSuccessfulScanAt
             && lhs.lastChangedAt == rhs.lastChangedAt
+            && lhs.lastCommitID == rhs.lastCommitID
             && lhs.lastCommitSummary == rhs.lastCommitSummary
             && lhs.lastCommitMetadataAvailable == rhs.lastCommitMetadataAvailable
             && lhs.lastActivityAt == rhs.lastActivityAt
@@ -521,6 +529,7 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
             dataSource: retainedSource,
             lastSuccessfulScanAt: successfulAt,
             lastChangedAt: lastChangedAt,
+            lastCommitID: lastCommitID,
             lastCommitSummary: lastCommitSummary,
             lastCommitMetadataAvailable: false,
             lastActivityAt: lastActivityAt,
@@ -1461,6 +1470,23 @@ struct AppGroupData: Codable, Equatable {
     let writtenAt: String?
     let scanSummary: ScanSummary
     let repositories: [RepositorySnapshot]
+    /// Small Widget-facing projection only. The full local event history is
+    /// persisted separately and is never embedded in the shared snapshot.
+    let recentActivityEvents: [ActivityEventSummary]?
+
+    init(schemaVersion: Int,
+         generatedAt: String,
+         writtenAt: String?,
+         scanSummary: ScanSummary,
+         repositories: [RepositorySnapshot],
+         recentActivityEvents: [ActivityEventSummary]? = nil) {
+        self.schemaVersion = schemaVersion
+        self.generatedAt = generatedAt
+        self.writtenAt = writtenAt
+        self.scanSummary = scanSummary
+        self.repositories = repositories
+        self.recentActivityEvents = recentActivityEvents
+    }
 
     static func empty() -> AppGroupData {
         AppGroupData(
@@ -1473,7 +1499,8 @@ struct AppGroupData: Codable, Equatable {
                 totalChangedFiles: 0,
                 errorRepositories: 0
             ),
-            repositories: []
+            repositories: [],
+            recentActivityEvents: nil
         )
     }
 
@@ -1483,7 +1510,19 @@ struct AppGroupData: Codable, Equatable {
             generatedAt: generatedAt,
             writtenAt: writtenAt,
             scanSummary: scanSummary,
-            repositories: repositories
+            repositories: repositories,
+            recentActivityEvents: recentActivityEvents
+        )
+    }
+
+    func withRecentActivityEvents(_ events: [ActivityEventSummary]) -> AppGroupData {
+        AppGroupData(
+            schemaVersion: schemaVersion,
+            generatedAt: generatedAt,
+            writtenAt: writtenAt,
+            scanSummary: scanSummary,
+            repositories: repositories,
+            recentActivityEvents: events
         )
     }
 
@@ -1508,7 +1547,8 @@ struct AppGroupData: Codable, Equatable {
                 from: retainedRepositories,
                 totalRepositories: max(scanSummary.totalRepositories, retainedRepositories.count)
             ),
-            repositories: retainedRepositories
+            repositories: retainedRepositories,
+            recentActivityEvents: recentActivityEvents
         )
     }
 }

@@ -883,9 +883,16 @@ struct CommitReadinessEngineTests {
         let metadata = GitStatusParser.parseLastCommitMetadata(
             "2026-07-13T09:30:00+08:00\0修复项目优先级"
         )
+        let currentMetadata = GitStatusParser.parseLastCommitMetadata(
+            "0123456789abcdef\02026-07-14T09:30:00+08:00\0记录增量活动"
+        )
 
+        #expect(metadata?.commitID == nil)
         #expect(metadata?.committedAt == "2026-07-13T09:30:00+08:00")
         #expect(metadata?.summary == "修复项目优先级")
+        #expect(currentMetadata?.commitID == "0123456789abcdef")
+        #expect(currentMetadata?.committedAt == "2026-07-14T09:30:00+08:00")
+        #expect(currentMetadata?.summary == "记录增量活动")
         #expect(GitStatusParser.parseLastCommitMetadata(nil) == nil)
     }
 
@@ -967,6 +974,159 @@ struct CommitReadinessEngineTests {
         #expect(repository.actionState.kind == .reviewLocalChanges)
         #expect(presentation.latestCommit.contains("上次成功提交"))
         #expect(presentation.dataSource.source == .current)
+    }
+
+    @Test func repositoryDetailMapsCleanAndUntrackedStatesFromExistingSnapshotFields() throws {
+        let clean = RepositoryDetailPresentationBuilder.build(
+            snapshot: snapshot(
+                modified: 0,
+                ahead: nil,
+                behind: nil,
+                hasUpstream: false,
+                status: .clean
+            )
+        )
+        let untracked = RepositoryDetailPresentationBuilder.build(
+            snapshot: snapshot(
+                modified: 0,
+                untracked: 2,
+                changedFilesPreview: ["Sources/NewFile.swift", "Docs/Notes.md"]
+            )
+        )
+
+        #expect(clean.localSummary == "没有本地改动")
+        #expect(clean.synchronization == "未关联上游")
+        #expect(clean.changedFileNames.isEmpty)
+        #expect(try #require(clean.changeItems.first(where: { $0.kind == .untracked })).count == 0)
+        #expect(untracked.localSummary.contains("未跟踪 2"))
+        #expect(try #require(untracked.changeItems.first(where: { $0.kind == .untracked })).count == 2)
+        #expect(untracked.changedFileNames == ["NewFile.swift", "Notes.md"])
+        #expect(untracked.nextAction == "先确认 2 个新文件是否纳入提交。")
+    }
+
+    @Test func repositoryDetailMapsMixedStagingAndConflictWithoutDuplicatingAdviceRules() throws {
+        let mixedSnapshot = snapshot(
+            modified: 2,
+            untracked: 1,
+            staged: 1,
+            unstaged: 1
+        )
+        let conflictSnapshot = snapshot(
+            modified: 1,
+            staged: 1,
+            unstaged: 1,
+            conflicted: 1
+        )
+        let mixed = RepositoryDetailPresentationBuilder.build(snapshot: mixedSnapshot)
+        let conflict = RepositoryDetailPresentationBuilder.build(snapshot: conflictSnapshot)
+
+        #expect(try #require(mixed.changeItems.first(where: { $0.kind == .staged })).count == 1)
+        #expect(try #require(mixed.changeItems.first(where: { $0.kind == .unstaged })).count == 1)
+        #expect(mixed.nextAction == mixedSnapshot.nextActionHint)
+        #expect(mixed.nextAction == "先拆清已暂存和未暂存改动，再决定是否提交。")
+        #expect(try #require(conflict.changeItems.first(where: { $0.kind == .conflicted })).count == 1)
+        #expect(conflict.nextAction == "先解决 1 处冲突，再继续审查或提交。")
+    }
+
+    @Test func repositoryDetailKeepsUpstreamAheadBehindStatesDistinct() {
+        let noUpstream = RepositoryDetailPresentationBuilder.build(
+            snapshot: snapshot(ahead: nil, behind: nil, hasUpstream: false)
+        )
+        let ahead = RepositoryDetailPresentationBuilder.build(
+            snapshot: snapshot(modified: 0, ahead: 2, behind: 0, hasUpstream: true, status: .clean)
+        )
+        let behind = RepositoryDetailPresentationBuilder.build(
+            snapshot: snapshot(modified: 0, ahead: 0, behind: 3, hasUpstream: true, status: .clean)
+        )
+        let diverged = RepositoryDetailPresentationBuilder.build(
+            snapshot: snapshot(modified: 0, ahead: 2, behind: 3, hasUpstream: true, status: .clean)
+        )
+
+        #expect(noUpstream.synchronization == "未关联上游")
+        #expect(ahead.synchronization == "领先 2 · 落后 0")
+        #expect(ahead.nextAction == "确认准备好后 push 2 个本地提交。")
+        #expect(behind.synchronization == "领先 0 · 落后 3")
+        #expect(behind.nextAction == "先拉取 3 个远端更新，再继续本地工作。")
+        #expect(diverged.synchronization == "领先 2 · 落后 3")
+        #expect(diverged.nextAction == "本地和远端都有新提交，先确认分叉范围再同步。")
+    }
+
+    @Test func repositoryDetailSeparatesFailedAndRetainedData() throws {
+        let failed = RepositoryDetailPresentationBuilder.build(
+            snapshot: snapshot(
+                modified: 0,
+                staged: 0,
+                ahead: nil,
+                status: .error,
+                branch: "unknown",
+                dataSource: .unknown,
+                errorMessage: "读取失败"
+            )
+        )
+        let retained = RepositoryDetailPresentationBuilder.build(
+            snapshot: snapshot(
+                modified: 2,
+                staged: 2,
+                unstaged: 0,
+                ahead: 1,
+                behind: 0,
+                hasUpstream: true,
+                status: .error,
+                dataSource: .lastSuccessful,
+                lastSuccessfulScanAt: "2026-07-15T10:00:00Z",
+                errorMessage: "本轮扫描失败",
+                changedFilesPreview: ["Sources/A.swift", "Tests/ATests.swift"]
+            )
+        )
+
+        #expect(failed.dataSource.source == .unknown)
+        #expect(failed.branch == "分支未知")
+        #expect(failed.changedFileNames.isEmpty)
+        #expect(failed.changeItems.allSatisfy { $0.count == nil })
+        #expect(failed.nextAction.contains("当前没有可用于提交、push 或同步的可信数据"))
+        #expect(failed.diagnosticMessage == "读取失败")
+
+        #expect(retained.dataSource.source == .lastSuccessful)
+        #expect(retained.branch == "上次 · main")
+        #expect(retained.changedFileNames == ["A.swift", "ATests.swift"])
+        #expect(try #require(retained.changeItems.first(where: { $0.kind == .staged })).count == 2)
+        #expect(retained.localSummary == "当前状态待确认 · 显示上次成功数据")
+        #expect(retained.nextAction.contains("先重新扫描确认当前状态"))
+    }
+
+    @Test func repositoryDetailFilePreviewExposesBasenamesOnly() {
+        let names = RepositoryDetailPresentationBuilder.privacySafeBasenames([
+            "Sources/Feature/Secret.swift",
+            "/Users/example/private/Config.plist",
+            "Other/Secret.swift",
+            "README.md",
+            "  "
+        ])
+
+        #expect(names == ["Secret.swift", "Config.plist", "README.md"])
+        #expect(names.allSatisfy { !$0.contains("/") })
+    }
+
+    @Test func repositoryDetailExternalActionsOnlyOpenDirectoryTargets() throws {
+        let finder = try #require(
+            RepositoryExternalOpenRequestBuilder.build(
+                action: .finder,
+                repositoryPath: "/tmp/example-repository"
+            )
+        )
+        let terminal = try #require(
+            RepositoryExternalOpenRequestBuilder.build(
+                action: .terminal,
+                repositoryPath: "/tmp/example-repository"
+            )
+        )
+
+        #expect(RepositoryExternalOpenAction.allCases == [.finder, .terminal])
+        #expect(finder.repositoryURL.isFileURL)
+        #expect(finder.applicationURL == nil)
+        #expect(terminal.repositoryURL == finder.repositoryURL)
+        #expect(terminal.applicationURL == RepositoryExternalOpenRequestBuilder.terminalApplicationURL)
+        #expect(RepositoryExternalOpenRequestBuilder.build(action: .terminal, repositoryPath: "relative/path") == nil)
     }
 
     @Test func legacyV1SnapshotsInferTrustSourceFromRepositoryStatus() throws {
@@ -2504,6 +2664,7 @@ struct CommitReadinessEngineTests {
         dataSource: RepositoryDataSource? = nil,
         lastSuccessfulScanAt: String? = nil,
         errorMessage: String? = nil,
+        changedFilesPreview: [String] = [],
         isPinned: Bool = false
     ) -> RepositorySnapshot {
         RepositorySnapshot(
@@ -2523,7 +2684,7 @@ struct CommitReadinessEngineTests {
             behindCount: behind,
             hasUpstream: hasUpstream,
             changedFileCount: modified + added + deleted + untracked,
-            changedFilesPreview: [],
+            changedFilesPreview: changedFilesPreview,
             risk: risk,
             lastScannedAt: lastScannedAt,
             dataSource: dataSource,

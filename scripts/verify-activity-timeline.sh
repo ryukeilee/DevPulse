@@ -169,6 +169,7 @@ xcrun swiftc \
     "$ROOT_DIR/DevPulseNative/Utilities/DateFormatting.swift" \
     "$ROOT_DIR/DevPulseNative/Core/CommitReadinessEngine.swift" \
     "$ROOT_DIR/DevPulseNative/Core/Models.swift" \
+    "$ROOT_DIR/DevPulseNative/Core/ActivityEvent.swift" \
     "$HARNESS"
 
 "$BIN"

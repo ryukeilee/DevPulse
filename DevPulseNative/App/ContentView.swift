@@ -149,6 +149,12 @@ struct StatusTab: View {
                     openDiagnostics: openDiagnostics
                 )
 
+                ActivityTimelineView(
+                    events: scheduler.activityEvents,
+                    lastScanAt: scheduler.lastScanAt,
+                    onRescan: scheduler.rescan
+                )
+
                 refreshStatus
             }
             .padding(DevPulseVisualStyle.pageInset)

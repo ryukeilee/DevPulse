@@ -10,6 +10,7 @@ enum GitStatusParser {
     }
 
     struct LastCommitMetadata: Equatable {
+        let commitID: String?
         let committedAt: String?
         let summary: String?
     }
@@ -65,24 +66,29 @@ enum GitStatusParser {
         )
     }
 
-    /// Parse `git log -1 --pretty=%cI%x00%s` into optional commit metadata.
+    /// Parse `git log -1 --pretty=%H%x00%cI%x00%s` into optional commit metadata.
+    /// The legacy two-field date/subject representation remains accepted.
     static func parseLastCommitMetadata(_ output: String?) -> LastCommitMetadata? {
         guard let output, !output.isEmpty else { return nil }
-
+        let parts = output.components(separatedBy: "\0")
+        let commitIDPart: String
         let datePart: String
         let summaryPart: String
-        if let separator = output.firstIndex(of: "\0") {
-            datePart = String(output[..<separator])
-            summaryPart = String(output[output.index(after: separator)...])
+        if parts.count >= 3 {
+            commitIDPart = parts[0]
+            datePart = parts[1]
+            summaryPart = parts.dropFirst(2).joined(separator: "\0")
         } else {
-            datePart = output
-            summaryPart = ""
+            commitIDPart = ""
+            datePart = parts.first ?? output
+            summaryPart = parts.count == 2 ? parts[1] : ""
         }
 
+        let commitID = normalized(commitIDPart)
         let committedAt = normalized(datePart)
         let summary = normalized(summaryPart)
-        guard committedAt != nil || summary != nil else { return nil }
-        return LastCommitMetadata(committedAt: committedAt, summary: summary)
+        guard commitID != nil || committedAt != nil || summary != nil else { return nil }
+        return LastCommitMetadata(commitID: commitID, committedAt: committedAt, summary: summary)
     }
 
     /// Parse `git status --short` output into an array of file paths.

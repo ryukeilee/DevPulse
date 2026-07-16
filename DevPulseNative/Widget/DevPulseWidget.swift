@@ -189,6 +189,14 @@ struct WidgetEntry: TimelineEntry {
     }
 }
 
+private extension WidgetEntry {
+    var topActivityEvent: ActivityEventSummary? {
+        ActivityEventWidgetSummaryBuilder.topSummary(
+            from: snapshot?.recentActivityEvents ?? []
+        )
+    }
+}
+
 struct DevPulseWidgetEntryView: View {
     @Environment(\.widgetFamily) private var widgetFamily
     let entry: WidgetEntry
@@ -348,6 +356,43 @@ private struct WidgetStateBlock: View {
         .padding(.vertical, prominent ? 8 : 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(WidgetCardBackground())
+    }
+}
+
+private struct WidgetActivityEventCard: View {
+    let event: ActivityEventSummary
+    var compact = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: compact ? 4 : 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: event.kind.systemImage)
+                    .foregroundStyle(event.priority <= 1 ? WidgetPalette.error : WidgetPalette.accent)
+                Text(event.repositoryName)
+                    .font(.system(size: compact ? 11 : 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(WidgetPalette.textPrimary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text(event.kind.title)
+                    .font(.system(size: compact ? 8 : 9, weight: .semibold, design: .rounded))
+                    .foregroundStyle(WidgetPalette.textSecondary)
+                    .lineLimit(1)
+            }
+
+            Text(event.message)
+                .font(.system(size: compact ? 8 : 10, weight: .medium, design: .rounded))
+                .foregroundStyle(WidgetPalette.textSecondary)
+                .lineLimit(compact ? 2 : 3)
+                .minimumScaleFactor(0.82)
+
+            Text(DateFormatting.relativeTimeChinese(from: event.occurredAt) ?? "近期")
+                .font(.system(size: compact ? 7 : 8, weight: .medium, design: .rounded))
+                .foregroundStyle(WidgetPalette.textMuted)
+        }
+        .padding(.horizontal, compact ? 8 : 9)
+        .padding(.vertical, compact ? 6 : 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(WidgetCardBackground(emphasis: event.priority <= 1 ? 0.1 : 0.05))
     }
 }
 
@@ -1012,7 +1057,9 @@ private struct SmallGlanceWidgetView: View {
 
     @ViewBuilder
     private var readyContent: some View {
-        if prioritizedItems.isEmpty {
+        if let event = entry.topActivityEvent {
+            WidgetActivityEventCard(event: event, compact: true)
+        } else if prioritizedItems.isEmpty {
             shortState(
                 title: "没有找到仓库",
                 detail: "检查扫描目录后重新刷新",
@@ -1163,7 +1210,14 @@ private struct MediumGlanceWidgetView: View {
 
     @ViewBuilder
     private var readyContent: some View {
-        if prioritizedItems.isEmpty {
+        if let event = entry.topActivityEvent {
+            VStack(alignment: .leading, spacing: 4) {
+                if let summary = entry.snapshot?.scanSummary {
+                    WidgetSummaryStrip(summary: summary, compact: true)
+                }
+                WidgetActivityEventCard(event: event, compact: true)
+            }
+        } else if prioritizedItems.isEmpty {
             shortState(
                 title: "没有找到仓库",
                 detail: "检查扫描目录后重新刷新",
@@ -1320,7 +1374,14 @@ private struct LargeGlanceWidgetView: View {
 
     @ViewBuilder
     private var readyContent: some View {
-        if prioritizedItems.isEmpty {
+        if let event = entry.topActivityEvent {
+            VStack(alignment: .leading, spacing: 5) {
+                if let summary = entry.snapshot?.scanSummary {
+                    WidgetSummaryStrip(summary: summary, compact: true)
+                }
+                WidgetActivityEventCard(event: event)
+            }
+        } else if prioritizedItems.isEmpty {
             shortState(
                 title: "没有找到仓库",
                 detail: "检查扫描目录后重新刷新",

@@ -326,6 +326,7 @@ enum ScanSchedulerPolicy {
                     || previous.resolvedLastSuccessfulScanAt == next.resolvedLastSuccessfulScanAt
             )
             && previous.lastChangedAt == next.lastChangedAt
+            && previous.lastCommitID == next.lastCommitID
             && previous.lastCommitSummary == next.lastCommitSummary
             && previous.lastCommitMetadataAvailable == next.lastCommitMetadataAvailable
             && previous.lastActivityAt == next.lastActivityAt
@@ -447,6 +448,7 @@ final class ScanScheduler: ObservableObject {
     var scanDirectories: [CustomScanDirectory] { scanLocationConfiguration.customDirectories }
     @Published var diagnostics = DiagnosticsSnapshot()
     @Published var diagnosticEvents: [DiagnosticEvent] = []
+    @Published private(set) var activityEvents: [ActivityEvent] = []
     @Published var scanIntervalSeconds: TimeInterval = 300
     @Published var powerState: String = "normal"
 
@@ -462,6 +464,7 @@ final class ScanScheduler: ObservableObject {
     private var scanGeneration = 0
     private var locationRefreshDrainScheduled = false
     private let scanExecution: ScanExecution
+    private let activityEventStore: ActivityEventStore?
     private var configLoadedFromPersistence = false
 
     // Config persistence
@@ -499,7 +502,9 @@ final class ScanScheduler: ObservableObject {
         }
     }
 
-    init(commandMode: Bool = false, scanExecution: @escaping ScanExecution = { request in
+    init(commandMode: Bool = false,
+         activityEventStore: ActivityEventStore? = nil,
+         scanExecution: @escaping ScanExecution = { request in
         await GitRepositoryScanner.scan(
             config: request.config,
             scanRoots: request.roots,
@@ -509,6 +514,7 @@ final class ScanScheduler: ObservableObject {
         )
     }) {
         self.scanExecution = scanExecution
+        self.activityEventStore = commandMode ? nil : activityEventStore
         if commandMode {
             appGroupAvailable = AppGroupStore.isAvailable
             gitAvailable = ProcessRunner.isGitAvailable()
@@ -522,6 +528,7 @@ final class ScanScheduler: ObservableObject {
         appGroupAvailable = AppGroupStore.isAvailable
         gitAvailable = ProcessRunner.isGitAvailable()
         restorePersistedSnapshot()
+        restoreActivityEvents()
         updatePowerState()
         startPowerMonitoring()
         startSleepWakeMonitoring()
@@ -678,36 +685,41 @@ final class ScanScheduler: ObservableObject {
 
                 let previousSnapshot = self.lastResult
                 let pinned = self.applyPins(result.data)
-                let hadChanges = self.hadChanges(before: previousSnapshot, after: pinned)
                 let combinedWarnings = self.summarizeWarnings(
                     result.warnings,
                     accessWarning: currentScanRoots.warning
                 )
-
-                self.lastResult = pinned
-                self.lastScanAt = DateFormatting.date(from: pinned.generatedAt) ?? Date()
-                self.diagnostics.lastScanAt = self.lastScanAt
                 self.warnings = combinedWarnings
+                let recorded = self.recordActivityEvents(
+                    previous: previousSnapshot,
+                    current: pinned,
+                    observedAt: pinned.generatedAt
+                )
+                let hadChanges = self.hadChanges(before: previousSnapshot, after: recorded)
+
+                self.lastResult = recorded
+                self.lastScanAt = DateFormatting.date(from: recorded.generatedAt) ?? Date()
+                self.diagnostics.lastScanAt = self.lastScanAt
                 self.isScanning = false
                 self.refreshPhase = .success
                 self.refreshFailureMessage = nil
                 self.scanRootAccessWarning = currentScanRoots.warning
-                self.diagnostics.validationIssues = combinedWarnings.isEmpty ? [] : combinedWarnings
+                self.diagnostics.validationIssues = self.warnings
                 self.lastDiscoveredRepositoryPaths = result.discoveredRepositoryPaths
                 if shouldRediscoverRepositories {
                     self.lastRepositoryDiscoveryAt = Date()
                     self.lastRepositoryDiscoveryScanRootsSignature = currentScanRootsSignature
                 }
 
-                if combinedWarnings.isEmpty {
+                if self.warnings.isEmpty {
                     self.recordEvent(
                         .scanSucceeded,
-                        "Scan success: \(pinned.scanSummary.totalRepositories) repos, \(pinned.scanSummary.changedRepositories) changed, \(pinned.scanSummary.totalChangedFiles) files"
+                        "Scan success: \(recorded.scanSummary.totalRepositories) repos, \(recorded.scanSummary.changedRepositories) changed, \(recorded.scanSummary.totalChangedFiles) files"
                     )
                 } else {
                     self.recordEvent(
                         .scanSucceeded,
-                        "Scan success with \(combinedWarnings.count) warning(s): \(pinned.scanSummary.totalRepositories) repos"
+                        "Scan success with \(self.warnings.count) warning(s): \(recorded.scanSummary.totalRepositories) repos"
                     )
                 }
 
@@ -718,7 +730,7 @@ final class ScanScheduler: ObservableObject {
                     self.consecutiveNoChanges += 1
                 }
                 self.updateScanInterval()
-                self.syncSharedSnapshot(from: pinned, previousSnapshot: previousSnapshot, reason: "scan")
+                self.syncSharedSnapshot(from: recorded, previousSnapshot: previousSnapshot, reason: "scan")
                 self.triggerPendingWakeRefreshIfNeeded()
             }
         }
@@ -778,6 +790,10 @@ final class ScanScheduler: ObservableObject {
             diagnostics.validationIssues = warnings
             diagnostics.nextSteps = suggestedNextSteps(from: warnings)
             recordEvent(.scanFailed, "Self-check failed: \(failureMessage)")
+            persistRepositoryTrustFailure(
+                failureMessage,
+                fallbackSnapshot: result.data
+            )
             return makeSelfCheckReport()
         }
 
@@ -787,19 +803,24 @@ final class ScanScheduler: ObservableObject {
             result.warnings,
             accessWarning: currentScanRoots.warning
         )
-
-        lastResult = pinned
-        lastScanAt = DateFormatting.date(from: pinned.generatedAt) ?? Date()
-        diagnostics.lastScanAt = lastScanAt
         warnings = combinedWarnings
+        let recorded = recordActivityEvents(
+            previous: previousSnapshot,
+            current: pinned,
+            observedAt: pinned.generatedAt
+        )
+
+        lastResult = recorded
+        lastScanAt = DateFormatting.date(from: recorded.generatedAt) ?? Date()
+        diagnostics.lastScanAt = lastScanAt
         isScanning = false
         refreshPhase = .success
         refreshFailureMessage = nil
         scanRootAccessWarning = currentScanRoots.warning
-        diagnostics.validationIssues = combinedWarnings.isEmpty ? [] : combinedWarnings
+        diagnostics.validationIssues = warnings
 
-        syncSharedSnapshot(from: pinned, previousSnapshot: previousSnapshot, reason: "self-check")
-        recordEvent(.scanSucceeded, "Self-check refreshed \(pinned.scanSummary.totalRepositories) repos")
+        syncSharedSnapshot(from: recorded, previousSnapshot: previousSnapshot, reason: "self-check")
+        recordEvent(.scanSucceeded, "Self-check refreshed \(recorded.scanSummary.totalRepositories) repos")
 
         return makeSelfCheckReport()
     }
@@ -939,6 +960,62 @@ final class ScanScheduler: ObservableObject {
     }
 
     // MARK: - Shared snapshot sync
+
+    private func restoreActivityEvents() {
+        guard let activityEventStore else { return }
+        switch activityEventStore.load() {
+        case .success(let result):
+            activityEvents = result.events
+            switch result.recovery {
+            case .none:
+                break
+            case .migratedLegacy:
+                warnings.append("已迁移旧版活动记录")
+            case .recoveredCorruption:
+                warnings.append("活动记录损坏，已恢复为空记录并继续运行")
+            }
+        case .failure(let error):
+            warnings.append(error.localizedDescription)
+        }
+    }
+
+    private func recordActivityEvents(
+        previous: AppGroupData,
+        current: AppGroupData,
+        observedAt: String
+    ) -> AppGroupData {
+        let detected = ActivityEventDiffer.events(
+            previous: previous,
+            current: current,
+            observedAt: observedAt
+        )
+        let newEvents = ActivityEventDeduplicator.newEvents(
+            from: detected,
+            comparedTo: activityEvents
+        )
+        let merger = activityEventStore
+            ?? ActivityEventStore(fileURL: URL(fileURLWithPath: "/dev/null"))
+        let merged = merger.merging(existing: activityEvents, newEvents: newEvents)
+
+        if let activityEventStore {
+            switch activityEventStore.save(merged) {
+            case .success(let saved):
+                activityEvents = saved
+            case .failure(let error):
+                activityEvents = merged
+                if !warnings.contains(error.localizedDescription) {
+                    warnings.append(error.localizedDescription)
+                }
+            }
+        } else {
+            activityEvents = merged
+        }
+
+        let now = DateFormatting.date(from: observedAt) ?? Date()
+        return current.withRecentActivityEvents(
+            ActivityEventWidgetSummaryBuilder.build(from: activityEvents, now: now)
+        )
+    }
 
     private func restorePersistedSnapshot() {
         syncStoreInspection()
@@ -1262,9 +1339,15 @@ final class ScanScheduler: ObservableObject {
             generatedAt: retained.generatedAt,
             writtenAt: retained.writtenAt,
             scanSummary: retained.scanSummary,
-            repositories: RepositorySorter.sort(retained.repositories)
+            repositories: RepositorySorter.sort(retained.repositories),
+            recentActivityEvents: retained.recentActivityEvents
         )
-        lastResult = applyPins(sortedRetained)
+        let pinnedRetained = applyPins(sortedRetained)
+        lastResult = recordActivityEvents(
+            previous: previousSnapshot,
+            current: pinnedRetained,
+            observedAt: pinnedRetained.repositories.first?.lastScannedAt ?? DateFormatting.nowISO()
+        )
         syncSharedSnapshot(
             from: lastResult,
             previousSnapshot: previousSnapshot,
@@ -1433,7 +1516,8 @@ final class ScanScheduler: ObservableObject {
             generatedAt: migration.snapshot.generatedAt,
             writtenAt: migration.snapshot.writtenAt,
             scanSummary: migration.snapshot.scanSummary,
-            repositories: repos
+            repositories: repos,
+            recentActivityEvents: migration.snapshot.recentActivityEvents
         )
     }
 

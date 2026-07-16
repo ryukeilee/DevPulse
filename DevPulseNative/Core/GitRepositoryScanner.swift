@@ -560,7 +560,7 @@ enum GitRepositoryScanner {
         let risk = RiskHintEngine.assess(changedFiles: changedFiles)
 
         let commitOutput = ProcessRunner.run(
-            arguments: ["log", "-1", "--pretty=%cI%x00%s"],
+            arguments: ["log", "-1", "--pretty=%H%x00%cI%x00%s"],
             workingDirectory: repoPath,
             timeout: commandTimeout(),
             isCancelled: cancellationCheck
@@ -571,6 +571,8 @@ enum GitRepositoryScanner {
         let lastCommitMetadataAvailable = commitMetadata != nil || hasNoCommits
         let lastCommitAt = commitMetadata?.committedAt
             ?? (hasNoCommits ? nil : previousSnapshot?.lastChangedAt)
+        let lastCommitID = commitMetadata?.commitID
+            ?? (hasNoCommits ? nil : previousSnapshot?.lastCommitID)
         let lastCommitSummary = commitMetadata?.summary
             ?? (hasNoCommits ? nil : previousSnapshot?.lastCommitSummary)
 
@@ -605,6 +607,7 @@ enum GitRepositoryScanner {
             dataSource: .current,
             lastSuccessfulScanAt: scannedAt,
             lastChangedAt: lastCommitAt,
+            lastCommitID: lastCommitID,
             lastCommitSummary: lastCommitSummary,
             lastCommitMetadataAvailable: lastCommitMetadataAvailable,
             lastActivityAt: nil,
@@ -654,6 +657,7 @@ enum GitRepositoryScanner {
             dataSource: .unknown,
             lastSuccessfulScanAt: nil,
             lastChangedAt: nil,
+            lastCommitID: nil,
             lastCommitSummary: nil,
             lastCommitMetadataAvailable: false,
             lastActivityAt: nil,
@@ -687,6 +691,7 @@ enum GitRepositoryScanner {
             || previousSnapshot.aheadCount != currentSnapshot.aheadCount
             || previousSnapshot.behindCount != currentSnapshot.behindCount
             || previousSnapshot.hasUpstream != currentSnapshot.hasUpstream
+            || previousSnapshot.lastCommitID != currentSnapshot.lastCommitID
             || previousSnapshot.lastChangedAt != currentSnapshot.lastChangedAt
             || previousSnapshot.lastCommitSummary != currentSnapshot.lastCommitSummary
 
