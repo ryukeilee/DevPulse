@@ -30,6 +30,8 @@ Support files:
 Avoid committing DerivedData, build products, installed app bundles, or Xcode user state.
 
 ## Build And Verification
+Run commands from the repository root unless a command states otherwise.
+
 Use repository verification entry points before inventing ad hoc commands.
 
 - Build: `xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug -destination platform=macOS CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build`
@@ -82,6 +84,20 @@ If a change affects widget rendering or shared snapshot consumption, verify both
 - `scripts/verify-widgetkit.sh` and/or `scripts/verify-activity-timeline.sh`, depending on the touched path
 
 If real runtime behavior cannot be fully proven in CLI, state what was verified and what still needs manual confirmation in the installed app or widget.
+
+## Definition Of Done
+- The requested behavior is implemented with the smallest sufficient in-scope change.
+- The narrowest relevant verifier passes; broaden to build, tests, Widget wiring, or runtime self-check only when the touched behavior requires it.
+- Documentation-only changes are checked by focused inspection and do not require unrelated builds.
+- The final diff and Git status contain no unrelated edits, generated artifacts, build products, or machine-local state.
+- The final report names checks actually run and any remaining manual confirmation, environment limitation, or blocker.
+
+## Review Guidelines
+- Report only actionable defects introduced by the change, with the affected path and concrete impact; do not report style-only preferences as findings.
+- Treat regressions in the local-first privacy boundary as blocking, including unexpected file-content reads, network or cloud access, Git writes, or disclosure of paths beyond the intended basename-only UI.
+- Flag incidental changes to bundle identifiers, App Group wiring, entitlements, signing configuration, deployment target, or the shared snapshot contract.
+- Flag committed secrets, signing material, machine-specific identifiers, build products, DerivedData, installed app bundles, or Xcode user state.
+- Verify that changed scan, readiness, discovery, Widget, snapshot, or launch-at-login behavior has focused coverage or an explicit verification path; flag weakened or bypassed tests.
 
 ## Security And Privacy
 Do not commit secrets, signing material, or private keys. Keep `.env.example` as placeholder-only documentation.
