@@ -317,6 +317,28 @@ struct CommitReadinessEngineTests {
         #expect(summary.message == "建议先审查改动")
     }
 
+    @Test func widgetPrioritySummaryUsesCanonicalCleanDecisionReminders() {
+        let repository = snapshot(
+            modified: 0,
+            ahead: nil,
+            behind: nil,
+            hasUpstream: false,
+            status: .clean
+        )
+        let feed = ActivityTimelineBuilder.build(
+            from: [repository],
+            lastScanAt: Date(timeIntervalSince1970: 1_718_000_000)
+        )
+        let summary = WidgetPrioritySummaryBuilder.build(
+            feed: feed,
+            trustAssessment: freshTrust()
+        )
+
+        #expect(feed.state == .allClean)
+        #expect(summary.message == repository.decision.widgetSummary)
+        #expect(summary.message == "暂无改动 · 未关联上游")
+    }
+
     @Test func widgetPrioritySummaryPrioritizesStaleTrust() {
         let summary = WidgetPrioritySummaryBuilder.build(
             feed: ActivityTimelineFeed(
@@ -414,7 +436,7 @@ struct CommitReadinessEngineTests {
         #expect(items.map(\.repoName) == ["dirty", "review"])
     }
 
-    @Test func widgetRepositoryPriorityBuilderUsesRecentActivityBeforeRawRisk() {
+    @Test func widgetRepositoryPriorityBuilderUsesCanonicalDecisionBeforeRecency() {
         let repos = [
             snapshot(id: "older-high-risk", name: "older-high-risk", modified: 1, risk: .high, lastChangedAt: "2026-06-20T10:00:00Z"),
             snapshot(id: "newer-low-risk", name: "newer-low-risk", modified: 1, risk: .low, lastChangedAt: "2026-06-22T10:00:00Z")
@@ -422,7 +444,7 @@ struct CommitReadinessEngineTests {
 
         let items = WidgetRepositoryPriorityBuilder.build(from: repos)
 
-        #expect(items.map(\.repoName) == ["newer-low-risk", "older-high-risk"])
+        #expect(items.map(\.repoName) == ["older-high-risk", "newer-low-risk"])
     }
 
     @Test func widgetRepositoryPriorityBuilderUsesRecentActivityAsStableTieBreaker() {
@@ -434,6 +456,47 @@ struct CommitReadinessEngineTests {
         let items = WidgetRepositoryPriorityBuilder.build(from: repos)
 
         #expect(items.map(\.repoName) == ["newer", "older"])
+    }
+
+    @Test func everyWidgetFamilyKeepsCanonicalDecisionsAheadOfRecentEvents() {
+        let repositories = [
+            snapshot(id: "conflict", name: "conflict", modified: 1, conflicted: 1),
+            snapshot(id: "dirty", name: "dirty", modified: 2),
+            snapshot(id: "ahead", name: "ahead", modified: 0, ahead: 2, status: .clean),
+            snapshot(id: "event-repository", name: "event-repository", modified: 0, status: .clean)
+        ]
+        let feed = ActivityTimelineBuilder.build(
+            from: repositories,
+            lastScanAt: Date(timeIntervalSince1970: 1_718_000_000)
+        )
+        let recentEvent = ActivityEventSummary(
+            id: "recent-conflict-event",
+            repositoryID: "event-repository",
+            repositoryName: "event-repository",
+            kind: .conflictStarted,
+            occurredAt: "2026-07-16T10:00:00Z",
+            message: "历史事件不应覆盖当前仓库决策",
+            priority: 0
+        )
+        for (family, expectedLimit) in [
+            (WidgetPrimaryContentFamily.small, 1),
+            (.medium, 2),
+            (.large, 3)
+        ] {
+            let selection = WidgetPrimaryContentSelectionBuilder.build(
+                feed: feed,
+                recentActivityEvents: [recentEvent],
+                family: family
+            )
+            guard case .repositories(let items) = selection else {
+                Issue.record("\(family) should render canonical repository decisions")
+                continue
+            }
+
+            #expect(items == Array(feed.items.prefix(expectedLimit)))
+            #expect(items.first?.decision == repositories[0].decision)
+            #expect(items.first?.id != recentEvent.repositoryID)
+        }
     }
 
     @Test func diagnosticsOverviewShowsHealthySharedChain() {
@@ -1462,6 +1525,74 @@ struct CommitReadinessEngineTests {
         #expect(focus.detail == "先看 Diagnostics 并重新扫描；当前没有可用于提交、push 或同步的可信数据。")
     }
 
+    @Test func overviewFocusProjectsCanonicalUnavailableDecisions() {
+        var diagnostics = DiagnosticsSnapshot()
+        diagnostics.scanRoots = ["/tmp/projects"]
+        let widgetTrust = WidgetDataTrustModel(
+            headline: "当前 Widget 数据可信",
+            summary: "test",
+            severity: .normal,
+            evidence: [],
+            nextSteps: [],
+            primaryAction: WidgetDataTrustPrimaryAction(
+                kind: .refreshData,
+                title: "刷新数据",
+                systemImage: "arrow.clockwise",
+                helpText: "test"
+            )
+        )
+        let rows: [(RepositorySnapshot, String, OverviewPrimaryActionKind)] = [
+            (
+                snapshot(
+                    id: "overview-retained",
+                    name: "overview-retained",
+                    status: .error,
+                    dataSource: .lastSuccessful,
+                    lastSuccessfulScanAt: "2026-07-15T10:00:00Z",
+                    errorMessage: "读取失败"
+                ),
+                "overview-retained 正显示上次成功数据",
+                .refreshData
+            ),
+            (
+                snapshot(
+                    id: "overview-unknown",
+                    name: "overview-unknown",
+                    status: .error,
+                    dataSource: .unknown,
+                    errorMessage: "读取失败"
+                ),
+                "overview-unknown 当前数据未知",
+                .openDiagnostics
+            ),
+            (
+                snapshot(
+                    id: "overview-current-failure",
+                    name: "overview-current-failure",
+                    status: .error,
+                    dataSource: .current,
+                    errorMessage: "读取失败"
+                ),
+                "overview-current-failure 状态读取失败",
+                .openDiagnostics
+            )
+        ]
+
+        for (repository, title, actionKind) in rows {
+            let focus = OverviewFocusBuilder.build(
+                lastScanAt: Date(timeIntervalSince1970: 1_718_000_000),
+                diagnostics: diagnostics,
+                widgetTrust: widgetTrust,
+                repositories: [repository]
+            )
+
+            #expect(focus.title == title)
+            #expect(focus.summary == repository.decision.summary)
+            #expect(focus.detail == repository.decision.explanation)
+            #expect(focus.action.kind == actionKind)
+        }
+    }
+
     @Test func overviewFocusUsesRepositoriesAsPrimaryActionWhenWorkExists() {
         var diagnostics = DiagnosticsSnapshot()
         diagnostics.scanRoots = ["/tmp/projects"]
@@ -1513,6 +1644,275 @@ struct CommitReadinessEngineTests {
         #expect(focus.title == "没有可用的扫描目录")
         #expect(focus.action.kind == .openSettings)
         #expect(focus.severity == .warning)
+    }
+
+    @Test func repositoryDecisionTableCoversCriticalStateCombinations() {
+        let retained = snapshot(
+            id: "retained",
+            modified: 2,
+            staged: 2,
+            unstaged: 0,
+            status: .error,
+            dataSource: .lastSuccessful,
+            lastSuccessfulScanAt: "2026-07-15T10:00:00Z",
+            errorMessage: "本轮读取失败"
+        )
+        let unknown = snapshot(
+            id: "unknown",
+            status: .error,
+            branch: "unknown",
+            dataSource: .unknown,
+            errorMessage: "读取失败"
+        )
+        let currentReadFailure = snapshot(
+            id: "read-failure",
+            status: .error,
+            dataSource: .current,
+            errorMessage: "读取失败"
+        )
+        let conflict = snapshot(id: "conflict", modified: 1, conflicted: 1)
+        let unknownBranch = snapshot(id: "unknown-branch", modified: 1, branch: "unknown")
+        let detached = snapshot(id: "detached", modified: 1, branch: "detached")
+        let diverged = snapshot(
+            id: "diverged",
+            modified: 0,
+            ahead: 2,
+            behind: 3,
+            hasUpstream: true,
+            status: .clean
+        )
+        let behindWithChanges = snapshot(
+            id: "behind-with-changes",
+            modified: 1,
+            ahead: 0,
+            behind: 2,
+            hasUpstream: true
+        )
+        let aheadWithChanges = snapshot(
+            id: "ahead-with-changes",
+            modified: 1,
+            ahead: 2,
+            behind: 0,
+            hasUpstream: true
+        )
+        let stagedOnly = snapshot(
+            id: "staged-only",
+            modified: 2,
+            staged: 2,
+            unstaged: 0,
+            ahead: 0,
+            behind: 0,
+            hasUpstream: true
+        )
+        let mixed = snapshot(
+            id: "mixed",
+            modified: 2,
+            staged: 1,
+            unstaged: 1,
+            ahead: 0,
+            behind: 0,
+            hasUpstream: true
+        )
+        let untracked = snapshot(
+            id: "untracked",
+            untracked: 1,
+            ahead: 0,
+            behind: 0,
+            hasUpstream: true
+        )
+        let aheadOnly = snapshot(
+            id: "ahead-only",
+            modified: 0,
+            ahead: 2,
+            behind: 0,
+            hasUpstream: true,
+            status: .clean
+        )
+        let behindOnly = snapshot(
+            id: "behind-only",
+            modified: 0,
+            ahead: 0,
+            behind: 2,
+            hasUpstream: true,
+            status: .clean
+        )
+        let noUpstream = snapshot(
+            id: "no-upstream",
+            modified: 0,
+            ahead: nil,
+            behind: nil,
+            hasUpstream: false,
+            status: .clean
+        )
+        let clean = snapshot(
+            id: "clean-decision",
+            modified: 0,
+            ahead: 0,
+            behind: 0,
+            hasUpstream: true,
+            status: .clean
+        )
+
+        let rows: [(
+            snapshot: RepositorySnapshot,
+            trust: RepositoryDataSource,
+            action: RepositoryActionKind,
+            blocker: RepositoryDecisionBlockingReason?,
+            readiness: CommitReadinessLevel
+        )] = [
+            (retained, .lastSuccessful, .refreshRepositoryState, .retainedData, .unknown),
+            (unknown, .unknown, .diagnoseReadFailure, .unavailableData, .unknown),
+            (currentReadFailure, .current, .diagnoseReadFailure, .readFailure, .unknown),
+            (conflict, .current, .resolveConflicts, .conflicts(count: 1), .dirty),
+            (unknownBranch, .current, .confirmBranch, .branchUnknown, .review),
+            (detached, .current, .confirmBranch, .detachedHead, .review),
+            (diverged, .current, .synchronizeDivergedBranch, .divergedBranch(ahead: 2, behind: 3), .review),
+            (behindWithChanges, .current, .reviewLocalChanges, .remoteUpdatesWithLocalChanges(count: 2), .review),
+            (aheadWithChanges, .current, .reviewLocalChanges, nil, .review),
+            (stagedOnly, .current, .commitStagedChanges, nil, .ready),
+            (mixed, .current, .reviewLocalChanges, nil, .review),
+            (untracked, .current, .reviewLocalChanges, nil, .review),
+            (aheadOnly, .current, .pushLocalCommits, nil, .ready),
+            (behindOnly, .current, .pullRemoteUpdates, .remoteUpdates(count: 2), .review),
+            (noUpstream, .current, .noActionNeeded, nil, .idle),
+            (clean, .current, .noActionNeeded, nil, .idle)
+        ]
+
+        for row in rows {
+            let decision = row.snapshot.decision
+            #expect(decision == RepositoryDecisionEngine.decide(snapshot: row.snapshot))
+            #expect(decision.dataTrust == row.trust)
+            #expect(decision.primaryAction.kind == row.action)
+            #expect(decision.blockingReason == row.blocker)
+            #expect(decision.commitReadiness.level == row.readiness)
+            #expect(decision.sortPriority == decision.primaryAction.sortPriority)
+            #expect(!decision.summary.isEmpty)
+            #expect(!decision.explanation.isEmpty)
+            #expect(!decision.widgetSummary.isEmpty)
+        }
+
+        #expect(aheadWithChanges.decision.secondaryReminders.contains(.unpushedCommits(count: 2)))
+        #expect(!aheadWithChanges.decision.explanation.contains("确认准备好后 push"))
+        #expect(behindWithChanges.decision.secondaryReminders.contains(.remoteUpdates(count: 2)))
+        #expect(!behindWithChanges.decision.explanation.contains("可以提交"))
+        #expect(mixed.decision.secondaryReminders.contains(.mixedStagedAndUnstagedChanges))
+        #expect(untracked.decision.secondaryReminders.contains(.untrackedFiles(count: 1)))
+        #expect(noUpstream.decision.secondaryReminders == [.noUpstream])
+        #expect(clean.decision.secondaryReminders.isEmpty)
+        #expect(ActivityTimelineBuilder.build(from: [aheadOnly], lastScanAt: Date()).state == .active)
+        #expect(ActivityTimelineBuilder.build(from: [behindOnly], lastScanAt: Date()).state == .active)
+        #expect(ActivityTimelineBuilder.build(from: [clean], lastScanAt: Date()).state == .allClean)
+    }
+
+    @Test func repositoryDecisionPriorityIsStableAcrossAllPrimaryStates() {
+        let repositories = [
+            snapshot(id: "idle", name: "idle", modified: 0, ahead: 0, behind: 0, hasUpstream: true, status: .clean),
+            snapshot(id: "pull", name: "pull", modified: 0, ahead: 0, behind: 2, hasUpstream: true, status: .clean),
+            snapshot(id: "local", name: "local", modified: 1, ahead: 0, behind: 0, hasUpstream: true),
+            snapshot(id: "push", name: "push", modified: 0, ahead: 2, behind: 0, hasUpstream: true, status: .clean),
+            snapshot(id: "behind-local", name: "behind-local", modified: 1, ahead: 0, behind: 2, hasUpstream: true),
+            snapshot(id: "diverged-order", name: "diverged-order", modified: 0, ahead: 1, behind: 1, hasUpstream: true, status: .clean),
+            snapshot(id: "branch-order", name: "branch-order", modified: 1, branch: "detached"),
+            snapshot(id: "conflict-order", name: "conflict-order", modified: 1, conflicted: 1),
+            snapshot(
+                id: "retained-order",
+                name: "retained-order",
+                status: .error,
+                dataSource: .lastSuccessful,
+                lastSuccessfulScanAt: "2026-07-15T10:00:00Z",
+                errorMessage: "本轮读取失败"
+            ),
+            snapshot(id: "unknown-order", name: "unknown-order", status: .error, dataSource: .unknown, errorMessage: "读取失败")
+        ]
+
+        #expect(
+            RepositorySorter.sort(repositories).map(\.id) == [
+                "unknown-order",
+                "retained-order",
+                "conflict-order",
+                "branch-order",
+                "diverged-order",
+                "behind-local",
+                "push",
+                "local",
+                "pull",
+                "idle"
+            ]
+        )
+    }
+
+    @Test func unavailableDecisionOrderingNeverUsesRetainedBusinessFacts() {
+        let olderHighRisk = snapshot(
+            id: "older-high-risk-retained",
+            name: "older-high-risk-retained",
+            modified: 9,
+            ahead: 5,
+            risk: .high,
+            status: .error,
+            lastScannedAt: "2026-07-15T09:00:00Z",
+            dataSource: .lastSuccessful,
+            lastSuccessfulScanAt: "2026-07-14T09:00:00Z",
+            errorMessage: "读取失败"
+        )
+        let newerLowRisk = snapshot(
+            id: "newer-low-risk-retained",
+            name: "newer-low-risk-retained",
+            modified: 1,
+            ahead: 0,
+            risk: .low,
+            status: .error,
+            lastScannedAt: "2026-07-16T09:00:00Z",
+            dataSource: .lastSuccessful,
+            lastSuccessfulScanAt: "2026-07-14T09:00:00Z",
+            errorMessage: "读取失败"
+        )
+
+        #expect(
+            RepositorySorter.sort([olderHighRisk, newerLowRisk]).map(\.id) == [
+                "newer-low-risk-retained",
+                "older-high-risk-retained"
+            ]
+        )
+    }
+
+    @Test func listDetailTimelineWidgetAndCompatibilityProjectionsShareOneDecision() {
+        let repositories = [
+            snapshot(id: "shared-retained", status: .error, dataSource: .lastSuccessful, lastSuccessfulScanAt: "2026-07-15T10:00:00Z", errorMessage: "读取失败"),
+            snapshot(id: "shared-unknown", status: .error, dataSource: .unknown, errorMessage: "读取失败"),
+            snapshot(id: "shared-current-failure", status: .error, dataSource: .current, errorMessage: "读取失败"),
+            snapshot(id: "shared-conflict", modified: 1, conflicted: 1),
+            snapshot(id: "shared-detached", modified: 1, branch: "detached"),
+            snapshot(id: "shared-diverged", modified: 0, ahead: 1, behind: 1, hasUpstream: true, status: .clean),
+            snapshot(id: "shared-behind-local", modified: 1, ahead: 0, behind: 1, hasUpstream: true),
+            snapshot(id: "shared-ahead-local", modified: 1, ahead: 1, behind: 0, hasUpstream: true),
+            snapshot(id: "shared-mixed", modified: 2, staged: 1, unstaged: 1, ahead: 0, behind: 0, hasUpstream: true),
+            snapshot(id: "shared-untracked", untracked: 1, ahead: 0, behind: 0, hasUpstream: true),
+            snapshot(id: "shared-no-upstream", modified: 0, ahead: nil, behind: nil, hasUpstream: false, status: .clean),
+            snapshot(id: "shared-clean", modified: 0, ahead: 0, behind: 0, hasUpstream: true, status: .clean)
+        ]
+        let timeline = ActivityTimelineBuilder.build(
+            from: repositories,
+            lastScanAt: Date(timeIntervalSince1970: 1_718_000_000)
+        )
+        let timelineContext = ActivityTimelineDecisionContextBuilder.build(from: repositories)
+        let widgetItems = WidgetRepositoryPriorityBuilder.build(from: repositories)
+
+        for repository in repositories {
+            let decision = repository.decision
+            let list = RepositoryListItemPresentationBuilder.build(snapshot: repository)
+            let detail = RepositoryDetailPresentationBuilder.build(snapshot: repository)
+
+            #expect(list.action == decision.primaryAction)
+            #expect(detail.localSummary == decision.summary)
+            #expect(detail.nextAction == decision.explanation)
+            #expect(timeline.items.first(where: { $0.id == repository.id })?.decision == decision)
+            #expect(timelineContext[repository.id] == decision)
+            #expect(widgetItems.first(where: { $0.id == repository.id })?.decision == decision)
+            #expect(repository.actionState == decision.primaryAction)
+            #expect(repository.nextActionHint == decision.explanation)
+            #expect(repository.statusSummary == decision.summary)
+            #expect(repository.commitReadiness == decision.commitReadiness)
+        }
     }
 
     @Test func cleanRepositoryIsClean() {

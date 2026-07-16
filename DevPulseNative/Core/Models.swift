@@ -589,20 +589,24 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
         )
     }
 
+    var decision: RepositoryDecision {
+        RepositoryDecisionEngine.decide(snapshot: self)
+    }
+
     var commitReadiness: CommitReadinessAssessment {
-        CommitReadinessEngine.assess(snapshot: self)
+        decision.commitReadiness
     }
 
     var nextActionHint: String {
-        RepositoryNextActionHintBuilder.build(snapshot: self)
+        decision.explanation
     }
 
     var statusSummary: String {
-        RepositoryStatusSummaryBuilder.build(snapshot: self)
+        decision.summary
     }
 
     var actionState: RepositoryActionState {
-        RepositoryActionStateBuilder.build(snapshot: self)
+        decision.primaryAction
     }
 
     /// Effective provenance for legacy and current schema-v1 payloads.
@@ -794,80 +798,6 @@ struct RepositoryActionState: Equatable {
     let sortPriority: Int
 }
 
-enum RepositoryActionStateBuilder {
-    static func build(snapshot: RepositorySnapshot) -> RepositoryActionState {
-        switch snapshot.resolvedDataSource {
-        case .lastSuccessful:
-            return action(.refreshRepositoryState, title: "先刷新确认状态", priority: 0)
-        case .unknown:
-            return action(.diagnoseReadFailure, title: "检查读取异常", priority: 0)
-        case .current:
-            break
-        }
-
-        if snapshot.status == .error || snapshot.errorMessage != nil {
-            return action(.diagnoseReadFailure, title: "检查读取异常", priority: 0)
-        }
-
-        if (snapshot.conflictedFileCount ?? 0) > 0 {
-            return action(.resolveConflicts, title: "先解决合并冲突", priority: 1)
-        }
-
-        let normalizedBranch = snapshot.branch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if normalizedBranch.isEmpty || normalizedBranch == "unknown" || normalizedBranch == "detached" {
-            return action(.confirmBranch, title: "确认当前分支", priority: 2)
-        }
-
-        let aheadCount = snapshot.aheadCount ?? 0
-        let behindCount = snapshot.behindCount ?? 0
-        if aheadCount > 0, behindCount > 0 {
-            return action(.synchronizeDivergedBranch, title: "同步分叉分支", priority: 3)
-        }
-
-        if aheadCount > 0 {
-            return action(
-                .pushLocalCommits,
-                title: "推送 \(aheadCount) 个本地提交",
-                priority: 4
-            )
-        }
-
-        if snapshot.changedFileCount > 0 {
-            let stagedCount = snapshot.stagedFileCount ?? 0
-            let looseCount = (snapshot.unstagedFileCount ?? 0) + snapshot.untrackedFileCount
-            if stagedCount > 0, looseCount == 0 {
-                return action(
-                    .commitStagedChanges,
-                    title: "提交 \(stagedCount) 个已暂存改动",
-                    priority: 5
-                )
-            }
-
-            return action(
-                .reviewLocalChanges,
-                title: "检查 \(snapshot.changedFileCount) 个本地改动",
-                priority: 5
-            )
-        }
-
-        if behindCount > 0 {
-            return action(
-                .pullRemoteUpdates,
-                title: "拉取 \(behindCount) 个远端更新",
-                priority: 6
-            )
-        }
-
-        return action(.noActionNeeded, title: "无需处理", priority: 7)
-    }
-
-    private static func action(_ kind: RepositoryActionKind,
-                               title: String,
-                               priority: Int) -> RepositoryActionState {
-        RepositoryActionState(kind: kind, title: title, sortPriority: priority)
-    }
-}
-
 struct RepositoryListItemPresentation: Equatable {
     let dataSource: RepositoryDataSourcePresentation
     let action: RepositoryActionState
@@ -881,7 +811,7 @@ enum RepositoryListItemPresentationBuilder {
     static func build(snapshot: RepositorySnapshot, now: Date = Date()) -> RepositoryListItemPresentation {
         RepositoryListItemPresentation(
             dataSource: RepositoryDataSourcePresentationBuilder.build(snapshot: snapshot, now: now),
-            action: snapshot.actionState,
+            action: snapshot.decision.primaryAction,
             latestCommit: latestCommitLabel(snapshot: snapshot, now: now),
             localChanges: localChangesLabel(snapshot: snapshot),
             synchronization: synchronizationLabel(snapshot: snapshot),
@@ -988,144 +918,6 @@ private extension String {
     }
 }
 
-enum RepositoryNextActionHintBuilder {
-    static func build(snapshot: RepositorySnapshot) -> String {
-        switch snapshot.resolvedDataSource {
-        case .lastSuccessful:
-            return "先重新扫描确认当前状态；不要依据上次成功数据提交、push 或同步。"
-        case .unknown:
-            return "先看 Diagnostics 并重新扫描；当前没有可用于提交、push 或同步的可信数据。"
-        case .current:
-            break
-        }
-
-        let readiness = snapshot.commitReadiness
-
-        if snapshot.status == .error || readiness.level == .unknown {
-            return "先看 Diagnostics，确认 Git 读取失败原因。"
-        }
-
-        if readiness.reasons.contains(.conflictedFiles) {
-            return "先解决 \(countLabel(snapshot.conflictedFileCount ?? 0, unit: "处冲突"))，再继续审查或提交。"
-        }
-
-        if readiness.reasons.contains(.branchNeedsConfirmation) {
-            return "先确认当前分支，再决定是否继续审查或提交。"
-        }
-
-        let aheadCount = snapshot.aheadCount ?? 0
-        let behindCount = snapshot.behindCount ?? 0
-        if aheadCount > 0, behindCount > 0 {
-            return "本地和远端都有新提交，先确认分叉范围再同步。"
-        }
-
-        if behindCount > 0 {
-            return "先拉取 \(countLabel(behindCount, unit: "个远端更新"))，再继续本地工作。"
-        }
-
-        if readiness.reasons.contains(.localAhead),
-           aheadCount > 0 {
-            return "确认准备好后 push \(countLabel(aheadCount, unit: "个本地提交"))。"
-        }
-
-        if readiness.reasons.contains(.stagedChanges) {
-            return "确认 \(countLabel(snapshot.stagedFileCount ?? 0, unit: "个已暂存改动"))后即可提交。"
-        }
-
-        if readiness.reasons.contains(.mixedStagedAndUnstagedChanges) {
-            return "先拆清已暂存和未暂存改动，再决定是否提交。"
-        }
-
-        if readiness.reasons.contains(.highRiskChanges), readiness.level == .dirty {
-            return "先收敛 \(countLabel(snapshot.changedFileCount, unit: "处高风险改动"))，并跑一次验证。"
-        }
-
-        if readiness.reasons.contains(.largeWorkingTree) {
-            let targetCount = max(snapshot.changedFileCount, snapshot.untrackedFileCount + (snapshot.unstagedFileCount ?? 0))
-            return "先收敛 \(countLabel(targetCount, unit: "处改动"))，再继续审查或提交。"
-        }
-
-        if readiness.reasons.contains(.deletedFiles), snapshot.deletedFileCount > 0 {
-            return "先检查 \(countLabel(snapshot.deletedFileCount, unit: "个删除项"))，再决定是否提交。"
-        }
-
-        if readiness.reasons.contains(.untrackedFiles), snapshot.untrackedFileCount > 0 {
-            return "先确认 \(countLabel(snapshot.untrackedFileCount, unit: "个新文件"))是否纳入提交。"
-        }
-
-        if readiness.reasons.contains(.highRiskChanges) || snapshot.risk == .medium || snapshot.risk == .high {
-            return "先看 diff 并跑一次验证，再决定是否提交。"
-        }
-
-        switch readiness.level {
-        case .idle:
-            return "当前无需操作。"
-        case .ready:
-            return "如范围确认无误，可以继续提交或分享改动。"
-        case .review:
-            if snapshot.changedFileCount > 0 {
-                return "先看 \(countLabel(snapshot.changedFileCount, unit: "处改动"))的 diff，再决定是否提交。"
-            }
-            return "先审查当前改动，再决定是否提交。"
-        case .dirty:
-            return "先整理当前改动，再继续审查或提交。"
-        case .unknown:
-            return "先看 Diagnostics，确认 Git 读取失败原因。"
-        }
-    }
-
-    private static func countLabel(_ count: Int, unit: String) -> String {
-        "\(max(count, 1)) \(unit)"
-    }
-}
-
-enum RepositoryStatusSummaryBuilder {
-    static func build(snapshot: RepositorySnapshot) -> String {
-        switch snapshot.resolvedDataSource {
-        case .lastSuccessful:
-            return "当前状态待确认 · 显示上次成功数据"
-        case .unknown:
-            return "仓库数据未知"
-        case .current:
-            break
-        }
-
-        if snapshot.status == .error || snapshot.commitReadiness.level == .unknown {
-            return snapshot.errorMessage ?? "Git 状态不可用"
-        }
-
-        if snapshot.changedFileCount == 0,
-           let aheadCount = snapshot.aheadCount,
-           aheadCount > 0 {
-            return aheadCount == 1 ? "领先 1 个本地提交" : "领先 \(aheadCount) 个本地提交"
-        }
-
-        if snapshot.commitReadiness.level == .idle {
-            return "没有本地改动"
-        }
-
-        var parts: [String] = []
-        parts.append(snapshot.changedFileCount == 1 ? "1 处改动" : "\(snapshot.changedFileCount) 处改动")
-
-        let stagedCount = snapshot.stagedFileCount ?? 0
-        if stagedCount > 0 {
-            parts.append("已暂存 \(stagedCount)")
-        }
-
-        let unstagedCount = snapshot.unstagedFileCount
-            ?? (snapshot.modifiedFileCount + snapshot.addedFileCount + snapshot.deletedFileCount)
-        if unstagedCount > 0 {
-            parts.append("未暂存 \(unstagedCount)")
-        }
-
-        if snapshot.untrackedFileCount > 0 {
-            parts.append("未跟踪 \(snapshot.untrackedFileCount)")
-        }
-
-        return parts.joined(separator: " · ")
-    }
-}
-
 // MARK: - Activity timeline
 
 enum ActivityTimelineState: String, Codable, Equatable {
@@ -1135,7 +927,7 @@ enum ActivityTimelineState: String, Codable, Equatable {
     case active
 }
 
-struct ActivityTimelineFeed: Codable, Equatable {
+struct ActivityTimelineFeed: Equatable {
     let state: ActivityTimelineState
     let items: [ActivityTimelineItem]
 
@@ -1155,7 +947,7 @@ struct WidgetPrioritySummary: Equatable {
     let auxiliary: String?
 }
 
-struct ActivityTimelineItem: Codable, Identifiable, Equatable {
+struct ActivityTimelineItem: Identifiable, Equatable {
     let id: String
     let repoName: String
     let repoPath: String
@@ -1178,6 +970,7 @@ struct ActivityTimelineItem: Codable, Identifiable, Equatable {
     let lastSuccessfulScanAt: String?
     let lastActivityAt: String?
     let errorMessage: String?
+    let decision: RepositoryDecision
 
     init(from snapshot: RepositorySnapshot) {
         id = snapshot.id
@@ -1202,6 +995,7 @@ struct ActivityTimelineItem: Codable, Identifiable, Equatable {
         lastSuccessfulScanAt = snapshot.resolvedLastSuccessfulScanAt
         lastActivityAt = snapshot.lastActivityAt
         errorMessage = snapshot.errorMessage
+        decision = snapshot.decision
     }
 
     var resolvedDataSource: RepositoryDataSource {
@@ -1257,21 +1051,7 @@ struct ActivityTimelineItem: Codable, Identifiable, Equatable {
     }
 
     var commitReadiness: CommitReadinessAssessment {
-        CommitReadinessEngine.assess(
-            status: status,
-            branch: branch,
-            risk: risk,
-            modifiedFileCount: modifiedFileCount,
-            addedFileCount: addedFileCount,
-            deletedFileCount: deletedFileCount,
-            untrackedFileCount: untrackedFileCount,
-            stagedFileCount: stagedFileCount,
-            unstagedFileCount: unstagedFileCount,
-            conflictedFileCount: conflictedFileCount,
-            aheadCount: aheadCount,
-            scanError: status == .error,
-            dataSource: resolvedDataSource
-        )
+        decision.commitReadiness
     }
 
     private static func previewBasenames(from preview: [String]) -> [String] {
@@ -1297,8 +1077,8 @@ enum ActivityTimelineBuilder {
     static func build(from repositories: [RepositorySnapshot],
                       lastScanAt: Date?) -> ActivityTimelineFeed {
         let items = repositories
+            .sorted { RepositoryDecisionOrdering.precedes($0, $1) }
             .map(ActivityTimelineItem.init(from:))
-            .sorted(by: sort(_:_:))
 
         return ActivityTimelineFeed(
             state: classify(repositories: repositories, lastScanAt: lastScanAt),
@@ -1317,71 +1097,24 @@ enum ActivityTimelineBuilder {
             return lastScanAt == nil ? .neverScanned : .noRepositories
         }
 
-        let hasChanged = repositories.contains {
-            $0.resolvedDataSource == .current && $0.status == .changed
-        }
-        let hasUnavailableData = repositories.contains {
-            $0.resolvedDataSource != .current || $0.status == .error
+        let hasActionableDecision = repositories.contains {
+            $0.decision.primaryAction.kind != .noActionNeeded
         }
 
-        if !hasChanged && !hasUnavailableData {
+        if !hasActionableDecision {
             return .allClean
         }
 
         return .active
     }
+}
 
-    private static func sort(_ lhs: ActivityTimelineItem,
-                             _ rhs: ActivityTimelineItem) -> Bool {
-        let lhsPriority = itemPriority(lhs)
-        let rhsPriority = itemPriority(rhs)
-        if lhsPriority != rhsPriority {
-            return lhsPriority < rhsPriority
-        }
-
-        if let lhsDate = lhs.activityDate, let rhsDate = rhs.activityDate, lhsDate != rhsDate {
-            return lhsDate > rhsDate
-        }
-
-        if lhs.activityDate != nil {
-            return true
-        }
-
-        if rhs.activityDate != nil {
-            return false
-        }
-
-        if lhs.resolvedDataSource == .current,
-           rhs.resolvedDataSource == .current,
-           lhs.changedFileCount != rhs.changedFileCount {
-            return lhs.changedFileCount > rhs.changedFileCount
-        }
-
-        if lhs.resolvedDataSource == .current,
-           rhs.resolvedDataSource == .current,
-           lhs.risk != rhs.risk {
-            return lhs.risk > rhs.risk
-        }
-
-        return lhs.repoName.localizedStandardCompare(rhs.repoName) == .orderedAscending
-    }
-
-    private static func itemPriority(_ item: ActivityTimelineItem) -> Int {
-        switch item.resolvedDataSource {
-        case .unknown:
-            return 0
-        case .lastSuccessful:
-            return 1
-        case .current:
-            switch item.status {
-            case .error:
-                return 0
-            case .changed:
-                return 2
-            case .clean:
-                return 3
-            }
-        }
+enum ActivityTimelineDecisionContextBuilder {
+    static func build(from repositories: [RepositorySnapshot]) -> [String: RepositoryDecision] {
+        Dictionary(
+            repositories.map { ($0.id, $0.decision) },
+            uniquingKeysWith: { _, latest in latest }
+        )
     }
 }
 
@@ -1432,10 +1165,11 @@ enum WidgetPrioritySummaryBuilder {
                 auxiliary: nil
             )
         case .allClean:
+            let topDecision = feed.topItem?.decision
             return WidgetPrioritySummary(
                 title: "全部干净",
-                message: "暂无改动",
-                readinessLevel: .idle,
+                message: topDecision?.widgetSummary ?? "暂无改动",
+                readinessLevel: topDecision?.commitReadiness.level ?? .idle,
                 auxiliary: feed.items.count == 1 ? "1 个仓库" : "\(feed.items.count) 个仓库"
             )
         case .active:
@@ -1450,8 +1184,8 @@ enum WidgetPrioritySummaryBuilder {
 
             return WidgetPrioritySummary(
                 title: item.repoName,
-                message: item.commitReadiness.widgetShortHint,
-                readinessLevel: item.commitReadiness.level,
+                message: item.decision.widgetSummary,
+                readinessLevel: item.decision.commitReadiness.level,
                 auxiliary: auxiliaryLabel(for: item)
             )
         }
@@ -1473,87 +1207,44 @@ enum WidgetPrioritySummaryBuilder {
 
 enum WidgetRepositoryPriorityBuilder {
     static func build(from repositories: [RepositorySnapshot]) -> [ActivityTimelineItem] {
-        repositories
-            .map(ActivityTimelineItem.init(from:))
-            .sorted(by: sort(_:_:))
+        ActivityTimelineBuilder.build(from: repositories, lastScanAt: nil).items
     }
 
     static func build(from snapshot: AppGroupData?) -> [ActivityTimelineItem] {
         build(from: snapshot?.repositories ?? [])
     }
+}
 
-    private static func sort(_ lhs: ActivityTimelineItem,
-                             _ rhs: ActivityTimelineItem) -> Bool {
-        let lhsStatusPriority = itemPriority(lhs)
-        let rhsStatusPriority = itemPriority(rhs)
-        if lhsStatusPriority != rhsStatusPriority {
-            return lhsStatusPriority < rhsStatusPriority
+enum WidgetPrimaryContentFamily: CaseIterable {
+    case small
+    case medium
+    case large
+}
+
+enum WidgetPrimaryContentSelection: Equatable {
+    case empty
+    case repositories([ActivityTimelineItem])
+}
+
+/// Keeps every Widget family on the canonical repository-decision feed.
+/// Historical activity summaries are accepted to make the precedence policy
+/// explicit, but they never replace current decisions as primary content.
+enum WidgetPrimaryContentSelectionBuilder {
+    static func build(feed: ActivityTimelineFeed,
+                      recentActivityEvents: [ActivityEventSummary]?,
+                      family: WidgetPrimaryContentFamily) -> WidgetPrimaryContentSelection {
+        let limit: Int
+        switch family {
+        case .small:
+            limit = 1
+        case .medium:
+            limit = 2
+        case .large:
+            limit = 3
         }
 
-        if lhs.resolvedDataSource == .current,
-           rhs.resolvedDataSource == .current,
-           lhs.changedFileCount != rhs.changedFileCount {
-            return lhs.changedFileCount > rhs.changedFileCount
-        }
-
-        if let lhsDate = lhs.activityDate, let rhsDate = rhs.activityDate, lhsDate != rhsDate {
-            return lhsDate > rhsDate
-        }
-
-        if lhs.activityDate != nil {
-            return true
-        }
-
-        if rhs.activityDate != nil {
-            return false
-        }
-
-        let lhsReadinessPriority = readinessPriority(lhs.commitReadiness.level)
-        let rhsReadinessPriority = readinessPriority(rhs.commitReadiness.level)
-        if lhsReadinessPriority != rhsReadinessPriority {
-            return lhsReadinessPriority < rhsReadinessPriority
-        }
-
-        if lhs.resolvedDataSource == .current,
-           rhs.resolvedDataSource == .current,
-           lhs.risk != rhs.risk {
-            return lhs.risk > rhs.risk
-        }
-
-        return lhs.repoName.localizedStandardCompare(rhs.repoName) == .orderedAscending
-    }
-
-    private static func itemPriority(_ item: ActivityTimelineItem) -> Int {
-        switch item.resolvedDataSource {
-        case .unknown:
-            return 0
-        case .lastSuccessful:
-            return 1
-        case .current:
-            switch item.status {
-            case .error:
-                return 0
-            case .changed:
-                return 2
-            case .clean:
-                return 3
-            }
-        }
-    }
-
-    private static func readinessPriority(_ level: CommitReadinessLevel) -> Int {
-        switch level {
-        case .dirty:
-            return 0
-        case .unknown:
-            return 1
-        case .review:
-            return 2
-        case .ready:
-            return 3
-        case .idle:
-            return 4
-        }
+        let items = Array(feed.items.prefix(limit))
+        return items.isEmpty ? .empty : .repositories(items)
     }
 }
 
@@ -2365,12 +2056,14 @@ enum OverviewFocusBuilder {
     }
 
     private static func repositoryFocus(_ repo: RepositorySnapshot) -> OverviewFocusModel {
-        switch repo.resolvedDataSource {
+        let decision = repo.decision
+
+        switch decision.dataTrust {
         case .lastSuccessful:
             return OverviewFocusModel(
                 title: "\(repo.name) 正显示上次成功数据",
-                summary: repo.statusSummary,
-                detail: repo.nextActionHint,
+                summary: decision.summary,
+                detail: decision.explanation,
                 severity: .warning,
                 action: OverviewPrimaryAction(
                     kind: .refreshData,
@@ -2381,8 +2074,8 @@ enum OverviewFocusBuilder {
         case .unknown:
             return OverviewFocusModel(
                 title: "\(repo.name) 当前数据未知",
-                summary: repo.statusSummary,
-                detail: repo.nextActionHint,
+                summary: decision.summary,
+                detail: decision.explanation,
                 severity: .error,
                 action: OverviewPrimaryAction(
                     kind: .openDiagnostics,
@@ -2394,11 +2087,11 @@ enum OverviewFocusBuilder {
             break
         }
 
-        if repo.status == .error || repo.commitReadiness.level == .unknown {
+        if decision.commitReadiness.level == .unknown {
             return OverviewFocusModel(
                 title: "\(repo.name) 状态读取失败",
-                summary: repo.statusSummary,
-                detail: repo.nextActionHint,
+                summary: decision.summary,
+                detail: decision.explanation,
                 severity: .error,
                 action: OverviewPrimaryAction(
                     kind: .openDiagnostics,
@@ -2410,9 +2103,9 @@ enum OverviewFocusBuilder {
 
         return OverviewFocusModel(
             title: repo.name,
-            summary: repo.statusSummary,
-            detail: repo.nextActionHint,
-            severity: severity(for: repo.commitReadiness.level),
+            summary: decision.summary,
+            detail: decision.explanation,
+            severity: severity(for: decision.commitReadiness.level),
             action: OverviewPrimaryAction(
                 kind: .openRepositories,
                 title: "查看仓库列表",
@@ -2422,43 +2115,9 @@ enum OverviewFocusBuilder {
     }
 
     private static func priorityRepository(in repositories: [RepositorySnapshot]) -> RepositorySnapshot? {
-        if let brokenRepo = repositories.first(where: { $0.status == .error || $0.commitReadiness.level == .unknown }) {
-            return brokenRepo
+        repositories.sorted { RepositoryDecisionOrdering.precedes($0, $1) }.first {
+            $0.decision.primaryAction.kind != .noActionNeeded
         }
-
-        return repositories.sorted(by: repositoryPriority(_:_:)).first {
-            $0.commitReadiness.level != .idle || (($0.aheadCount ?? 0) > 0)
-        }
-    }
-
-    private static func repositoryPriority(_ lhs: RepositorySnapshot, _ rhs: RepositorySnapshot) -> Bool {
-        let lhsReadinessPriority = readinessPriority(lhs.commitReadiness.level)
-        let rhsReadinessPriority = readinessPriority(rhs.commitReadiness.level)
-        if lhsReadinessPriority != rhsReadinessPriority {
-            return lhsReadinessPriority < rhsReadinessPriority
-        }
-
-        if lhs.changedFileCount != rhs.changedFileCount {
-            return lhs.changedFileCount > rhs.changedFileCount
-        }
-
-        if lhs.risk != rhs.risk {
-            return lhs.risk > rhs.risk
-        }
-
-        if let lhsDate = isoDate(lhs.lastChangedAt), let rhsDate = isoDate(rhs.lastChangedAt), lhsDate != rhsDate {
-            return lhsDate > rhsDate
-        }
-
-        if lhs.lastChangedAt != nil {
-            return true
-        }
-
-        if rhs.lastChangedAt != nil {
-            return false
-        }
-
-        return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
     }
 
     private static func mapActionKind(_ kind: WidgetDataTrustPrimaryActionKind) -> OverviewPrimaryActionKind {
@@ -2483,27 +2142,6 @@ enum OverviewFocusBuilder {
         }
     }
 
-    private static func readinessPriority(_ level: CommitReadinessLevel) -> Int {
-        switch level {
-        case .unknown:
-            return 0
-        case .dirty:
-            return 1
-        case .review:
-            return 2
-        case .ready:
-            return 3
-        case .idle:
-            return 4
-        }
-    }
-
-    private static func isoDate(_ string: String?) -> Date? {
-        guard let string else { return nil }
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.date(from: string) ?? ISO8601DateFormatter().date(from: string)
-    }
 }
 
 enum DiagnosticsOverviewBuilder {
@@ -2745,7 +2383,7 @@ enum DiagnosticsOverviewBuilder {
         refreshTrust: SnapshotTrustAssessment,
         repositories: [RepositorySnapshot]
     ) -> DiagnosticsSectionModel {
-        let repoErrors = repositories.filter { $0.status == .error || $0.commitReadiness.level == .unknown }
+        let repoErrors = repositories.filter { $0.decision.commitReadiness.level == .unknown }
         let repoSeverity: DiagnosticsSeverity
         if !repoErrors.isEmpty {
             repoSeverity = .error

@@ -1046,11 +1046,12 @@ struct SettingsView: View {
         guard !repositories.isEmpty else { return "0 个仓库" }
 
         let currentActiveCount = repositories.filter {
-            $0.resolvedDataSource == .current
-                && ($0.status != .clean || $0.changedFileCount > 0 || ($0.aheadCount ?? 0) > 0)
+            let decision = $0.decision
+            return decision.dataTrust == .current
+                && decision.primaryAction.kind != .noActionNeeded
         }.count
         let unavailableCount = repositories.filter {
-            $0.resolvedDataSource != .current
+            $0.decision.dataTrust != .current
         }.count
 
         if currentActiveCount == 0, unavailableCount == 0 {
@@ -1436,54 +1437,7 @@ struct SettingsView: View {
     }
 
     private func diagnosticsRepositoryActionSummary(_ repo: RepositorySnapshot) -> String {
-        let readiness = repo.commitReadiness
-
-        if repo.status == .error || readiness.level == .unknown {
-            return "看 Diagnostics"
-        }
-        if readiness.reasons.contains(.conflictedFiles) {
-            return "先解冲突"
-        }
-        if readiness.reasons.contains(.branchNeedsConfirmation) {
-            return "确认分支"
-        }
-        if readiness.reasons.contains(.localAhead), (repo.aheadCount ?? 0) > 0 {
-            return "准备好就 push"
-        }
-        if readiness.reasons.contains(.stagedChanges) {
-            return "可提交"
-        }
-        if readiness.reasons.contains(.mixedStagedAndUnstagedChanges) {
-            return "先整理暂存"
-        }
-        if readiness.reasons.contains(.highRiskChanges), readiness.level == .dirty {
-            return "先收敛并验证"
-        }
-        if readiness.reasons.contains(.largeWorkingTree) {
-            return "先收敛改动"
-        }
-        if readiness.reasons.contains(.deletedFiles), repo.deletedFileCount > 0 {
-            return "检查删除项"
-        }
-        if readiness.reasons.contains(.untrackedFiles), repo.untrackedFileCount > 0 {
-            return "确认新文件"
-        }
-        if readiness.reasons.contains(.highRiskChanges) || repo.risk == .medium || repo.risk == .high {
-            return "先看 diff 并验证"
-        }
-
-        switch readiness.level {
-        case .idle:
-            return "无需操作"
-        case .ready:
-            return "可提交或分享"
-        case .review:
-            return "先看 diff"
-        case .dirty:
-            return "先整理改动"
-        case .unknown:
-            return "看 Diagnostics"
-        }
+        repo.decision.primaryAction.title
     }
 
     private var snapshotFactsUpdatedLabel: String {

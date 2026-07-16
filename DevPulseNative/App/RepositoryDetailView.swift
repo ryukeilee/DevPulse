@@ -50,6 +50,7 @@ struct RepositoryDetailPresentation: Equatable {
 enum RepositoryDetailPresentationBuilder {
     static func build(snapshot: RepositorySnapshot, now: Date = Date()) -> RepositoryDetailPresentation {
         let listPresentation = RepositoryListItemPresentationBuilder.build(snapshot: snapshot, now: now)
+        let decision = snapshot.decision
         let countsAreAvailable = snapshot.resolvedDataSource == .lastSuccessful
             || (snapshot.resolvedDataSource == .current && snapshot.status != .error)
         let fileNames = countsAreAvailable
@@ -60,14 +61,14 @@ enum RepositoryDetailPresentationBuilder {
             dataSource: listPresentation.dataSource,
             branch: snapshot.branchDisplayLabel,
             latestCommit: listPresentation.latestCommit,
-            localSummary: snapshot.statusSummary,
+            localSummary: decision.summary,
             synchronization: listPresentation.synchronization,
             changeItems: changeItems(snapshot: snapshot, countsAreAvailable: countsAreAvailable),
             changedFileNames: fileNames,
             remainingChangedFileCount: countsAreAvailable
                 ? max(snapshot.changedFileCount - fileNames.count, 0)
                 : 0,
-            nextAction: snapshot.nextActionHint,
+            nextAction: decision.explanation,
             diagnosticMessage: diagnosticMessage(snapshot.errorMessage)
         )
     }

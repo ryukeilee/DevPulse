@@ -151,6 +151,7 @@ struct StatusTab: View {
 
                 ActivityTimelineView(
                     events: scheduler.activityEvents,
+                    repositories: scheduler.lastResult.repositories,
                     lastScanAt: scheduler.lastScanAt,
                     onRescan: scheduler.rescan
                 )

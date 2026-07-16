@@ -2,8 +2,13 @@ import SwiftUI
 
 struct ActivityTimelineView: View {
     let events: [ActivityEvent]
+    let repositories: [RepositorySnapshot]
     let lastScanAt: Date?
     let onRescan: () -> Void
+
+    private var decisionsByRepositoryID: [String: RepositoryDecision] {
+        ActivityTimelineDecisionContextBuilder.build(from: repositories)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -14,7 +19,10 @@ struct ActivityTimelineView: View {
             } else {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(events.prefix(100))) { event in
-                        ActivityEventRow(event: event)
+                        ActivityEventRow(
+                            event: event,
+                            decision: decisionsByRepositoryID[event.repositoryID]
+                        )
 
                         if event.id != events.prefix(100).last?.id {
                             Divider().overlay(DevPulseVisualStyle.separator)
@@ -76,6 +84,12 @@ struct ActivityTimelineView: View {
 
 struct ActivityEventRow: View {
     let event: ActivityEvent
+    let decision: RepositoryDecision?
+
+    init(event: ActivityEvent, decision: RepositoryDecision? = nil) {
+        self.event = event
+        self.decision = decision
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 11) {
@@ -114,6 +128,13 @@ struct ActivityEventRow: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
+
+                if let decision {
+                    Label("当前建议 · \(decision.primaryAction.title)", systemImage: "arrow.right.circle")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .help(decision.explanation)
+                }
             }
         }
         .padding(.vertical, 10)

@@ -204,14 +204,6 @@ struct WidgetEntry: TimelineEntry {
     }
 }
 
-private extension WidgetEntry {
-    var topActivityEvent: ActivityEventSummary? {
-        ActivityEventWidgetSummaryBuilder.topSummary(
-            from: snapshot?.recentActivityEvents ?? []
-        )
-    }
-}
-
 struct DevPulseWidgetEntryView: View {
     @Environment(\.widgetFamily) private var widgetFamily
     let entry: WidgetEntry
@@ -374,43 +366,6 @@ private struct WidgetStateBlock: View {
     }
 }
 
-private struct WidgetActivityEventCard: View {
-    let event: ActivityEventSummary
-    var compact = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: compact ? 4 : 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Image(systemName: event.kind.systemImage)
-                    .foregroundStyle(event.priority <= 1 ? WidgetPalette.error : WidgetPalette.accent)
-                Text(event.repositoryName)
-                    .font(.system(size: compact ? 11 : 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(WidgetPalette.textPrimary)
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                Text(event.kind.title)
-                    .font(.system(size: compact ? 8 : 9, weight: .semibold, design: .rounded))
-                    .foregroundStyle(WidgetPalette.textSecondary)
-                    .lineLimit(1)
-            }
-
-            Text(event.message)
-                .font(.system(size: compact ? 8 : 10, weight: .medium, design: .rounded))
-                .foregroundStyle(WidgetPalette.textSecondary)
-                .lineLimit(compact ? 2 : 3)
-                .minimumScaleFactor(0.82)
-
-            Text(DateFormatting.relativeTimeChinese(from: event.occurredAt) ?? "近期")
-                .font(.system(size: compact ? 7 : 8, weight: .medium, design: .rounded))
-                .foregroundStyle(WidgetPalette.textMuted)
-        }
-        .padding(.horizontal, compact ? 8 : 9)
-        .padding(.vertical, compact ? 6 : 8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(WidgetCardBackground(emphasis: event.priority <= 1 ? 0.1 : 0.05))
-    }
-}
-
 private struct WidgetChromeHeader: View {
     let trailingText: String?
     var compactTitle: Bool = false
@@ -455,7 +410,7 @@ private struct WidgetSummaryStrip: View {
         HStack(spacing: compact ? 4 : 6) {
             WidgetMetricCell(label: "仓库", value: "\(summary.totalRepositories)", compact: compact)
             WidgetMetricCell(label: "有改动", value: "\(summary.changedRepositories)", compact: compact)
-            WidgetMetricCell(label: "改动", value: "\(summary.totalChangedFiles)", compact: compact)
+            WidgetMetricCell(label: "文件", value: "\(summary.totalChangedFiles)", compact: compact)
             if summary.errorRepositories > 0 {
                 WidgetMetricCell(label: "待确认", value: "\(summary.errorRepositories)", tone: .warning, compact: compact)
             }
@@ -555,7 +510,7 @@ private struct WidgetRepositoryRow: View {
     var density: WidgetRepositoryBoard.Density = .regular
 
     private var readiness: CommitReadinessAssessment {
-        item.commitReadiness
+        item.decision.commitReadiness
     }
 
     var body: some View {
@@ -799,7 +754,7 @@ private struct WidgetSmallRepositoryFocus: View {
     private var shortReadinessLabel: String {
         switch item.resolvedDataSource {
         case .current:
-            return item.commitReadiness.widgetShortHint
+            return item.decision.widgetSummary
         case .lastSuccessful, .unknown:
             return item.activityLabel
         }
@@ -1006,10 +961,6 @@ private struct WidgetDataSourceBadge: View {
 private struct SmallGlanceWidgetView: View {
     let entry: WidgetEntry
 
-    private var prioritizedItems: [ActivityTimelineItem] {
-        WidgetRepositoryPriorityBuilder.build(from: entry.snapshot)
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             WidgetChromeHeader(trailingText: nil, compactTitle: true)
@@ -1072,16 +1023,19 @@ private struct SmallGlanceWidgetView: View {
 
     @ViewBuilder
     private var readyContent: some View {
-        if let event = entry.topActivityEvent {
-            WidgetActivityEventCard(event: event, compact: true)
-        } else if prioritizedItems.isEmpty {
+        switch WidgetPrimaryContentSelectionBuilder.build(
+            feed: entry.feed,
+            recentActivityEvents: entry.snapshot?.recentActivityEvents,
+            family: .small
+        ) {
+        case .empty:
             shortState(
                 title: "没有找到仓库",
                 detail: "检查扫描目录后重新刷新",
                 icon: "folder"
             )
-        } else {
-            WidgetSmallRepositoryFocus(item: prioritizedItems[0])
+        case .repositories(let items):
+            WidgetSmallRepositoryFocus(item: items[0])
         }
     }
 
@@ -1113,10 +1067,6 @@ private struct SmallGlanceWidgetView: View {
 private struct MediumGlanceWidgetView: View {
     let entry: WidgetEntry
 
-    private var prioritizedItems: [ActivityTimelineItem] {
-        WidgetRepositoryPriorityBuilder.build(from: entry.snapshot)
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             WidgetChromeHeader(trailingText: headerTrailingText)
@@ -1132,47 +1082,11 @@ private struct MediumGlanceWidgetView: View {
     }
 
     private var headerTrailingText: String? {
-        if case .ready = entry.loadState,
-           let trustAssessment = entry.trustAssessment,
-           trustAssessment.state != .fresh {
-            switch trustAssessment.state {
-            case .stale, .expired:
-                return WidgetRefreshCopy.waitingRefreshTitle
-            case .unknown, .failed:
-                return WidgetRefreshCopy.pendingConfirmationTitle
-            case .fresh:
-                break
-            }
-        }
-
-        guard
-            case .ready = entry.loadState,
-            entry.trustAssessment?.state == .fresh,
-            let summary = entry.snapshot?.scanSummary
-        else {
-            return nil
-        }
-
-        if summary.totalRepositories == 0 {
-            return "没有仓库"
-        }
-
-        if summary.errorRepositories > 0 {
-            if summary.changedRepositories > 0 {
-                return "\(summary.errorRepositories) 待确认 · \(summary.changedRepositories) 有改动"
-            }
-            return "\(summary.errorRepositories) 个状态待确认"
-        }
-
-        if summary.changedRepositories == 0 {
-            return "全部干净"
-        }
-
-        if summary.totalChangedFiles > 0 {
-            return "\(summary.changedRepositories) 个活跃仓库 · \(summary.totalChangedFiles) 个文件"
-        }
-
-        return "\(summary.changedRepositories) 个活跃仓库"
+        guard case .ready = entry.loadState else { return nil }
+        return WidgetPrioritySummaryBuilder.build(
+            feed: entry.feed,
+            trustAssessment: entry.trustAssessment
+        ).message
     }
 
     @ViewBuilder
@@ -1225,25 +1139,23 @@ private struct MediumGlanceWidgetView: View {
 
     @ViewBuilder
     private var readyContent: some View {
-        if let event = entry.topActivityEvent {
-            VStack(alignment: .leading, spacing: 4) {
-                if let summary = entry.snapshot?.scanSummary {
-                    WidgetSummaryStrip(summary: summary, compact: true)
-                }
-                WidgetActivityEventCard(event: event, compact: true)
-            }
-        } else if prioritizedItems.isEmpty {
+        switch WidgetPrimaryContentSelectionBuilder.build(
+            feed: entry.feed,
+            recentActivityEvents: entry.snapshot?.recentActivityEvents,
+            family: .medium
+        ) {
+        case .empty:
             shortState(
                 title: "没有找到仓库",
                 detail: "检查扫描目录后重新刷新",
                 icon: "folder"
             )
-        } else {
+        case .repositories(let items):
             VStack(alignment: .leading, spacing: 4) {
                 if let summary = entry.snapshot?.scanSummary {
                     WidgetSummaryStrip(summary: summary, compact: true)
                 }
-                WidgetRepositoryBoard(items: prioritizedItems, limit: 2, density: .panel)
+                WidgetRepositoryBoard(items: items, limit: items.count, density: .panel)
             }
         }
     }
@@ -1281,10 +1193,6 @@ private struct MediumGlanceWidgetView: View {
 private struct LargeGlanceWidgetView: View {
     let entry: WidgetEntry
 
-    private var prioritizedItems: [ActivityTimelineItem] {
-        WidgetRepositoryPriorityBuilder.build(from: entry.snapshot)
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             WidgetChromeHeader(trailingText: headerTrailingText)
@@ -1300,43 +1208,11 @@ private struct LargeGlanceWidgetView: View {
     }
 
     private var headerTrailingText: String? {
-        if case .ready = entry.loadState,
-           let trustAssessment = entry.trustAssessment,
-           trustAssessment.state != .fresh {
-            switch trustAssessment.state {
-            case .stale, .expired:
-                return WidgetRefreshCopy.waitingRefreshTitle
-            case .unknown, .failed:
-                return WidgetRefreshCopy.pendingConfirmationTitle
-            case .fresh:
-                break
-            }
-        }
-
-        guard
-            case .ready = entry.loadState,
-            entry.trustAssessment?.state == .fresh,
-            let summary = entry.snapshot?.scanSummary
-        else {
-            return nil
-        }
-
-        if summary.totalRepositories == 0 {
-            return "没有仓库"
-        }
-
-        if summary.errorRepositories > 0 {
-            if summary.changedRepositories > 0 {
-                return "\(summary.errorRepositories) 待确认 · \(summary.changedRepositories) 有改动"
-            }
-            return "\(summary.errorRepositories) 个状态待确认"
-        }
-
-        if summary.changedRepositories == 0 {
-            return "全部干净"
-        }
-
-        return "\(summary.changedRepositories) 个有改动仓库"
+        guard case .ready = entry.loadState else { return nil }
+        return WidgetPrioritySummaryBuilder.build(
+            feed: entry.feed,
+            trustAssessment: entry.trustAssessment
+        ).message
     }
 
     @ViewBuilder
@@ -1389,25 +1265,23 @@ private struct LargeGlanceWidgetView: View {
 
     @ViewBuilder
     private var readyContent: some View {
-        if let event = entry.topActivityEvent {
-            VStack(alignment: .leading, spacing: 5) {
-                if let summary = entry.snapshot?.scanSummary {
-                    WidgetSummaryStrip(summary: summary, compact: true)
-                }
-                WidgetActivityEventCard(event: event)
-            }
-        } else if prioritizedItems.isEmpty {
+        switch WidgetPrimaryContentSelectionBuilder.build(
+            feed: entry.feed,
+            recentActivityEvents: entry.snapshot?.recentActivityEvents,
+            family: .large
+        ) {
+        case .empty:
             shortState(
                 title: "没有找到仓库",
                 detail: "检查扫描目录后重新刷新",
                 icon: "folder"
             )
-        } else {
+        case .repositories(let items):
             VStack(alignment: .leading, spacing: 5) {
                 if let summary = entry.snapshot?.scanSummary {
                     WidgetSummaryStrip(summary: summary, compact: true)
                 }
-                WidgetRepositoryBoard(items: prioritizedItems, limit: 3, density: .compact)
+                WidgetRepositoryBoard(items: items, limit: items.count, density: .compact)
             }
         }
     }
@@ -1615,7 +1489,7 @@ private struct SimpleSmallGlanceWidgetView: View {
     let entry: WidgetEntry
 
     private var prioritizedItems: [ActivityTimelineItem] {
-        WidgetRepositoryPriorityBuilder.build(from: entry.snapshot)
+        entry.feed.items
     }
 
     var body: some View {
@@ -1664,7 +1538,7 @@ private struct SimpleMediumGlanceWidgetView: View {
     let entry: WidgetEntry
 
     private var prioritizedItems: [ActivityTimelineItem] {
-        WidgetRepositoryPriorityBuilder.build(from: entry.snapshot)
+        entry.feed.items
     }
 
     var body: some View {
@@ -1736,7 +1610,7 @@ private struct SimpleLargeGlanceWidgetView: View {
     let entry: WidgetEntry
 
     private var prioritizedItems: [ActivityTimelineItem] {
-        WidgetRepositoryPriorityBuilder.build(from: entry.snapshot)
+        entry.feed.items
     }
 
     var body: some View {
@@ -1943,7 +1817,7 @@ private extension ActivityTimelineItem {
     var widgetReadinessOrSourceHint: String {
         switch resolvedDataSource {
         case .current:
-            return commitReadiness.widgetShortHint
+            return decision.widgetSummary
         case .lastSuccessful, .unknown:
             return dataSourcePresentation.detail
         }

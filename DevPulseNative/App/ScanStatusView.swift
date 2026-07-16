@@ -13,12 +13,12 @@ struct ScanStatusView: View {
                     systemImage: "folder"
                 )
                 StatBadge(
-                    label: "活跃",
+                    label: "有改动",
                     value: "\(scheduler.lastResult.scanSummary.changedRepositories)",
                     systemImage: "doc.badge.ellipsis"
                 )
                 StatBadge(
-                    label: "改动",
+                    label: "文件",
                     value: "\(scheduler.lastResult.scanSummary.totalChangedFiles)",
                     systemImage: "text.document"
                 )
