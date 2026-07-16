@@ -35,13 +35,28 @@ private enum WidgetSnapshotStore {
                 // Match the App startup migration path so legacy schema-v1
                 // snapshots get inferred provenance and a safe summary before
                 // any Widget family renders them.
-                return .success(RepositoryIdentity.normalize(snapshot))
+                let normalized = RepositoryIdentity.normalize(snapshot)
+                return .success(RepositoryScope.filtering(
+                    normalized,
+                    excluding: ignoredRepositoryPaths()
+                ))
             } catch {
                 return .failure(.decodeFailed(path: snapshotURL.path, reason: error.localizedDescription))
             }
         } catch {
             return .failure(.readFailed(path: snapshotURL.path, reason: error.localizedDescription))
         }
+    }
+
+    private static func ignoredRepositoryPaths() -> Set<String> {
+        let defaults = UserDefaults(suiteName: appGroupIdentifier)
+        if let data = defaults?.data(forKey: "ignored_repositories_v1_json"),
+           let archive = try? JSONDecoder().decode(IgnoredRepositoryArchive.self, from: data) {
+            return RepositoryScope.canonicalPathSet(archive.paths)
+        }
+        return RepositoryScope.canonicalPathSet(
+            defaults?.stringArray(forKey: "ignored_repository_paths") ?? []
+        )
     }
 }
 

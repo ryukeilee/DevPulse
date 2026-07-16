@@ -10,6 +10,7 @@ private enum RepositoryListMetrics {
 struct RepositoryListView: View {
     @EnvironmentObject var scheduler: ScanScheduler
     @State private var selectedRepository: RepositorySnapshot?
+    @State private var pendingIgnoreRepository: RepositorySnapshot?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,6 +33,13 @@ struct RepositoryListView: View {
                                     Button(repo.isPinned ? "取消置顶" : "置顶") {
                                         scheduler.togglePin(repoID: repo.id)
                                     }
+
+                                    Divider()
+
+                                    Button("忽略此仓库", role: .destructive) {
+                                        pendingIgnoreRepository = repo
+                                    }
+                                    .help("从扫描结果中忽略此仓库")
                                 }
 
                             if repo.id != scheduler.lastResult.repositories.last?.id {
@@ -64,6 +72,19 @@ struct RepositoryListView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(item: $selectedRepository) { repository in
             RepositoryDetailView(repository: repository)
+        }
+        .alert(item: $pendingIgnoreRepository) { repository in
+            Alert(
+                title: Text("忽略 \(repository.name)？"),
+                message: Text("确认后，DevPulse 将不再扫描或显示此仓库；可在 Settings 中恢复。"),
+                primaryButton: .destructive(Text("忽略")) {
+                    scheduler.ignoreRepository(path: repository.path)
+                    if selectedRepository?.id == repository.id {
+                        selectedRepository = nil
+                    }
+                },
+                secondaryButton: .cancel(Text("取消"))
+            )
         }
     }
 

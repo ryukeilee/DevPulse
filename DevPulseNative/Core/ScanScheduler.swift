@@ -20,6 +20,7 @@ struct ScanExecutionRequest: Sendable {
     let roots: [String]
     let rootsSignature: String
     let knownRepositoryPaths: [String]
+    let ignoredRepositoryPaths: Set<String>
     let forceRepositoryDiscovery: Bool
     let previousSnapshot: AppGroupData?
 
@@ -27,12 +28,14 @@ struct ScanExecutionRequest: Sendable {
          roots: [String],
          rootsSignature: String,
          knownRepositoryPaths: [String],
+         ignoredRepositoryPaths: Set<String> = [],
          forceRepositoryDiscovery: Bool,
          previousSnapshot: AppGroupData? = nil) {
         self.config = config
         self.roots = roots
         self.rootsSignature = rootsSignature
         self.knownRepositoryPaths = knownRepositoryPaths
+        self.ignoredRepositoryPaths = ignoredRepositoryPaths
         self.forceRepositoryDiscovery = forceRepositoryDiscovery
         self.previousSnapshot = previousSnapshot
     }
@@ -53,6 +56,13 @@ struct ScanRefreshCoordinator {
     @discardableResult
     mutating func request(signature: String, forceRepositoryDiscovery: Bool) -> Bool {
         if let running, signature == running.signature {
+            if let scheduled,
+               scheduled.signature == signature,
+               scheduled.forceRepositoryDiscovery {
+                // A normal refresh must not erase a forced rediscovery that
+                // was queued to apply a scope mutation (for example restore).
+                return false
+            }
             scheduled = nil
             return false
         }
@@ -167,7 +177,9 @@ enum ScanSchedulerPolicy {
 
     static func scanRootsSignature(_ scanRoots: [String]) -> String {
         scanRoots
-            .map(ScanLocationProvider.expandTilde)
+            .map {
+                ScanLocationProvider.canonicalExistingFilePath($0, resolveBuiltIn: true)
+            }
             .sorted()
             .joined(separator: "\n")
     }
@@ -330,6 +342,7 @@ enum ScanSchedulerPolicy {
             && previous.lastCommitSummary == next.lastCommitSummary
             && previous.lastCommitMetadataAvailable == next.lastCommitMetadataAvailable
             && previous.lastActivityAt == next.lastActivityAt
+            && previous.unavailableSince == next.unavailableSince
             && previous.errorMessage == next.errorMessage
             && previous.isPinned == next.isPinned
     }
@@ -449,6 +462,7 @@ final class ScanScheduler: ObservableObject {
     @Published var diagnostics = DiagnosticsSnapshot()
     @Published var diagnosticEvents: [DiagnosticEvent] = []
     @Published private(set) var activityEvents: [ActivityEvent] = []
+    @Published private(set) var ignoredRepositories: [IgnoredRepository] = []
     @Published var scanIntervalSeconds: TimeInterval = 300
     @Published var powerState: String = "normal"
 
@@ -466,6 +480,8 @@ final class ScanScheduler: ObservableObject {
     private let scanExecution: ScanExecution
     private let activityEventStore: ActivityEventStore?
     private var configLoadedFromPersistence = false
+    private var activityRepositoryIDMigrations: [String: String] = [:]
+    private var requiresStartupScopeRefresh = false
 
     // Config persistence
     private let configKey = "scan_config_json"
@@ -476,6 +492,8 @@ final class ScanScheduler: ObservableObject {
     private let lastRepositoryDiscoveryAtKey = "last_repository_discovery_at"
     private let lastDiscoveredRepositoryPathsKey = "last_discovered_repository_paths"
     private let lastRepositoryDiscoveryScanRootsKey = "last_repository_discovery_scan_roots"
+    private let ignoredRepositoriesKey = "ignored_repositories_v1_json"
+    private let legacyIgnoredRepositoryPathsKey = "ignored_repository_paths"
 
     // MARK: - Adaptive interval constants
 
@@ -502,6 +520,10 @@ final class ScanScheduler: ObservableObject {
         }
     }
 
+    private var ignoredRepositoryPaths: Set<String> {
+        RepositoryScope.canonicalPathSet(ignoredRepositories.map(\.path))
+    }
+
     init(commandMode: Bool = false,
          activityEventStore: ActivityEventStore? = nil,
          scanExecution: @escaping ScanExecution = { request in
@@ -509,6 +531,7 @@ final class ScanScheduler: ObservableObject {
             config: request.config,
             scanRoots: request.roots,
             knownRepositoryPaths: request.knownRepositoryPaths,
+            ignoredRepositoryPaths: request.ignoredRepositoryPaths,
             forceRepositoryDiscovery: request.forceRepositoryDiscovery,
             previousSnapshot: request.previousSnapshot
         )
@@ -524,6 +547,7 @@ final class ScanScheduler: ObservableObject {
 
         loadConfig()
         loadScanDirectories()
+        loadIgnoredRepositories()
         syncStoreInspection()
         appGroupAvailable = AppGroupStore.isAvailable
         gitAvailable = ProcessRunner.isGitAvailable()
@@ -635,6 +659,7 @@ final class ScanScheduler: ObservableObject {
             roots: currentScanRoots.roots,
             rootsSignature: currentScanRootsSignature,
             knownRepositoryPaths: knownRepositoryPaths,
+            ignoredRepositoryPaths: ignoredRepositoryPaths,
             forceRepositoryDiscovery: shouldRediscoverRepositories,
             previousSnapshot: lastResult
         )
@@ -660,8 +685,10 @@ final class ScanScheduler: ObservableObject {
 
                 if let failureMessage = self.scanFailureMessage(
                     for: result.data,
-                    scanRoots: currentScanRoots
+                    scanRoots: currentScanRoots,
+                    warnings: result.warnings
                 ) {
+                    let previousSnapshot = self.lastResult
                     let combinedWarnings = self.summarizeWarnings(
                         result.warnings,
                         accessWarning: currentScanRoots.warning
@@ -674,10 +701,19 @@ final class ScanScheduler: ObservableObject {
                     self.warnings = [failureMessage] + combinedWarnings.filter { $0 != failureMessage }
                     self.diagnostics.validationIssues = self.warnings
                     self.recordEvent(.scanFailed, failureMessage)
+                    self.lastDiscoveredRepositoryPaths = result.discoveredRepositoryPaths
+                    if shouldRediscoverRepositories,
+                       GitRepositoryScanner.discoveryWasIncomplete(result.warnings) {
+                        self.lastRepositoryDiscoveryAt = nil
+                    }
 
                     self.persistRepositoryTrustFailure(
                         failureMessage,
                         fallbackSnapshot: result.data
+                    )
+                    self.cleanupRemovedRepositoryPins(
+                        previous: previousSnapshot,
+                        current: self.lastResult
                     )
                     self.triggerPendingWakeRefreshIfNeeded()
                     return
@@ -695,6 +731,10 @@ final class ScanScheduler: ObservableObject {
                     current: pinned,
                     observedAt: pinned.generatedAt
                 )
+                self.cleanupRemovedRepositoryPins(
+                    previous: previousSnapshot,
+                    current: recorded
+                )
                 let hadChanges = self.hadChanges(before: previousSnapshot, after: recorded)
 
                 self.lastResult = recorded
@@ -707,8 +747,12 @@ final class ScanScheduler: ObservableObject {
                 self.diagnostics.validationIssues = self.warnings
                 self.lastDiscoveredRepositoryPaths = result.discoveredRepositoryPaths
                 if shouldRediscoverRepositories {
-                    self.lastRepositoryDiscoveryAt = Date()
-                    self.lastRepositoryDiscoveryScanRootsSignature = currentScanRootsSignature
+                    if GitRepositoryScanner.discoveryWasIncomplete(result.warnings) {
+                        self.lastRepositoryDiscoveryAt = nil
+                    } else {
+                        self.lastRepositoryDiscoveryAt = Date()
+                        self.lastRepositoryDiscoveryScanRootsSignature = currentScanRootsSignature
+                    }
                 }
 
                 if self.warnings.isEmpty {
@@ -770,13 +814,16 @@ final class ScanScheduler: ObservableObject {
             config: currentConfig,
             scanRoots: currentScanRoots.roots,
             knownRepositoryPaths: nil,
+            ignoredRepositoryPaths: ignoredRepositoryPaths,
             forceRepositoryDiscovery: true
         )
 
         if let failureMessage = scanFailureMessage(
             for: result.data,
-            scanRoots: currentScanRoots
+            scanRoots: currentScanRoots,
+            warnings: result.warnings
         ) {
+            let previousSnapshot = lastResult
             let combinedWarnings = summarizeWarnings(
                 result.warnings,
                 accessWarning: currentScanRoots.warning
@@ -790,10 +837,13 @@ final class ScanScheduler: ObservableObject {
             diagnostics.validationIssues = warnings
             diagnostics.nextSteps = suggestedNextSteps(from: warnings)
             recordEvent(.scanFailed, "Self-check failed: \(failureMessage)")
+            lastDiscoveredRepositoryPaths = result.discoveredRepositoryPaths
+            lastRepositoryDiscoveryAt = nil
             persistRepositoryTrustFailure(
                 failureMessage,
                 fallbackSnapshot: result.data
             )
+            cleanupRemovedRepositoryPins(previous: previousSnapshot, current: lastResult)
             return makeSelfCheckReport()
         }
 
@@ -809,6 +859,7 @@ final class ScanScheduler: ObservableObject {
             current: pinned,
             observedAt: pinned.generatedAt
         )
+        cleanupRemovedRepositoryPins(previous: previousSnapshot, current: recorded)
 
         lastResult = recorded
         lastScanAt = DateFormatting.date(from: recorded.generatedAt) ?? Date()
@@ -818,6 +869,15 @@ final class ScanScheduler: ObservableObject {
         refreshFailureMessage = nil
         scanRootAccessWarning = currentScanRoots.warning
         diagnostics.validationIssues = warnings
+        lastDiscoveredRepositoryPaths = result.discoveredRepositoryPaths
+        if GitRepositoryScanner.discoveryWasIncomplete(result.warnings) {
+            lastRepositoryDiscoveryAt = nil
+        } else {
+            lastRepositoryDiscoveryAt = Date()
+            lastRepositoryDiscoveryScanRootsSignature = ScanSchedulerPolicy.scanRootsSignature(
+                currentScanRoots.roots
+            )
+        }
 
         syncSharedSnapshot(from: recorded, previousSnapshot: previousSnapshot, reason: "self-check")
         recordEvent(.scanSucceeded, "Self-check refreshed \(recorded.scanSummary.totalRepositories) repos")
@@ -907,12 +967,23 @@ final class ScanScheduler: ObservableObject {
         let enabledBuiltInRoots = ScanLocationProvider.builtInLocations
             .map(ScanLocationProvider.expandTilde)
             .filter { scanLocationConfiguration.enabledBuiltInPaths.contains($0) }
-            .filter { isAccessibleScanRoot($0) && !isAppContainerPath($0) }
         let configuredDirectories = scanLocationConfiguration.customDirectories
 
-        var accessibleRoots = enabledBuiltInRoots
+        var configuredRoots: [String] = []
         var inaccessibleCount = 0
         var containerPathCount = 0
+
+        for path in enabledBuiltInRoots {
+            let normalizedPath = ScanLocationProvider.canonicalExistingFilePath(path)
+            guard !isAppContainerPath(normalizedPath) else {
+                containerPathCount += 1
+                continue
+            }
+            if !isAccessibleScanRoot(normalizedPath) {
+                inaccessibleCount += 1
+            }
+            configuredRoots.append(normalizedPath)
+        }
 
         for directory in configuredDirectories {
             if let url = resolvedURL(for: directory) {
@@ -921,11 +992,10 @@ final class ScanScheduler: ObservableObject {
                     containerPathCount += 1
                     continue
                 }
-                guard isAccessibleScanRoot(path) else {
+                if !isAccessibleScanRoot(path) {
                     inaccessibleCount += 1
-                    continue
                 }
-                accessibleRoots.append(path)
+                configuredRoots.append(path)
                 continue
             }
 
@@ -934,15 +1004,13 @@ final class ScanScheduler: ObservableObject {
                 containerPathCount += 1
                 continue
             }
-            guard isAccessibleScanRoot(normalizedPath) else {
+            if !isAccessibleScanRoot(normalizedPath) {
                 inaccessibleCount += 1
-                continue
             }
-
-            accessibleRoots.append(normalizedPath)
+            configuredRoots.append(normalizedPath)
         }
 
-        let deduped = Array(Set(accessibleRoots)).sorted()
+        let deduped = Array(Set(configuredRoots)).sorted()
         let warning: String?
         if deduped.isEmpty {
             warning = "未发现可用的扫描目录。请在 Settings 启用一个默认目录或添加真实的仓库根目录后再刷新。"
@@ -965,7 +1033,22 @@ final class ScanScheduler: ObservableObject {
         guard let activityEventStore else { return }
         switch activityEventStore.load() {
         case .success(let result):
-            activityEvents = result.events
+            let migratedEvents = result.events.map { event in
+                guard let migratedID = activityRepositoryIDMigrations[event.repositoryID] else {
+                    return event
+                }
+                return event.remappingRepositoryID(to: migratedID)
+            }
+            let repositoryIDs = Set(lastResult.repositories.map(\.id))
+            let scopedEvents = activityEventStore.pruning(
+                migratedEvents,
+                keepingRepositoryIDs: repositoryIDs
+            )
+            activityEvents = scopedEvents
+            if scopedEvents != result.events,
+               case .failure(let error) = activityEventStore.save(scopedEvents) {
+                warnings.append(error.localizedDescription)
+            }
             switch result.recovery {
             case .none:
                 break
@@ -989,13 +1072,21 @@ final class ScanScheduler: ObservableObject {
             current: current,
             observedAt: observedAt
         )
-        let newEvents = ActivityEventDeduplicator.newEvents(
-            from: detected,
-            comparedTo: activityEvents
-        )
         let merger = activityEventStore
             ?? ActivityEventStore(fileURL: URL(fileURLWithPath: "/dev/null"))
-        let merged = merger.merging(existing: activityEvents, newEvents: newEvents)
+        let repositoryIDs = Set(current.repositories.map(\.id))
+        let scopedExisting = merger.pruning(
+            activityEvents,
+            keepingRepositoryIDs: repositoryIDs
+        )
+        let newEvents = ActivityEventDeduplicator.newEvents(
+            from: detected,
+            comparedTo: scopedExisting
+        )
+        let merged = merger.pruning(
+            merger.merging(existing: scopedExisting, newEvents: newEvents),
+            keepingRepositoryIDs: repositoryIDs
+        )
 
         if let activityEventStore {
             switch activityEventStore.save(merged) {
@@ -1025,34 +1116,49 @@ final class ScanScheduler: ObservableObject {
                 snapshot: snapshot,
                 pinnedIDs: pinnedRepoIDs
             )
+            activityRepositoryIDMigrations = migration.repositoryIDMigrations
             if migration.pinnedIDs != pinnedRepoIDs {
                 pinnedRepoIDs = migration.pinnedIDs
             }
 
             let migratedPinnedSnapshot = applyPins(migration.snapshot)
-            var restoredSnapshot = migration.snapshot
-            if migration.changed {
+            let scopeChanged = migratedPinnedSnapshot != snapshot
+            var restoredSnapshot = migratedPinnedSnapshot
+            var sharedSnapshot = snapshot
+            var startupWriteError: String?
+            if migration.changed || scopeChanged {
+                requiresStartupScopeRefresh = true
                 let written = migratedPinnedSnapshot.withWrittenAt(
                     snapshot.writtenAt ?? DateFormatting.nowISO()
                 )
-                if case .success(let verified) = AppGroupStore.write(written) {
+                switch AppGroupStore.write(written) {
+                case .success(let verified):
                     restoredSnapshot = verified
+                    sharedSnapshot = verified
+                    requiresStartupScopeRefresh = false
+                    if scopeChanged {
+                        AppGroupStore.reloadWidgets()
+                    }
+                case .failure(let error):
+                    startupWriteError = error.localizedDescription
                 }
             }
 
             let pinned = applyPins(restoredSnapshot)
             lastResult = pinned
             diagnostics.lastSnapshotStoreTrigger = "startup"
-            diagnostics.lastSnapshotStoreState = .restored
-            diagnostics.lastSnapshotStoreDetail = "启动时已恢复 \(restoredSnapshot.repositories.count) 个仓库的共享快照。"
-            diagnostics.sharedDataSnapshot = restoredSnapshot
+            diagnostics.lastSnapshotStoreState = startupWriteError == nil ? .restored : .failed
+            diagnostics.lastSnapshotStoreDetail = startupWriteError
+                ?? "启动时已恢复 \(restoredSnapshot.repositories.count) 个仓库的共享快照。"
+            diagnostics.sharedDataSnapshot = sharedSnapshot
             diagnostics.snapshotDecodable = true
             let now = Date()
             diagnostics.sharedDataReadAt = now
             diagnostics.sharedDataReadError = nil
-            diagnostics.lastGeneratedAt = restoredSnapshot.generatedAt
-            diagnostics.lastWrittenAt = restoredSnapshot.writtenAt
-            if let writtenAt = restoredSnapshot.writtenAt.flatMap(DateFormatting.date(from:)) {
+            diagnostics.sharedDataWriteError = startupWriteError
+            diagnostics.lastGeneratedAt = sharedSnapshot.generatedAt
+            diagnostics.lastWrittenAt = sharedSnapshot.writtenAt
+            if let writtenAt = sharedSnapshot.writtenAt.flatMap(DateFormatting.date(from:)) {
                 diagnostics.lastSharedWriteAt = writtenAt
             }
             let hasSuccessfulRepositoryData = pinned.repositories.contains {
@@ -1064,7 +1170,12 @@ final class ScanScheduler: ObservableObject {
                 diagnostics.lastScanAt = generatedAt
             }
             let retainedOnly = ScanSchedulerPolicy.allRepositoryDataUnavailable(pinned.repositories)
-            if retainedOnly {
+            if let startupWriteError {
+                let message = "启动时未能更新共享仓库范围"
+                refreshPhase = .failure
+                refreshFailureMessage = message
+                warnings = [message, startupWriteError]
+            } else if retainedOnly {
                 let message = "上次扫描未能刷新仓库，当前显示上次成功或未知数据"
                 refreshPhase = .failure
                 refreshFailureMessage = message
@@ -1074,8 +1185,8 @@ final class ScanScheduler: ObservableObject {
                 refreshFailureMessage = nil
                 warnings = []
             }
-            setWidgetReadableSnapshot(restoredSnapshot, readAt: now)
-            validateConsistency(expected: pinned, shared: restoredSnapshot, widget: diagnostics.widgetSnapshot, reason: "startup")
+            setWidgetReadableSnapshot(sharedSnapshot, readAt: now)
+            validateConsistency(expected: pinned, shared: sharedSnapshot, widget: diagnostics.widgetSnapshot, reason: "startup")
         case .failure(.snapshotMissing):
             diagnostics.snapshotDecodable = false
             diagnostics.sharedDataSnapshot = nil
@@ -1103,7 +1214,7 @@ final class ScanScheduler: ObservableObject {
         reason: String
     ) {
         let writtenAt = DateFormatting.nowISO()
-        let snapshotToWrite = snapshot.withWrittenAt(writtenAt)
+        let snapshotToWrite = applyPins(snapshot).withWrittenAt(writtenAt)
         let previousSnapshot = previousSnapshot ?? lastResult
         var verifiedSnapshot: AppGroupData?
         diagnostics.lastSnapshotStoreTrigger = reason
@@ -1221,7 +1332,10 @@ final class ScanScheduler: ObservableObject {
     }
 
     private func setWidgetReadableSnapshot(_ snapshot: AppGroupData, readAt: Date) {
-        diagnostics.widgetSnapshot = snapshot
+        diagnostics.widgetSnapshot = RepositoryScope.filtering(
+            snapshot,
+            excluding: ignoredRepositoryPaths
+        )
         diagnostics.widgetSnapshotReadAt = readAt
         diagnostics.widgetSnapshotReadError = nil
     }
@@ -1234,6 +1348,9 @@ final class ScanScheduler: ObservableObject {
 
         if !appGroupAvailable {
             issues.append("App Group is unavailable.")
+        }
+        if let sharedDataWriteError = diagnostics.sharedDataWriteError {
+            issues.append(sharedDataWriteError)
         }
 
         guard let shared else {
@@ -1249,7 +1366,7 @@ final class ScanScheduler: ObservableObject {
 
         if let widgetSnapshotReadError = diagnostics.widgetSnapshotReadError {
             issues.append(widgetSnapshotReadError)
-        } else if let widget, widget != shared {
+        } else if let widget, widget != shared, widget != expected {
             issues.append("Widget-facing snapshot differs from shared snapshot.")
         } else if widget == nil {
             issues.append("Widget-facing snapshot is unavailable.")
@@ -1287,6 +1404,13 @@ final class ScanScheduler: ObservableObject {
                 sawRootUnavailable = true
                 continue
             }
+            if warning == GitRepositoryScanner.incompleteDiscoveryWarning {
+                let message = "部分扫描目录暂时不可访问，仓库发现将在后续刷新中重试。"
+                if !summarized.contains(message) {
+                    summarized.append(message)
+                }
+                continue
+            }
             summarized.append(warning)
         }
 
@@ -1298,15 +1422,20 @@ final class ScanScheduler: ObservableObject {
     }
 
     private func scanFailureMessage(for data: AppGroupData,
-                                    scanRoots: (roots: [String], warning: String?)) -> String? {
+                                    scanRoots: (roots: [String], warning: String?),
+                                    warnings: [String]) -> String? {
         if scanRoots.roots.isEmpty {
+            let hasConfiguredRoots = !scanLocationConfiguration.enabledBuiltInPaths.isEmpty
+                || !scanLocationConfiguration.customDirectories.isEmpty
+            if !hasConfiguredRoots {
+                return nil
+            }
             return scanRoots.warning ?? "刷新失败，无法访问扫描目录"
         }
 
-        if !lastResult.repositories.isEmpty,
-           data.repositories.isEmpty,
-           let warning = scanRoots.warning {
-            return warning
+        if data.repositories.isEmpty,
+           GitRepositoryScanner.discoveryWasIncomplete(warnings) {
+            return "部分扫描目录暂时不可访问，未能确认仓库范围"
         }
 
         if ScanSchedulerPolicy.allRepositoryDataUnavailable(data.repositories) {
@@ -1325,22 +1454,31 @@ final class ScanScheduler: ObservableObject {
         // relaunch recovery. When no prior snapshot exists, keep the unknown
         // repositories from the failed attempt instead of dropping them.
         let previousSnapshot = lastResult
-        let failureBasis = previousSnapshot.repositories.isEmpty
-            ? fallbackSnapshot
-            : previousSnapshot
-        guard let failureBasis, !failureBasis.repositories.isEmpty else { return }
-
-        let retained = failureBasis.retainingLastSuccessfulRepositories(
-            attemptedAt: DateFormatting.nowISO(),
-            errorMessage: message
-        )
+        // The scanner's fallback repository set is authoritative for scope:
+        // it has already removed definitively deleted/moved/ignored paths and
+        // retained only temporarily unavailable repositories. Fall back to the
+        // previous set only for failures that happened before scanning began.
+        let failureBasis = fallbackSnapshot ?? previousSnapshot
+        let retained = failureBasis.repositories.isEmpty
+            ? failureBasis
+            : failureBasis.retainingLastSuccessfulRepositories(
+                attemptedAt: DateFormatting.nowISO(),
+                errorMessage: message
+            )
+        let previousHasRepositoryTrustState = !previousSnapshot.repositories.isEmpty
+            || !(previousSnapshot.repositoryUnavailableSinceByPath?.isEmpty ?? true)
         let sortedRetained = AppGroupData(
             schemaVersion: retained.schemaVersion,
-            generatedAt: retained.generatedAt,
-            writtenAt: retained.writtenAt,
+            generatedAt: previousHasRepositoryTrustState
+                ? previousSnapshot.generatedAt
+                : retained.generatedAt,
+            writtenAt: previousHasRepositoryTrustState
+                ? previousSnapshot.writtenAt
+                : retained.writtenAt,
             scanSummary: retained.scanSummary,
             repositories: RepositorySorter.sort(retained.repositories),
-            recentActivityEvents: retained.recentActivityEvents
+            recentActivityEvents: retained.recentActivityEvents,
+            repositoryUnavailableSinceByPath: retained.repositoryUnavailableSinceByPath
         )
         let pinnedRetained = applyPins(sortedRetained)
         lastResult = recordActivityEvents(
@@ -1496,8 +1634,12 @@ final class ScanScheduler: ObservableObject {
     // MARK: - Pins
 
     private func applyPins(_ data: AppGroupData) -> AppGroupData {
+        let scopedData = RepositoryScope.filtering(
+            data,
+            excluding: ignoredRepositoryPaths
+        )
         let migration = RepositoryIdentityMigration.migrate(
-            snapshot: data,
+            snapshot: scopedData,
             pinnedIDs: pinnedRepoIDs
         )
         if migration.pinnedIDs != pinnedRepoIDs {
@@ -1517,7 +1659,8 @@ final class ScanScheduler: ObservableObject {
             writtenAt: migration.snapshot.writtenAt,
             scanSummary: migration.snapshot.scanSummary,
             repositories: repos,
-            recentActivityEvents: migration.snapshot.recentActivityEvents
+            recentActivityEvents: migration.snapshot.recentActivityEvents,
+            repositoryUnavailableSinceByPath: migration.snapshot.repositoryUnavailableSinceByPath
         )
     }
 
@@ -1532,6 +1675,87 @@ final class ScanScheduler: ObservableObject {
         let updated = applyPins(lastResult)
         lastResult = updated
         syncSharedSnapshot(from: updated, reason: "pin toggle")
+    }
+
+    private func cleanupRemovedRepositoryPins(previous: AppGroupData, current: AppGroupData) {
+        let removedIDs = Set(previous.repositories.map(\.id))
+            .subtracting(current.repositories.map(\.id))
+        guard !removedIDs.isEmpty else { return }
+        var pins = pinnedRepoIDs
+        pins.subtract(removedIDs)
+        pinnedRepoIDs = pins
+    }
+
+    // MARK: - Ignored repositories
+
+    func ignoreRepository(path: String) {
+        let canonicalPath = RepositoryIdentity.canonicalPath(path)
+        guard !canonicalPath.isEmpty,
+              !ignoredRepositoryPaths.contains(canonicalPath) else { return }
+
+        let previousSnapshot = lastResult
+        ignoredRepositories = (ignoredRepositories + [IgnoredRepository(path: canonicalPath)])
+            .sorted { $0.displayPath.localizedStandardCompare($1.displayPath) == .orderedAscending }
+        persistIgnoredRepositories()
+
+        var pins = pinnedRepoIDs
+        pins.remove(RepositoryIdentity.id(for: canonicalPath))
+        pinnedRepoIDs = pins
+        lastDiscoveredRepositoryPaths = lastDiscoveredRepositoryPaths.filter {
+            RepositoryIdentity.canonicalPath($0) != canonicalPath
+        }
+
+        let scoped = applyPins(lastResult)
+        lastResult = recordActivityEvents(
+            previous: previousSnapshot,
+            current: scoped,
+            observedAt: DateFormatting.nowISO()
+        )
+        syncSharedSnapshot(
+            from: lastResult,
+            previousSnapshot: previousSnapshot,
+            reason: "repository ignored"
+        )
+        scanNow(forceRepositoryDiscovery: true)
+    }
+
+    func restoreIgnoredRepository(path: String) {
+        let canonicalPath = RepositoryIdentity.canonicalPath(path)
+        let restored = ignoredRepositories.filter {
+            RepositoryIdentity.canonicalPath($0.path) != canonicalPath
+        }
+        guard restored.count != ignoredRepositories.count else { return }
+
+        ignoredRepositories = restored
+        persistIgnoredRepositories()
+        // A forced discovery walks the existing roots, so users never need to
+        // re-add a scan directory when restoring a repository.
+        scanNow(forceRepositoryDiscovery: true)
+    }
+
+    private func loadIgnoredRepositories() {
+        let defaults = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)
+        let archive: IgnoredRepositoryArchive
+        if let data = defaults?.data(forKey: ignoredRepositoriesKey),
+           let decoded = try? JSONDecoder().decode(IgnoredRepositoryArchive.self, from: data) {
+            archive = decoded
+        } else {
+            archive = IgnoredRepositoryArchive(
+                paths: defaults?.stringArray(forKey: legacyIgnoredRepositoryPathsKey) ?? []
+            )
+        }
+
+        ignoredRepositories = archive.paths.map(IgnoredRepository.init(path:))
+            .sorted { $0.displayPath.localizedStandardCompare($1.displayPath) == .orderedAscending }
+        persistIgnoredRepositories()
+        defaults?.removeObject(forKey: legacyIgnoredRepositoryPathsKey)
+    }
+
+    private func persistIgnoredRepositories() {
+        let archive = IgnoredRepositoryArchive(paths: ignoredRepositories.map(\.path))
+        guard let data = try? JSONEncoder().encode(archive) else { return }
+        UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+            .set(data, forKey: ignoredRepositoriesKey)
     }
 
     // MARK: - Config persistence
@@ -1725,11 +1949,12 @@ final class ScanScheduler: ObservableObject {
             let normalizedPath = ScanLocationProvider.canonicalExistingFilePath(resolvedURL(for: directory)?.path ?? directory.path)
             if isAppContainerPath(normalizedPath) {
                 containerCount += 1
-            } else if isAccessibleScanRoot(normalizedPath) {
-                let bookmarkData = directory.bookmarkData ?? bookmarkData(for: URL(fileURLWithPath: normalizedPath))
-                sanitized.append(CustomScanDirectory(id: directory.id, path: normalizedPath, bookmarkData: bookmarkData))
             } else {
-                inaccessibleCount += 1
+                let accessible = isAccessibleScanRoot(normalizedPath)
+                if !accessible { inaccessibleCount += 1 }
+                let bookmarkData = directory.bookmarkData
+                    ?? (accessible ? bookmarkData(for: URL(fileURLWithPath: normalizedPath)) : nil)
+                sanitized.append(CustomScanDirectory(id: directory.id, path: normalizedPath, bookmarkData: bookmarkData))
             }
         }
 
@@ -1754,8 +1979,14 @@ final class ScanScheduler: ObservableObject {
             ) else {
                 return nil
             }
-            if stale, let refreshed = self.bookmarkData(for: url) {
-                updateBookmark(for: directory.path, with: refreshed)
+            let resolvedPath = ScanLocationProvider.canonicalExistingFilePath(url.path)
+            if stale || resolvedPath != RepositoryIdentity.canonicalPath(directory.path) {
+                let refreshed = self.bookmarkData(for: url) ?? bookmarkData
+                updateBookmark(
+                    for: directory.path,
+                    resolvedPath: resolvedPath,
+                    with: refreshed
+                )
             }
             return url
         }
@@ -1781,13 +2012,16 @@ final class ScanScheduler: ObservableObject {
         )
     }
 
-    private func updateBookmark(for path: String, with data: Data) {
+    private func updateBookmark(for path: String, resolvedPath: String, with data: Data) {
         let normalized = ScanLocationProvider.normalizePersistedPath(path)
         guard let index = scanLocationConfiguration.customDirectories.firstIndex(where: { $0.path == normalized }) else { return }
         scanLocationConfiguration.customDirectories[index] = CustomScanDirectory(
             id: scanLocationConfiguration.customDirectories[index].id,
-            path: normalized,
+            path: RepositoryIdentity.canonicalPath(resolvedPath),
             bookmarkData: data
+        )
+        scanLocationConfiguration.customDirectories = sanitizeScanDirectories(
+            scanLocationConfiguration.customDirectories
         )
         persistScanLocations()
     }
@@ -1797,6 +2031,7 @@ final class ScanScheduler: ObservableObject {
     }
 
     private var shouldRunImmediateStartupScan: Bool {
+        if requiresStartupScopeRefresh { return true }
         guard refreshPhase != .failure else { return true }
         guard !lastResult.repositories.isEmpty else { return true }
 
@@ -1821,12 +2056,22 @@ final class ScanScheduler: ObservableObject {
 
     private var lastDiscoveredRepositoryPaths: [String] {
         get {
-            UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
-                .stringArray(forKey: lastDiscoveredRepositoryPathsKey) ?? []
+            let defaults = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)
+            let raw = defaults?.stringArray(forKey: lastDiscoveredRepositoryPathsKey) ?? []
+            let normalized = Array(Set(raw.map(RepositoryIdentity.canonicalPath)))
+                .filter { !ignoredRepositoryPaths.contains($0) }
+                .sorted()
+            if normalized != raw {
+                defaults?.set(normalized, forKey: lastDiscoveredRepositoryPathsKey)
+            }
+            return normalized
         }
         set {
+            let normalized = Array(Set(newValue.map(RepositoryIdentity.canonicalPath)))
+                .filter { !ignoredRepositoryPaths.contains($0) }
+                .sorted()
             UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
-                .set(newValue, forKey: lastDiscoveredRepositoryPathsKey)
+                .set(normalized, forKey: lastDiscoveredRepositoryPathsKey)
         }
     }
 

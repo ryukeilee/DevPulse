@@ -7,6 +7,7 @@ struct SettingsView: View {
     @Binding var scrollTarget: SettingsScrollTarget?
     @State private var newCustomPath: String = ""
     @State private var expandedDefaultScanPaths: Set<String> = []
+    @State private var pendingIgnoreRepository: RepositorySnapshot?
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -14,6 +15,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     defaultScanLocationsSection
                     customScanDirectoriesSection
+                    repositoryScanScopeSection
                     launchAtLoginSection
                     diagnosticsSection
                         .id(SettingsScrollTarget.diagnostics)
@@ -26,6 +28,16 @@ struct SettingsView: View {
                 .onChange(of: scrollTarget) { _, _ in
                     scrollToTargetIfNeeded(using: proxy)
                 }
+            }
+            .alert(item: $pendingIgnoreRepository) { repository in
+                Alert(
+                    title: Text("忽略 \(repository.name)？"),
+                    message: Text("确认后，DevPulse 将不再扫描或显示此仓库；可在本页恢复。"),
+                    primaryButton: .destructive(Text("忽略")) {
+                        scheduler.ignoreRepository(path: repository.path)
+                    },
+                    secondaryButton: .cancel(Text("取消"))
+                )
             }
         }
     }
@@ -140,6 +152,146 @@ struct SettingsView: View {
             }
         }
         .settingsSectionSurface()
+    }
+
+    // MARK: - Repository scan scope
+
+    private var repositoryScanScopeSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            settingsSectionHeader(
+                title: "仓库扫描范围",
+                subtitle: "从当前扫描结果中忽略不需要关注的仓库，也可随时恢复。",
+                systemImage: "line.3.horizontal.decrease.circle"
+            )
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("当前扫描中的仓库")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    if scheduler.isScanning {
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityLabel("正在扫描")
+                    }
+                    Text("\(scheduler.lastResult.repositories.count) 个")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                if scheduler.lastResult.repositories.isEmpty {
+                    Text("最近一次扫描还没有可管理的仓库。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(Array(scheduler.lastResult.repositories.enumerated()), id: \.element.id) { index, repository in
+                            activeRepositoryScopeRow(repository)
+
+                            if index < scheduler.lastResult.repositories.count - 1 {
+                                Divider()
+                                    .overlay(DevPulseVisualStyle.separator)
+                                    .padding(.leading, 30)
+                            }
+                        }
+                    }
+                    .settingsInnerSurface()
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("已忽略仓库")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Text("\(scheduler.ignoredRepositories.count) 个")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                if scheduler.ignoredRepositories.isEmpty {
+                    Text("还没有忽略的仓库。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(Array(scheduler.ignoredRepositories.enumerated()), id: \.element.id) { index, ignored in
+                            ignoredRepositoryScopeRow(ignored)
+
+                            if index < scheduler.ignoredRepositories.count - 1 {
+                                Divider()
+                                    .overlay(DevPulseVisualStyle.separator)
+                                    .padding(.leading, 30)
+                            }
+                        }
+                    }
+                    .settingsInnerSurface()
+                }
+            }
+        }
+        .settingsSectionSurface()
+    }
+
+    private func activeRepositoryScopeRow(_ repository: RepositorySnapshot) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "shippingbox")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(repository.name)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                Text(RepositoryPathPresentation.compactPath(repository.path))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 8)
+
+            Button("忽略", role: .destructive) {
+                pendingIgnoreRepository = repository
+            }
+            .buttonStyle(SettingsCompactButtonStyle(tint: .orange))
+            .help("忽略此仓库")
+            .accessibilityLabel("忽略仓库：\(repository.name)")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+    }
+
+    private func ignoredRepositoryScopeRow(_ ignored: IgnoredRepository) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "eye.slash")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(ignored.name)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                Text(ignored.displayPath)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 8)
+
+            Button("恢复") {
+                scheduler.restoreIgnoredRepository(path: ignored.path)
+            }
+            .buttonStyle(SettingsCompactButtonStyle())
+            .help("恢复并立即重新扫描此仓库")
+            .accessibilityLabel("恢复仓库：\(ignored.name)")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
     }
 
     // MARK: - Launch At Login

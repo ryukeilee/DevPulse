@@ -97,6 +97,17 @@ struct CommitReadinessEngineTests {
 
         #expect(coordinator.completeCurrent() == .init(signature: "A", forceRepositoryDiscovery: true))
     }
+
+    @Test func scanRefreshCoordinatorDoesNotEraseQueuedForcedScopeRefreshWithNormalRequest() {
+        var coordinator = ScanRefreshCoordinator()
+        coordinator.request(signature: "A", forceRepositoryDiscovery: false)
+        _ = coordinator.beginNext()
+        coordinator.requestForced(signature: "A")
+        coordinator.request(signature: "A", forceRepositoryDiscovery: false)
+
+        #expect(coordinator.completeCurrent() == .init(signature: "A", forceRepositoryDiscovery: true))
+        #expect(coordinator.beginNext() == .init(signature: "A", forceRepositoryDiscovery: true))
+    }
     @Test func refreshStatusIsFreshWithinTenMinutes() {
         let now = Date(timeIntervalSince1970: 1_718_000_000)
         let snapshot = now.addingTimeInterval(-9 * 60)
@@ -2086,6 +2097,169 @@ struct CommitReadinessEngineTests {
         )
     }
 
+    @Test func gitScannerExcludesCanonicalIgnoredPathAndRestoresOnForcedDiscovery() async throws {
+        let root = try temporaryDirectory(named: "scanner-ignore-restore")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repository = root.appendingPathComponent("repository")
+        let alias = root.appendingPathComponent("repository-alias")
+        try createCommittedRepository(at: repository)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: repository)
+
+        let baseline = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true
+        )
+        #expect(baseline.data.repositories.count == 1)
+
+        let ignored = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            knownRepositoryPaths: baseline.discoveredRepositoryPaths,
+            ignoredRepositoryPaths: [alias.path],
+            previousSnapshot: baseline.data
+        )
+        #expect(ignored.data.repositories.isEmpty)
+        #expect(ignored.discoveredRepositoryPaths.isEmpty)
+        #expect(ignored.data.scanSummary.totalRepositories == 0)
+
+        let ignoredRediscovery = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            ignoredRepositoryPaths: [alias.path],
+            forceRepositoryDiscovery: true,
+            previousSnapshot: baseline.data
+        )
+        #expect(ignoredRediscovery.data.repositories.isEmpty)
+        #expect(ignoredRediscovery.discoveredRepositoryPaths.isEmpty)
+
+        let restored = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            ignoredRepositoryPaths: [],
+            forceRepositoryDiscovery: true,
+            previousSnapshot: ignored.data
+        )
+        #expect(restored.data.repositories.map(\.path) == [RepositoryIdentity.canonicalPath(repository.path)])
+    }
+
+    @Test func gitScannerInvalidatesKnownPathsAndCacheAfterRepositoryMoves() async throws {
+        let root = try temporaryDirectory(named: "scanner-move")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let original = root.appendingPathComponent("original")
+        let moved = root.appendingPathComponent("moved")
+        try createCommittedRepository(at: original)
+        let first = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true
+        )
+
+        try FileManager.default.moveItem(at: original, to: moved)
+        let rediscovered = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            knownRepositoryPaths: first.discoveredRepositoryPaths,
+            previousSnapshot: first.data
+        )
+
+        #expect(rediscovered.data.repositories.map(\.path) == [RepositoryIdentity.canonicalPath(moved.path)])
+        #expect(!rediscovered.data.repositories.contains { $0.path == RepositoryIdentity.canonicalPath(original.path) })
+    }
+
+    @Test func gitScannerDropsDeletedRepositoryAndRemovedGitDirectoryWithoutWaitingForCacheTTL() async throws {
+        let root = try temporaryDirectory(named: "scanner-delete")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repository = root.appendingPathComponent("repository")
+        try createCommittedRepository(at: repository)
+        let first = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true
+        )
+
+        try FileManager.default.removeItem(at: repository.appendingPathComponent(".git"))
+        let noLongerRepository = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            knownRepositoryPaths: first.discoveredRepositoryPaths,
+            previousSnapshot: first.data
+        )
+        #expect(noLongerRepository.data.repositories.isEmpty)
+        #expect(noLongerRepository.discoveredRepositoryPaths.isEmpty)
+
+        try FileManager.default.removeItem(at: repository)
+        let deleted = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            knownRepositoryPaths: first.discoveredRepositoryPaths,
+            previousSnapshot: first.data
+        )
+        #expect(deleted.data.repositories.isEmpty)
+        #expect(deleted.discoveredRepositoryPaths.isEmpty)
+    }
+
+    @Test func emptyScanRootsAreAStrictScopeBarrierForKnownRepositories() async throws {
+        let root = try temporaryDirectory(named: "scanner-empty-roots")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repository = root.appendingPathComponent("repository")
+        try createCommittedRepository(at: repository)
+        let first = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true
+        )
+
+        let empty = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [],
+            knownRepositoryPaths: first.discoveredRepositoryPaths,
+            previousSnapshot: first.data
+        )
+        #expect(empty.data.repositories.isEmpty)
+        #expect(empty.discoveredRepositoryPaths.isEmpty)
+        #expect(empty.data.scanSummary.totalRepositories == 0)
+    }
+
+    @Test func unreadableRootMarksRepositoryDiscoveryIncompleteInsteadOfSuccessfulEmpty() async throws {
+        let root = try temporaryDirectory(named: "scanner-unreadable-root")
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: root.path)
+
+        let result = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true
+        )
+
+        #expect(result.data.repositories.isEmpty)
+        #expect(GitRepositoryScanner.discoveryWasIncomplete(result.warnings))
+    }
+
+    @Test func unreadableRepositoryRetentionHasFiniteGraceWindow() throws {
+        let unavailableAt = try #require(DateFormatting.date(from: "2026-07-01T00:00:00Z"))
+        let retained = snapshot().retainingLastSuccessfulData(
+            attemptedAt: "2026-07-01T00:00:00Z",
+            errorMessage: "权限暂时不可用"
+        )
+
+        #expect(RepositoryRetentionPolicy.shouldRetain(
+            retained,
+            now: unavailableAt.addingTimeInterval(60 * 60)
+        ))
+        #expect(!RepositoryRetentionPolicy.shouldRetain(
+            retained,
+            now: unavailableAt.addingTimeInterval(8 * 24 * 60 * 60)
+        ))
+    }
+
     @Test func gitScannerFindsChangesAcrossManyRepositoriesWithinOneRefresh() async throws {
         let root = try temporaryDirectory(named: "scanner-many-repos")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -2204,12 +2378,15 @@ struct CommitReadinessEngineTests {
         )
         let baselineRepository = try #require(baseline.data.repositories.first)
         let gitDirectory = repository.appendingPathComponent(".git")
-        let heldGitDirectory = repository.appendingPathComponent(".git-held")
-        try FileManager.default.moveItem(at: gitDirectory, to: heldGitDirectory)
+        let originalPermissions = try #require(
+            (try FileManager.default.attributesOfItem(atPath: gitDirectory.path)[.posixPermissions] as? NSNumber)?.intValue
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: gitDirectory.path)
         defer {
-            if FileManager.default.fileExists(atPath: heldGitDirectory.path) {
-                try? FileManager.default.moveItem(at: heldGitDirectory, to: gitDirectory)
-            }
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: originalPermissions],
+                ofItemAtPath: gitDirectory.path
+            )
         }
 
         let firstFailure = await GitRepositoryScanner.scan(
@@ -2239,7 +2416,10 @@ struct CommitReadinessEngineTests {
         #expect(secondRetained.commitReadiness.level == .unknown)
         #expect(secondRetained.actionState.kind == .refreshRepositoryState)
 
-        try FileManager.default.moveItem(at: heldGitDirectory, to: gitDirectory)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: originalPermissions],
+            ofItemAtPath: gitDirectory.path
+        )
         let recovered = await GitRepositoryScanner.scan(
             config: testScanConfig,
             scanRoots: [root.path],
@@ -2251,6 +2431,84 @@ struct CommitReadinessEngineTests {
         #expect(recoveredRepository.resolvedDataSource == .current)
         #expect(recoveredRepository.commitReadiness.level == .ready)
         #expect(recoveredRepository.actionState.kind == .commitStagedChanges)
+    }
+
+    @Test func agedOutUnreadableRepositoryStaysHiddenUntilItRecovers() async throws {
+        let root = try temporaryDirectory(named: "scanner-aged-unavailable")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repository = root.appendingPathComponent("repo")
+        try createCommittedRepository(at: repository)
+        let baseline = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true
+        )
+        let baselineRepository = try #require(baseline.data.repositories.first)
+        let canonicalPath = RepositoryIdentity.canonicalPath(repository.path)
+        let unavailableSince = ISO8601DateFormatter().string(
+            from: Date().addingTimeInterval(-(8 * 24 * 60 * 60))
+        )
+        let agedFailure = baselineRepository.retainingLastSuccessfulData(
+            attemptedAt: unavailableSince,
+            errorMessage: "权限暂时不可用",
+            unavailableSince: unavailableSince
+        )
+        let agedPrevious = AppGroupData(
+            schemaVersion: baseline.data.schemaVersion,
+            generatedAt: baseline.data.generatedAt,
+            writtenAt: baseline.data.writtenAt,
+            scanSummary: ScanSummary.build(from: [agedFailure]),
+            repositories: [agedFailure],
+            repositoryUnavailableSinceByPath: [canonicalPath: unavailableSince]
+        )
+
+        let gitDirectory = repository.appendingPathComponent(".git")
+        let originalPermissions = try #require(
+            (try FileManager.default.attributesOfItem(atPath: gitDirectory.path)[.posixPermissions] as? NSNumber)?.intValue
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: gitDirectory.path)
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: originalPermissions],
+                ofItemAtPath: gitDirectory.path
+            )
+        }
+
+        let firstHidden = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            knownRepositoryPaths: baseline.discoveredRepositoryPaths,
+            previousSnapshot: agedPrevious
+        )
+        #expect(firstHidden.data.repositories.isEmpty)
+        #expect(firstHidden.data.repositoryUnavailableSinceByPath?[canonicalPath] == unavailableSince)
+        #expect(firstHidden.discoveredRepositoryPaths == [canonicalPath])
+
+        let secondHidden = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            knownRepositoryPaths: firstHidden.discoveredRepositoryPaths,
+            previousSnapshot: firstHidden.data
+        )
+        #expect(secondHidden.data.repositories.isEmpty)
+        #expect(secondHidden.data.repositoryUnavailableSinceByPath?[canonicalPath] == unavailableSince)
+        #expect(secondHidden.discoveredRepositoryPaths == [canonicalPath])
+
+        try FileManager.default.setAttributes(
+            [.posixPermissions: originalPermissions],
+            ofItemAtPath: gitDirectory.path
+        )
+        let recovered = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            knownRepositoryPaths: secondHidden.discoveredRepositoryPaths,
+            previousSnapshot: secondHidden.data
+        )
+
+        #expect(recovered.data.repositories.map(\.path) == [canonicalPath])
+        #expect(recovered.data.repositories.first?.resolvedDataSource == .current)
+        #expect(recovered.data.repositoryUnavailableSinceByPath == nil)
     }
 
     @Test func processRunnerStopsCancelledCommand() async throws {

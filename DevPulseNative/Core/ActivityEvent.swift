@@ -147,6 +147,18 @@ struct ActivityEvent: Codable, Identifiable, Equatable {
             priority: priority
         )
     }
+
+    func remappingRepositoryID(to repositoryID: String) -> ActivityEvent {
+        ActivityEvent(
+            id: id,
+            repositoryID: repositoryID,
+            repositoryName: repositoryName,
+            kind: kind,
+            occurredAt: occurredAt,
+            before: before,
+            after: after
+        )
+    }
 }
 
 /// Compact projection embedded in `repositories.json` for Widget consumption.
@@ -159,6 +171,18 @@ struct ActivityEventSummary: Codable, Identifiable, Equatable {
     let occurredAt: String
     let message: String
     let priority: Int
+
+    func remappingRepositoryID(to repositoryID: String) -> ActivityEventSummary {
+        ActivityEventSummary(
+            id: id,
+            repositoryID: repositoryID,
+            repositoryName: repositoryName,
+            kind: kind,
+            occurredAt: occurredAt,
+            message: message,
+            priority: priority
+        )
+    }
 }
 
 enum ActivityEventOrdering {
@@ -525,6 +549,13 @@ struct ActivityEventStore {
             byID[event.id] = event
         }
         return Array(ActivityEventOrdering.sorted(Array(byID.values)).prefix(capacity))
+    }
+
+    func pruning(
+        _ events: [ActivityEvent],
+        keepingRepositoryIDs repositoryIDs: Set<String>
+    ) -> [ActivityEvent] {
+        normalized(events.filter { repositoryIDs.contains($0.repositoryID) })
     }
 
     private func normalized(_ events: [ActivityEvent]) -> [ActivityEvent] {

@@ -121,6 +121,7 @@ enum RepositoryIdentity {
             lastCommitSummary: snapshot.lastCommitSummary,
             lastCommitMetadataAvailable: snapshot.lastCommitMetadataAvailable,
             lastActivityAt: snapshot.lastActivityAt,
+            unavailableSince: snapshot.unavailableSince,
             errorMessage: snapshot.errorMessage,
             isPinned: snapshot.isPinned
         )
@@ -128,8 +129,10 @@ enum RepositoryIdentity {
 
     static func normalize(_ data: AppGroupData) -> AppGroupData {
         var byPath: [String: RepositorySnapshot] = [:]
+        var normalizedIDsByLegacyID: [String: Set<String>] = [:]
         for repository in data.repositories {
             let normalized = normalize(repository)
+            normalizedIDsByLegacyID[repository.id, default: []].insert(normalized.id)
             if let existing = byPath[normalized.path] {
                 byPath[normalized.path] = mergeDuplicate(existing, normalized)
             } else {
@@ -146,13 +149,41 @@ enum RepositoryIdentity {
         }
 
         let summary = ScanSummary.build(from: repositories)
+        let repositoryIDs = Set(repositories.map(\.id))
+        var unavailableSinceByPath: [String: String] = [:]
+        for (rawPath, timestamp) in data.repositoryUnavailableSinceByPath ?? [:] {
+            let path = canonicalPath(rawPath)
+            guard !path.isEmpty else { continue }
+            if let existing = unavailableSinceByPath[path],
+               let existingDate = DateFormatting.date(from: existing),
+               let candidateDate = DateFormatting.date(from: timestamp),
+               existingDate <= candidateDate {
+                continue
+            }
+            unavailableSinceByPath[path] = timestamp
+        }
+        let recentActivityEvents = data.recentActivityEvents?.compactMap { event -> ActivityEventSummary? in
+            let normalizedID: String
+            if repositoryIDs.contains(event.repositoryID) {
+                normalizedID = event.repositoryID
+            } else if let candidates = normalizedIDsByLegacyID[event.repositoryID],
+                      candidates.count == 1,
+                      let migratedID = candidates.first,
+                      repositoryIDs.contains(migratedID) {
+                normalizedID = migratedID
+            } else {
+                return nil
+            }
+            return event.remappingRepositoryID(to: normalizedID)
+        }
         return AppGroupData(
             schemaVersion: data.schemaVersion,
             generatedAt: data.generatedAt,
             writtenAt: data.writtenAt,
             scanSummary: summary,
             repositories: repositories,
-            recentActivityEvents: data.recentActivityEvents
+            recentActivityEvents: recentActivityEvents,
+            repositoryUnavailableSinceByPath: unavailableSinceByPath.isEmpty ? nil : unavailableSinceByPath
         )
     }
 
@@ -186,6 +217,7 @@ enum RepositoryIdentity {
             lastCommitSummary: lhs.lastCommitSummary,
             lastCommitMetadataAvailable: lhs.lastCommitMetadataAvailable,
             lastActivityAt: lhs.lastActivityAt,
+            unavailableSince: lhs.unavailableSince,
             errorMessage: lhs.errorMessage,
             isPinned: true
         )
@@ -195,6 +227,7 @@ enum RepositoryIdentity {
 struct RepositoryIdentityMigrationResult: Equatable {
     let snapshot: AppGroupData
     let pinnedIDs: Set<String>
+    let repositoryIDMigrations: [String: String]
     let changed: Bool
 }
 
@@ -214,6 +247,11 @@ enum RepositoryIdentityMigration {
         }
 
         var migratedPins = pinsFromSnapshot
+        var repositoryIDMigrations: [String: String] = [:]
+        for (legacyID, paths) in pathsByLegacyID where paths.count == 1 {
+            guard let path = paths.first else { continue }
+            repositoryIDMigrations[legacyID] = RepositoryIdentity.id(for: path)
+        }
         for pinnedID in pinnedIDs {
             guard let paths = pathsByLegacyID[pinnedID], paths.count == 1,
                   let path = paths.first else {
@@ -236,14 +274,117 @@ enum RepositoryIdentityMigration {
                 copy.isPinned = migratedPins.contains(repository.id)
                 return copy
             },
-            recentActivityEvents: normalizedSnapshot.recentActivityEvents
+            recentActivityEvents: normalizedSnapshot.recentActivityEvents,
+            repositoryUnavailableSinceByPath: normalizedSnapshot.repositoryUnavailableSinceByPath
         )
 
         return RepositoryIdentityMigrationResult(
             snapshot: pinnedSnapshot,
             pinnedIDs: migratedPins,
+            repositoryIDMigrations: repositoryIDMigrations,
             changed: pinnedSnapshot != snapshot || migratedPins != pinnedIDs
         )
+    }
+}
+
+// MARK: - Repository scan scope
+
+struct IgnoredRepository: Identifiable, Equatable {
+    let path: String
+
+    var id: String { RepositoryIdentity.id(for: path) }
+    var name: String { (path as NSString).lastPathComponent }
+    var displayPath: String { RepositoryPathPresentation.compactPath(path) }
+}
+
+struct IgnoredRepositoryArchive: Codable, Equatable {
+    static let currentVersion = 1
+
+    let version: Int
+    let paths: [String]
+
+    init(version: Int = IgnoredRepositoryArchive.currentVersion, paths: [String]) {
+        self.version = version
+        self.paths = Self.normalizedPaths(paths)
+    }
+
+    init(from decoder: Decoder) throws {
+        if let legacyPaths = try? decoder.singleValueContainer().decode([String].self) {
+            self.init(paths: legacyPaths)
+            return
+        }
+
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let version = try container.decodeIfPresent(Int.self, forKey: .version)
+            ?? container.decodeIfPresent(Int.self, forKey: .schemaVersion)
+            ?? Self.currentVersion
+        let paths = try container.decodeIfPresent([String].self, forKey: .paths)
+            ?? container.decodeIfPresent([String].self, forKey: .ignoredRepositoryPaths)
+            ?? []
+        self.init(version: version, paths: paths)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(paths, forKey: .paths)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case schemaVersion
+        case paths
+        case ignoredRepositoryPaths
+    }
+
+    private static func normalizedPaths(_ paths: [String]) -> [String] {
+        Array(Set(paths.map(RepositoryIdentity.canonicalPath).filter { !$0.isEmpty })).sorted()
+    }
+}
+
+enum RepositoryPathPresentation {
+    static func compactPath(_ rawPath: String) -> String {
+        let path = RepositoryIdentity.canonicalPath(rawPath)
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        if RepositoryIdentity.isSameOrDescendantPath(path, of: home) {
+            return "~" + String(path.dropFirst(home.count))
+        }
+        return path
+    }
+}
+
+enum RepositoryScope {
+    static func canonicalPathSet(_ paths: some Sequence<String>) -> Set<String> {
+        Set(paths.map(RepositoryIdentity.canonicalPath).filter { !$0.isEmpty })
+    }
+
+    static func contains(_ path: String, in canonicalPaths: Set<String>) -> Bool {
+        canonicalPaths.contains(RepositoryIdentity.canonicalPath(path))
+    }
+
+    static func filtering(_ data: AppGroupData, excluding ignoredPaths: Set<String>) -> AppGroupData {
+        let canonicalIgnored = canonicalPathSet(ignoredPaths)
+        guard !canonicalIgnored.isEmpty else { return RepositoryIdentity.normalize(data) }
+
+        let repositories = data.repositories.filter {
+            !contains($0.path, in: canonicalIgnored)
+        }
+        let unavailability = data.repositoryUnavailableSinceByPath?.filter {
+            !contains($0.key, in: canonicalIgnored)
+        }
+        let repositoryIDs = Set(repositories.map { RepositoryIdentity.id(for: $0.path) })
+        let filtered = AppGroupData(
+            schemaVersion: data.schemaVersion,
+            generatedAt: data.generatedAt,
+            writtenAt: data.writtenAt,
+            scanSummary: ScanSummary.build(from: repositories),
+            repositories: repositories,
+            recentActivityEvents: data.recentActivityEvents?.filter {
+                repositoryIDs.contains($0.repositoryID)
+            },
+            repositoryUnavailableSinceByPath: unavailability
+        )
+        return RepositoryIdentity.normalize(filtered)
     }
 }
 
@@ -337,6 +478,7 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
     let lastCommitSummary: String?
     let lastCommitMetadataAvailable: Bool?
     var lastActivityAt: String?
+    let unavailableSince: String?
     let errorMessage: String?
     var isPinned: Bool
 
@@ -366,6 +508,7 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
          lastCommitSummary: String? = nil,
          lastCommitMetadataAvailable: Bool? = nil,
          lastActivityAt: String? = nil,
+         unavailableSince: String? = nil,
          errorMessage: String?,
          isPinned: Bool) {
         self.id = id
@@ -397,6 +540,7 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
         self.lastCommitSummary = lastCommitSummary
         self.lastCommitMetadataAvailable = lastCommitMetadataAvailable
         self.lastActivityAt = lastActivityAt
+        self.unavailableSince = unavailableSince
         self.errorMessage = errorMessage
         self.isPinned = isPinned
     }
@@ -428,6 +572,7 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
             && lhs.lastCommitSummary == rhs.lastCommitSummary
             && lhs.lastCommitMetadataAvailable == rhs.lastCommitMetadataAvailable
             && lhs.lastActivityAt == rhs.lastActivityAt
+            && lhs.unavailableSince == rhs.unavailableSince
             && lhs.errorMessage == rhs.errorMessage
             && lhs.isPinned == rhs.isPinned
     }
@@ -499,7 +644,8 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
     /// impossible for consumers to treat them as current observations.
     func retainingLastSuccessfulData(
         attemptedAt: String,
-        errorMessage: String
+        errorMessage: String,
+        unavailableSince fallbackUnavailableSince: String? = nil
     ) -> RepositorySnapshot {
         let successfulAt = resolvedLastSuccessfulScanAt
         let retainedSource: RepositoryDataSource = successfulAt == nil
@@ -533,9 +679,28 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
             lastCommitSummary: lastCommitSummary,
             lastCommitMetadataAvailable: false,
             lastActivityAt: lastActivityAt,
+            unavailableSince: unavailableSince ?? fallbackUnavailableSince ?? attemptedAt,
             errorMessage: errorMessage,
             isPinned: isPinned
         )
+    }
+}
+
+enum RepositoryRetentionPolicy {
+    /// Keep a temporarily unreadable repository long enough to survive normal
+    /// permission and sleep/wake interruptions, but never retain it forever.
+    static let unavailableRetentionInterval: TimeInterval = 7 * 24 * 60 * 60
+
+    static func shouldRetain(_ snapshot: RepositorySnapshot, now: Date = Date()) -> Bool {
+        guard snapshot.resolvedDataSource != .current || snapshot.status == .error else {
+            return true
+        }
+
+        let unavailableAt = snapshot.unavailableSince
+            .flatMap(DateFormatting.date(from:))
+            ?? DateFormatting.date(from: snapshot.lastScannedAt)
+        guard let unavailableAt else { return false }
+        return now.timeIntervalSince(unavailableAt) <= unavailableRetentionInterval
     }
 }
 
@@ -1473,19 +1638,25 @@ struct AppGroupData: Codable, Equatable {
     /// Small Widget-facing projection only. The full local event history is
     /// persisted separately and is never embedded in the shared snapshot.
     let recentActivityEvents: [ActivityEventSummary]?
+    /// Hidden discovery tombstones. They keep the first-unavailable time for
+    /// repositories that aged out of every presentation, allowing a recovered
+    /// path to return without periodically resurrecting an unreadable cache.
+    let repositoryUnavailableSinceByPath: [String: String]?
 
     init(schemaVersion: Int,
          generatedAt: String,
          writtenAt: String?,
          scanSummary: ScanSummary,
          repositories: [RepositorySnapshot],
-         recentActivityEvents: [ActivityEventSummary]? = nil) {
+         recentActivityEvents: [ActivityEventSummary]? = nil,
+         repositoryUnavailableSinceByPath: [String: String]? = nil) {
         self.schemaVersion = schemaVersion
         self.generatedAt = generatedAt
         self.writtenAt = writtenAt
         self.scanSummary = scanSummary
         self.repositories = repositories
         self.recentActivityEvents = recentActivityEvents
+        self.repositoryUnavailableSinceByPath = repositoryUnavailableSinceByPath
     }
 
     static func empty() -> AppGroupData {
@@ -1500,7 +1671,8 @@ struct AppGroupData: Codable, Equatable {
                 errorRepositories: 0
             ),
             repositories: [],
-            recentActivityEvents: nil
+            recentActivityEvents: nil,
+            repositoryUnavailableSinceByPath: nil
         )
     }
 
@@ -1511,7 +1683,8 @@ struct AppGroupData: Codable, Equatable {
             writtenAt: writtenAt,
             scanSummary: scanSummary,
             repositories: repositories,
-            recentActivityEvents: recentActivityEvents
+            recentActivityEvents: recentActivityEvents,
+            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath
         )
     }
 
@@ -1522,7 +1695,8 @@ struct AppGroupData: Codable, Equatable {
             writtenAt: writtenAt,
             scanSummary: scanSummary,
             repositories: repositories,
-            recentActivityEvents: events
+            recentActivityEvents: events,
+            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath
         )
     }
 
@@ -1548,7 +1722,8 @@ struct AppGroupData: Codable, Equatable {
                 totalRepositories: max(scanSummary.totalRepositories, retainedRepositories.count)
             ),
             repositories: retainedRepositories,
-            recentActivityEvents: recentActivityEvents
+            recentActivityEvents: recentActivityEvents,
+            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath
         )
     }
 }
@@ -3308,6 +3483,19 @@ struct ScanLocationConfiguration: Codable, Equatable {
         self.enabledBuiltInPaths = enabledBuiltInPaths
         self.customDirectories = customDirectories
     }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? Self.currentVersion
+        enabledBuiltInPaths = try container.decodeIfPresent(Set<String>.self, forKey: .enabledBuiltInPaths) ?? []
+        customDirectories = try container.decodeIfPresent([CustomScanDirectory].self, forKey: .customDirectories) ?? []
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case enabledBuiltInPaths
+        case customDirectories
+    }
 }
 
 struct CustomScanDirectory: Identifiable, Codable, Equatable {
@@ -3319,5 +3507,20 @@ struct CustomScanDirectory: Identifiable, Codable, Equatable {
         self.id = id
         self.path = path
         self.bookmarkData = bookmarkData
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedPath = try container.decode(String.self, forKey: .path)
+        path = decodedPath
+        id = try container.decodeIfPresent(String.self, forKey: .id)
+            ?? RepositoryIdentity.id(for: decodedPath)
+        bookmarkData = try container.decodeIfPresent(Data.self, forKey: .bookmarkData)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case path
+        case bookmarkData
     }
 }

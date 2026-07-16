@@ -29,6 +29,60 @@ struct ScanConfig: Codable, Sendable {
         slowReposkipSeconds: 600.0,
         activeRepoThreshold: 30
     )
+
+    init(enabledBuiltInPaths: Set<String>,
+         customPaths: [String],
+         maxDepth: Int,
+         changedPreviewLimit: Int,
+         maxConcurrentGitOps: Int,
+         gitCommandTimeout: TimeInterval,
+         scanTimeout: TimeInterval,
+         slowReposkipSeconds: TimeInterval,
+         activeRepoThreshold: Int) {
+        self.enabledBuiltInPaths = enabledBuiltInPaths
+        self.customPaths = customPaths
+        self.maxDepth = maxDepth
+        self.changedPreviewLimit = changedPreviewLimit
+        self.maxConcurrentGitOps = maxConcurrentGitOps
+        self.gitCommandTimeout = gitCommandTimeout
+        self.scanTimeout = scanTimeout
+        self.slowReposkipSeconds = slowReposkipSeconds
+        self.activeRepoThreshold = activeRepoThreshold
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = ScanConfig.default
+        enabledBuiltInPaths = try container.decodeIfPresent(Set<String>.self, forKey: .enabledBuiltInPaths)
+            ?? defaults.enabledBuiltInPaths
+        customPaths = try container.decodeIfPresent([String].self, forKey: .customPaths)
+            ?? defaults.customPaths
+        maxDepth = try container.decodeIfPresent(Int.self, forKey: .maxDepth) ?? defaults.maxDepth
+        changedPreviewLimit = try container.decodeIfPresent(Int.self, forKey: .changedPreviewLimit)
+            ?? defaults.changedPreviewLimit
+        maxConcurrentGitOps = try container.decodeIfPresent(Int.self, forKey: .maxConcurrentGitOps)
+            ?? defaults.maxConcurrentGitOps
+        gitCommandTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .gitCommandTimeout)
+            ?? defaults.gitCommandTimeout
+        scanTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .scanTimeout)
+            ?? defaults.scanTimeout
+        slowReposkipSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .slowReposkipSeconds)
+            ?? defaults.slowReposkipSeconds
+        activeRepoThreshold = try container.decodeIfPresent(Int.self, forKey: .activeRepoThreshold)
+            ?? defaults.activeRepoThreshold
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabledBuiltInPaths
+        case customPaths
+        case maxDepth
+        case changedPreviewLimit
+        case maxConcurrentGitOps
+        case gitCommandTimeout
+        case scanTimeout
+        case slowReposkipSeconds
+        case activeRepoThreshold
+    }
 }
 
 // MARK: - Slow repo tracker (actor for concurrency safety)
@@ -92,6 +146,27 @@ private actor RepositoryDiscoveryCache {
     }
 }
 
+private enum RepositoryPathAvailability: Equatable {
+    case repository
+    case missing
+    case notRepository
+    case unavailable
+}
+
+private struct RepositoryDiscoveryResult {
+    let readablePaths: [String]
+    let unavailablePaths: [String]
+
+    var retainedPaths: [String] {
+        Array(Set(readablePaths + unavailablePaths)).sorted()
+    }
+}
+
+private struct RepositoryMergeResult {
+    let snapshots: [RepositorySnapshot]
+    let unavailableSinceByPath: [String: String]
+}
+
 private struct SnapshotReadResult: Sendable {
     let index: Int
     let snapshot: RepositorySnapshot
@@ -104,6 +179,11 @@ enum GitRepositoryScanner {
     private static let slowTracker = SlowRepoTracker()
     private static let discoveryCache = RepositoryDiscoveryCache()
     private static let discoveryCacheTTL: TimeInterval = 10 * 60
+    static let incompleteDiscoveryWarning = "Repository discovery incomplete: one or more configured paths could not be read."
+
+    static func discoveryWasIncomplete(_ warnings: [String]) -> Bool {
+        warnings.contains(incompleteDiscoveryWarning)
+    }
 
     // MARK: - Public API
 
@@ -112,23 +192,29 @@ enum GitRepositoryScanner {
     static func scan(config: ScanConfig = .default,
                      scanRoots: [String]? = nil,
                      knownRepositoryPaths: [String]? = nil,
+                     ignoredRepositoryPaths: Set<String> = [],
                      forceRepositoryDiscovery: Bool = false,
                      previousSnapshot: AppGroupData? = nil) async -> (data: AppGroupData, warnings: [String], discoveredRepositoryPaths: [String]) {
         let startTime = Date()
         var warnings: [String] = []
         let previous = previousSnapshot ?? (try? AppGroupStore.read().get())
+        let previousUnavailableSinceByPath = previous?.repositoryUnavailableSinceByPath ?? [:]
+        let previousRepositoryPaths = (previous?.repositories.map(\.path) ?? [])
+            + Array(previousUnavailableSinceByPath.keys)
 
         // Phase 1: discover all git repositories
-        let discoveredPaths = await discoverRepositories(
+        let discovery = await discoverRepositories(
             config: config,
             scanRoots: scanRoots,
             knownRepositoryPaths: knownRepositoryPaths,
+            previousRepositoryPaths: previousRepositoryPaths,
+            ignoredRepositoryPaths: ignoredRepositoryPaths,
             forceRefresh: forceRepositoryDiscovery,
             warnings: &warnings
         )
         if Task.isCancelled {
             return partialResult(
-                discoveredPaths: discoveredPaths,
+                discovery: discovery,
                 snapshots: [],
                 previousSnapshot: previous,
                 warnings: &warnings
@@ -136,36 +222,38 @@ enum GitRepositoryScanner {
         }
         // Phase 2: read git status in batches
         let snapshots = await readSnapshotsBatched(
-            paths: discoveredPaths,
+            paths: discovery.readablePaths,
             config: config,
             warnings: &warnings,
             overallDeadline: startTime.addingTimeInterval(config.scanTimeout),
-            previousSnapshots: previous?.repositories ?? []
+            previousSnapshots: previous?.repositories ?? [],
+            previousUnavailableSinceByPath: previousUnavailableSinceByPath
         )
         if Task.isCancelled {
             warnings.append("Scan cancelled; returning the completed portion with prior snapshots retained.")
             return partialResult(
-                discoveredPaths: discoveredPaths,
+                discovery: discovery,
                 snapshots: snapshots,
                 previousSnapshot: previous,
                 warnings: &warnings
             )
         }
 
-        let completeSnapshots = mergeSnapshots(
+        let mergeResult = mergeSnapshots(
             snapshots,
-            discoveredPaths: discoveredPaths,
-            previousSnapshot: previous
+            discovery: discovery,
+            previousSnapshot: previous,
+            previousUnavailableSinceByPath: previousUnavailableSinceByPath
         )
 
         // Phase 3: sort
-        let sorted = RepositorySorter.sort(completeSnapshots)
+        let sorted = RepositorySorter.sort(mergeResult.snapshots)
 
         // Phase 4: build a summary from current observations only. Retained
         // values remain available for context but never count as current work.
         let summary = ScanSummary.build(
             from: sorted,
-            totalRepositories: discoveredPaths.count
+            totalRepositories: sorted.count
         )
 
         let result = AppGroupData(
@@ -173,27 +261,34 @@ enum GitRepositoryScanner {
             generatedAt: DateFormatting.nowISO(),
             writtenAt: nil,
             scanSummary: summary,
-            repositories: sorted
+            repositories: sorted,
+            repositoryUnavailableSinceByPath: mergeResult.unavailableSinceByPath.isEmpty
+                ? nil
+                : mergeResult.unavailableSinceByPath
         )
 
-        return (result, warnings, discoveredPaths)
+        let retainedDiscoveryPaths = Array(Set(
+            sorted.map(\.path) + Array(mergeResult.unavailableSinceByPath.keys)
+        )).sorted()
+        return (result, warnings, retainedDiscoveryPaths)
     }
 
     private static func partialResult(
-        discoveredPaths: [String],
+        discovery: RepositoryDiscoveryResult,
         snapshots: [RepositorySnapshot],
         previousSnapshot: AppGroupData?,
         warnings: inout [String]
     ) -> (data: AppGroupData, warnings: [String], discoveredRepositoryPaths: [String]) {
-        let merged = mergeSnapshots(
+        let mergeResult = mergeSnapshots(
             snapshots,
-            discoveredPaths: discoveredPaths,
-            previousSnapshot: previousSnapshot
+            discovery: discovery,
+            previousSnapshot: previousSnapshot,
+            previousUnavailableSinceByPath: previousSnapshot?.repositoryUnavailableSinceByPath ?? [:]
         )
-        let sorted = RepositorySorter.sort(merged)
+        let sorted = RepositorySorter.sort(mergeResult.snapshots)
         let summary = ScanSummary.build(
             from: sorted,
-            totalRepositories: discoveredPaths.count
+            totalRepositories: sorted.count
         )
         return (
             AppGroupData(
@@ -201,10 +296,15 @@ enum GitRepositoryScanner {
                 generatedAt: DateFormatting.nowISO(),
                 writtenAt: nil,
                 scanSummary: summary,
-                repositories: sorted
+                repositories: sorted,
+                repositoryUnavailableSinceByPath: mergeResult.unavailableSinceByPath.isEmpty
+                    ? nil
+                    : mergeResult.unavailableSinceByPath
             ),
             warnings,
-            discoveredPaths
+            Array(Set(
+                sorted.map(\.path) + Array(mergeResult.unavailableSinceByPath.keys)
+            )).sorted()
         )
     }
 
@@ -213,115 +313,185 @@ enum GitRepositoryScanner {
     private static func discoverRepositories(config: ScanConfig,
                                              scanRoots: [String]?,
                                              knownRepositoryPaths: [String]?,
+                                             previousRepositoryPaths: [String],
+                                             ignoredRepositoryPaths: Set<String>,
                                              forceRefresh: Bool,
-                                             warnings: inout [String]) async -> [String] {
+                                             warnings: inout [String]) async -> RepositoryDiscoveryResult {
         var discovered = Set<String>()
+        var unavailablePrefixes = Set<String>()
         let allPaths = scanRoots ?? Array(config.enabledBuiltInPaths) + config.customPaths
         let normalizedRoots = Array(Set(allPaths.map {
             ScanLocationProvider.canonicalExistingFilePath($0, resolveBuiltIn: true)
         })).sorted()
+        let ignoredPaths = RepositoryScope.canonicalPathSet(ignoredRepositoryPaths)
         let cacheKey = discoveryCacheKey(for: normalizedRoots)
+        let knownCandidates = Array(Set((knownRepositoryPaths ?? []) + previousRepositoryPaths))
+
+        guard !normalizedRoots.isEmpty else {
+            await discoveryCache.removeValue(for: cacheKey)
+            if scanRoots == nil {
+                warnings.append("No scan roots configured. Add a directory in Settings.")
+            }
+            return RepositoryDiscoveryResult(readablePaths: [], unavailablePaths: [])
+        }
 
         if !forceRefresh,
-           let knownRepositoryPaths,
            let reusedPaths = reusableKnownRepositoryPaths(
-               knownRepositoryPaths,
-               limitedTo: normalizedRoots
+               knownCandidates,
+               limitedTo: normalizedRoots,
+               excluding: ignoredPaths
            ) {
+            if !reusedPaths.unavailablePaths.isEmpty {
+                warnings.append(incompleteDiscoveryWarning)
+            }
             return reusedPaths
         }
 
         if forceRefresh {
             await discoveryCache.removeValue(for: cacheKey)
-        } else if let cached = await discoveryCache.cachedPaths(for: cacheKey) {
-            return cached
+        } else if let cached = await discoveryCache.cachedPaths(for: cacheKey),
+                  let reusableCached = reusableKnownRepositoryPaths(
+                    cached,
+                    limitedTo: normalizedRoots,
+                    excluding: ignoredPaths
+                  ) {
+            if !reusableCached.unavailablePaths.isEmpty {
+                warnings.append(incompleteDiscoveryWarning)
+            }
+            return reusableCached
         }
 
         for root in normalizedRoots {
             if Task.isCancelled { break }
-            var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: root, isDirectory: &isDir),
-                  isDir.boolValue else {
+            switch directoryAvailability(at: root) {
+            case .repository:
+                walkDirectory(
+                    root,
+                    config: config,
+                    ignoredPaths: ignoredPaths,
+                    discovered: &discovered,
+                    unavailablePrefixes: &unavailablePrefixes,
+                    warnings: &warnings
+                )
+            case .unavailable:
+                unavailablePrefixes.insert(root)
                 warnings.append("Scan root unavailable: \(root)")
-                continue
+            case .missing, .notRepository:
+                warnings.append("Scan root unavailable: \(root)")
             }
+        }
 
-            walkDirectory(root, config: config, discovered: &discovered, warnings: &warnings)
+        if !unavailablePrefixes.isEmpty {
+            warnings.append(incompleteDiscoveryWarning)
         }
 
         if discovered.isEmpty {
-            if allPaths.isEmpty && scanRoots == nil {
-                warnings.append("No scan roots configured. Add a directory in Settings.")
-            } else if !allPaths.isEmpty {
+            if !allPaths.isEmpty && unavailablePrefixes.isEmpty {
                 warnings.append("No Git repositories discovered in the configured scan roots.")
             }
         }
 
         let sorted = Array(discovered).sorted()
         await discoveryCache.store(paths: sorted, for: cacheKey, ttl: discoveryCacheTTL)
-        return sorted
+        let unavailablePaths = knownCandidates
+            .map(RepositoryIdentity.canonicalPath)
+            .filter { path in
+                !RepositoryScope.contains(path, in: ignoredPaths)
+                    && normalizedRoots.contains { RepositoryIdentity.isSameOrDescendantPath(path, of: $0) }
+                    && unavailablePrefixes.contains { RepositoryIdentity.isSameOrDescendantPath(path, of: $0) }
+            }
+        return RepositoryDiscoveryResult(
+            readablePaths: sorted,
+            unavailablePaths: Array(Set(unavailablePaths)).sorted()
+        )
     }
 
     private static func reusableKnownRepositoryPaths(
         _ knownRepositoryPaths: [String],
-        limitedTo scanRoots: [String]
-    ) -> [String]? {
+        limitedTo scanRoots: [String],
+        excluding ignoredPaths: Set<String>
+    ) -> RepositoryDiscoveryResult? {
         let normalizedRoots = scanRoots.map {
             ScanLocationProvider.canonicalExistingFilePath($0, resolveBuiltIn: true)
         }
-        let filtered = Set(
-            knownRepositoryPaths
-                .map {
-                    ScanLocationProvider.canonicalExistingFilePath($0, resolveBuiltIn: true)
-                }
-                .filter { path in
-                    guard FileManager.default.fileExists(atPath: path) else {
-                        return false
-                    }
-
-                    if normalizedRoots.isEmpty {
-                        return true
-                    }
-
-                    return normalizedRoots.contains { root in
-                        path == root || path.hasPrefix(root + "/")
-                    }
-                }
-        )
-
-        guard !filtered.isEmpty else {
-            return nil
+        guard !normalizedRoots.isEmpty else {
+            return RepositoryDiscoveryResult(readablePaths: [], unavailablePaths: [])
         }
 
-        return Array(filtered).sorted()
+        let candidates = Array(Set(knownRepositoryPaths.map(RepositoryIdentity.canonicalPath)))
+            .filter { path in
+                !RepositoryScope.contains(path, in: ignoredPaths)
+                    && normalizedRoots.contains { RepositoryIdentity.isSameOrDescendantPath(path, of: $0) }
+            }
+        guard !candidates.isEmpty else { return nil }
+
+        var readable: [String] = []
+        var unavailable: [String] = []
+        for path in candidates {
+            switch repositoryAvailability(at: path) {
+            case .repository:
+                readable.append(path)
+            case .unavailable:
+                unavailable.append(path)
+            case .missing, .notRepository:
+                // A definitive disappearance invalidates the whole reuse set
+                // so a move or replacement can be discovered immediately.
+                return nil
+            }
+        }
+
+        guard !readable.isEmpty || !unavailable.isEmpty else { return nil }
+        return RepositoryDiscoveryResult(
+            readablePaths: Array(Set(readable)).sorted(),
+            unavailablePaths: Array(Set(unavailable)).sorted()
+        )
     }
 
     private static func walkDirectory(_ directory: String,
                                       config: ScanConfig,
                                       depth: Int = 0,
+                                      ignoredPaths: Set<String>,
                                       discovered: inout Set<String>,
+                                      unavailablePrefixes: inout Set<String>,
                                       warnings: inout [String]) {
         guard !Task.isCancelled else { return }
         guard depth <= config.maxDepth else { return }
 
         let directory = ScanLocationProvider.canonicalExistingFilePath(directory, resolveBuiltIn: true)
-
-        if isGitRepository(directory) {
-            discovered.insert(directory)
-            return
-        }
+        guard !RepositoryScope.contains(directory, in: ignoredPaths) else { return }
 
         let dirName = (directory as NSString).lastPathComponent
         if ExcludedDirectoryRules.isExcluded(dirName: dirName) {
             return
         }
 
+        switch repositoryAvailability(at: directory) {
+        case .repository:
+            discovered.insert(directory)
+            return
+        case .unavailable:
+            unavailablePrefixes.insert(directory)
+            warnings.append("Repository path unavailable: \(directory)")
+            return
+        case .missing:
+            return
+        case .notRepository:
+            break
+        }
+
         let directoryURL = URL(fileURLWithPath: directory)
-        guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: directoryURL,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsPackageDescendants]
-        ) else {
+        let entries: [URL]
+        do {
+            entries = try FileManager.default.contentsOfDirectory(
+                at: directoryURL,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsPackageDescendants]
+            )
+        } catch {
+            if !isMissingFileError(error) {
+                unavailablePrefixes.insert(directory)
+                warnings.append("Repository directory unavailable: \(directory)")
+            }
             return
         }
 
@@ -332,13 +502,24 @@ enum GitRepositoryScanner {
 
             guard !ExcludedDirectoryRules.isExcluded(dirName: entryName) else { continue }
 
-            let isDirectory = (try? entryURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            let isDirectory: Bool
+            do {
+                let values = try entryURL.resourceValues(forKeys: [.isDirectoryKey])
+                isDirectory = values.isDirectory ?? false
+            } catch {
+                if !isMissingFileError(error) {
+                    unavailablePrefixes.insert(fullPath)
+                }
+                continue
+            }
             guard isDirectory else { continue }
 
             walkDirectory(fullPath,
                           config: config,
                           depth: depth + 1,
+                          ignoredPaths: ignoredPaths,
                           discovered: &discovered,
+                          unavailablePrefixes: &unavailablePrefixes,
                           warnings: &warnings)
         }
     }
@@ -346,13 +527,45 @@ enum GitRepositoryScanner {
     // MARK: - Git repository detection
 
     static func isGitRepository(_ directory: String) -> Bool {
-        let gitPath = (directory as NSString).appendingPathComponent(".git")
+        repositoryAvailability(at: directory) == .repository
+    }
 
-        // Discovery is intentionally filesystem-only. A .git directory or
-        // worktree file is sufficient to identify a repository; invoking
-        // A Git discovery command for every ordinary directory turns a
-        // bounded walk into one process per directory.
-        return FileManager.default.fileExists(atPath: gitPath)
+    private static func directoryAvailability(at path: String) -> RepositoryPathAvailability {
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: path)
+            return attributes[.type] as? FileAttributeType == .typeDirectory
+                ? .repository
+                : .missing
+        } catch {
+            return isMissingFileError(error) ? .missing : .unavailable
+        }
+    }
+
+    private static func repositoryAvailability(at directory: String) -> RepositoryPathAvailability {
+        switch directoryAvailability(at: directory) {
+        case .repository:
+            break
+        case .missing:
+            return .missing
+        case .unavailable:
+            return .unavailable
+        case .notRepository:
+            return .notRepository
+        }
+
+        let gitPath = (directory as NSString).appendingPathComponent(".git")
+        do {
+            _ = try FileManager.default.attributesOfItem(atPath: gitPath)
+            return .repository
+        } catch {
+            return isMissingFileError(error) ? .notRepository : .unavailable
+        }
+    }
+
+    private static func isMissingFileError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == NSCocoaErrorDomain
+            && (nsError.code == NSFileNoSuchFileError || nsError.code == NSFileReadNoSuchFileError)
     }
 
     // MARK: - Batched snapshot reading
@@ -362,7 +575,8 @@ enum GitRepositoryScanner {
                                              config: ScanConfig,
                                              warnings: inout [String],
                                              overallDeadline: Date,
-                                             previousSnapshots: [RepositorySnapshot]) async -> [RepositorySnapshot] {
+                                             previousSnapshots: [RepositorySnapshot],
+                                             previousUnavailableSinceByPath: [String: String]) async -> [RepositorySnapshot] {
         guard !paths.isEmpty else { return [] }
 
         var previousByPath: [String: RepositorySnapshot] = [:]
@@ -387,6 +601,7 @@ enum GitRepositoryScanner {
             let fallback = failedSnapshot(
                 for: canonicalPath,
                 previousSnapshot: previous,
+                unavailableSince: previousUnavailableSinceByPath[canonicalPath],
                 errorMessage: "扫描已跳过"
             )
             resultsByIndex[index] = SnapshotReadResult(
@@ -419,7 +634,9 @@ enum GitRepositoryScanner {
                 guard nextIndex < activePaths.count else { return }
                 let index = nextIndex
                 let path = activePaths[index]
-                let previousSnapshot = previousByPath[RepositoryIdentity.canonicalPath(path)]
+                let canonicalPath = RepositoryIdentity.canonicalPath(path)
+                let previousSnapshot = previousByPath[canonicalPath]
+                let unavailableSince = previousUnavailableSinceByPath[canonicalPath]
                 nextIndex += 1
                 group.addTask {
                     guard !Task.isCancelled else { return nil }
@@ -430,7 +647,8 @@ enum GitRepositoryScanner {
                         repoPath: path,
                         config: config,
                         overallDeadline: overallDeadline,
-                        previousSnapshot: previousSnapshot
+                        previousSnapshot: previousSnapshot,
+                        unavailableSince: unavailableSince
                     ) else {
                         return nil
                     }
@@ -496,6 +714,9 @@ enum GitRepositoryScanner {
                 failedSnapshot(
                     for: path,
                     previousSnapshot: previousByPath[RepositoryIdentity.canonicalPath(path)],
+                    unavailableSince: previousUnavailableSinceByPath[
+                        RepositoryIdentity.canonicalPath(path)
+                    ],
                     errorMessage: message
                 )
             )
@@ -524,7 +745,8 @@ enum GitRepositoryScanner {
     private static func readSingleSnapshot(repoPath: String,
                                            config: ScanConfig,
                                            overallDeadline: Date? = nil,
-                                           previousSnapshot: RepositorySnapshot? = nil) -> RepositorySnapshot? {
+                                           previousSnapshot: RepositorySnapshot? = nil,
+                                           unavailableSince: String? = nil) -> RepositorySnapshot? {
         let repoPath = RepositoryIdentity.canonicalPath(repoPath)
         let name = (repoPath as NSString).lastPathComponent
         let id = RepositoryIdentity.id(for: repoPath)
@@ -546,6 +768,7 @@ enum GitRepositoryScanner {
             return failedSnapshot(
                 for: repoPath,
                 previousSnapshot: previousSnapshot,
+                unavailableSince: unavailableSince,
                 errorMessage: "读取失败"
             )
         }
@@ -624,6 +847,7 @@ enum GitRepositoryScanner {
 
     private static func failedSnapshot(for path: String,
                                        previousSnapshot: RepositorySnapshot?,
+                                       unavailableSince: String? = nil,
                                        errorMessage: String) -> RepositorySnapshot {
         let path = RepositoryIdentity.canonicalPath(path)
         let previous = previousSnapshot.map(RepositoryIdentity.normalize)
@@ -631,7 +855,8 @@ enum GitRepositoryScanner {
         if let previous {
             return previous.retainingLastSuccessfulData(
                 attemptedAt: attemptedAt,
-                errorMessage: errorMessage
+                errorMessage: errorMessage,
+                unavailableSince: unavailableSince
             )
         }
         return RepositorySnapshot(
@@ -661,6 +886,7 @@ enum GitRepositoryScanner {
             lastCommitSummary: nil,
             lastCommitMetadataAvailable: false,
             lastActivityAt: nil,
+            unavailableSince: unavailableSince ?? attemptedAt,
             errorMessage: errorMessage,
             isPinned: false
         )
@@ -706,9 +932,10 @@ enum GitRepositoryScanner {
 
     private static func mergeSnapshots(
         _ snapshots: [RepositorySnapshot],
-        discoveredPaths: [String],
-        previousSnapshot: AppGroupData?
-    ) -> [RepositorySnapshot] {
+        discovery: RepositoryDiscoveryResult,
+        previousSnapshot: AppGroupData?,
+        previousUnavailableSinceByPath: [String: String]
+    ) -> RepositoryMergeResult {
         var byPath: [String: RepositorySnapshot] = [:]
         for snapshot in snapshots.map(RepositoryIdentity.normalize) {
             if let existing = byPath[snapshot.path], existing.isPinned || snapshot.isPinned {
@@ -730,23 +957,64 @@ enum GitRepositoryScanner {
                 previousByPath[normalized.path] = normalized
             }
         }
+        var unavailableSinceByPath: [String: String] = [:]
+        for (path, timestamp) in previousUnavailableSinceByPath {
+            let canonicalPath = RepositoryIdentity.canonicalPath(path)
+            guard !canonicalPath.isEmpty else { continue }
+            if let existing = unavailableSinceByPath[canonicalPath] {
+                unavailableSinceByPath[canonicalPath] = min(existing, timestamp)
+            } else {
+                unavailableSinceByPath[canonicalPath] = timestamp
+            }
+        }
 
-        for path in discoveredPaths {
+        for path in discovery.readablePaths {
             let normalizedPath = RepositoryIdentity.canonicalPath(path)
             guard byPath[normalizedPath] == nil else { continue }
             byPath[normalizedPath] = failedSnapshot(
                 for: normalizedPath,
                 previousSnapshot: previousByPath[normalizedPath],
+                unavailableSince: unavailableSinceByPath[normalizedPath],
                 errorMessage: "本轮未完成扫描"
             )
         }
 
-        var seen = Set<String>()
-        return discoveredPaths.compactMap { path in
+        for path in discovery.unavailablePaths {
             let normalizedPath = RepositoryIdentity.canonicalPath(path)
-            guard seen.insert(normalizedPath).inserted else { return nil }
-            return byPath[normalizedPath]
+            guard byPath[normalizedPath] == nil else { continue }
+            byPath[normalizedPath] = failedSnapshot(
+                for: normalizedPath,
+                previousSnapshot: previousByPath[normalizedPath],
+                unavailableSince: unavailableSinceByPath[normalizedPath],
+                errorMessage: "仓库暂时不可访问"
+            )
         }
+
+        var seen = Set<String>()
+        var retainedSnapshots: [RepositorySnapshot] = []
+        var retainedUnavailability: [String: String] = [:]
+        for path in discovery.retainedPaths {
+            let normalizedPath = RepositoryIdentity.canonicalPath(path)
+            guard seen.insert(normalizedPath).inserted,
+                  let snapshot = byPath[normalizedPath] else { continue }
+
+            if snapshot.resolvedDataSource == .current && snapshot.status != .error {
+                retainedSnapshots.append(snapshot)
+                continue
+            }
+
+            let firstUnavailableAt = snapshot.unavailableSince
+                ?? unavailableSinceByPath[normalizedPath]
+                ?? snapshot.lastScannedAt
+            retainedUnavailability[normalizedPath] = firstUnavailableAt
+            if RepositoryRetentionPolicy.shouldRetain(snapshot) {
+                retainedSnapshots.append(snapshot)
+            }
+        }
+        return RepositoryMergeResult(
+            snapshots: retainedSnapshots,
+            unavailableSinceByPath: retainedUnavailability
+        )
     }
 
     // MARK: - Helpers

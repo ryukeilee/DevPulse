@@ -210,6 +210,7 @@ struct RepositoryDetailView: View {
     let repository: RepositorySnapshot
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var scheduler: ScanScheduler
+    @State private var isConfirmingIgnore = false
 
     private var presentation: RepositoryDetailPresentation {
         RepositoryDetailPresentationBuilder.build(snapshot: repository)
@@ -241,6 +242,15 @@ struct RepositoryDetailView: View {
         }
         .frame(minWidth: 540, idealWidth: 580, minHeight: 560, idealHeight: 660)
         .background(Color(nsColor: .windowBackgroundColor))
+        .alert("忽略 \(repository.name)？", isPresented: $isConfirmingIgnore) {
+            Button("忽略", role: .destructive) {
+                scheduler.ignoreRepository(path: repository.path)
+                dismiss()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("确认后，DevPulse 将不再扫描或显示此仓库；可在 Settings 中恢复。")
+        }
     }
 
     private var header: some View {
@@ -257,6 +267,12 @@ struct RepositoryDetailView: View {
             Spacer()
 
             dataSourceBadge
+
+            Button("忽略", role: .destructive) {
+                isConfirmingIgnore = true
+            }
+            .help("从扫描结果中忽略此仓库")
+            .accessibilityHint("确认后可在 Settings 中恢复")
 
             Button("关闭") { dismiss() }
                 .keyboardShortcut(.cancelAction)

@@ -256,6 +256,62 @@ struct ActivityEventTests {
         )?.id == conflict.id)
     }
 
+    @Test func normalizedSnapshotRemapsLegacyActivityIDsAndDropsRemovedSummaries() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("activity-normalize-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repository")
+        let alias = root.appendingPathComponent("alias")
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: repository)
+
+        let legacyRepository = snapshot(id: "legacy-repository", path: alias.path)
+        let legacyEvent = ActivityEventSummary(
+            id: "legacy-event",
+            repositoryID: "legacy-repository",
+            repositoryName: legacyRepository.name,
+            kind: .workingTreeChanged,
+            occurredAt: "2026-07-16T09:00:00Z",
+            message: "旧路径活动",
+            priority: ActivityEventKind.workingTreeChanged.priority
+        )
+        let removedEvent = ActivityEventSummary(
+            id: "removed-event",
+            repositoryID: "removed-repository",
+            repositoryName: "Removed",
+            kind: .workingTreeChanged,
+            occurredAt: "2026-07-16T09:01:00Z",
+            message: "已移除活动",
+            priority: ActivityEventKind.workingTreeChanged.priority
+        )
+        let normalized = RepositoryIdentity.normalize(
+            data([legacyRepository], generatedAt: "2026-07-16T09:05:00Z")
+                .withRecentActivityEvents([legacyEvent, removedEvent])
+        )
+
+        let currentID = RepositoryIdentity.id(for: repository.path)
+        let repositoryIDs = normalized.repositories.map { $0.id }
+        let eventRepositoryIDs = normalized.recentActivityEvents?.map { $0.repositoryID } ?? []
+        #expect(repositoryIDs == [currentID])
+        #expect(eventRepositoryIDs == [currentID])
+        #expect(normalized.recentActivityEvents?.first?.id == legacyEvent.id)
+    }
+
+    @Test func eventStorePruningKeepsOnlyCurrentRepositoryIDs() throws {
+        let store = ActivityEventStore(fileURL: temporaryURL())
+        let kept = try #require(makeWorkingTreeEvent(from: 0, to: 1, at: "2026-07-16T09:00:00Z"))
+        let removed = kept.remappingRepositoryID(to: "removed-repository")
+
+        let pruned = store.pruning(
+            [kept, removed],
+            keepingRepositoryIDs: [kept.repositoryID]
+        )
+
+        #expect(pruned.map(\.repositoryID) == [kept.repositoryID])
+        #expect(pruned.map(\.id) == [kept.id])
+    }
+
     @Test func oldSharedSnapshotWithoutEventOrCommitFieldsStillDecodes() throws {
         let payload = data([
             snapshot(lastCommitID: "commit-id", lastCommitSummary: "Subject")
@@ -328,13 +384,15 @@ struct ActivityEventTests {
         behind: Int = 0,
         dataSource: RepositoryDataSource = .current,
         lastCommitID: String? = "base",
-        lastCommitSummary: String? = "Base"
+        lastCommitSummary: String? = "Base",
+        id: String = "repo-id",
+        path: String = "/tmp/Repo"
     ) -> RepositorySnapshot {
         let changed = modified + added + deleted + untracked
         return RepositorySnapshot(
-            id: "repo-id",
+            id: id,
             name: "Repo",
-            path: "/tmp/Repo",
+            path: path,
             branch: branch,
             status: dataSource == .current ? (changed > 0 ? .changed : .clean) : .error,
             modifiedFileCount: modified,

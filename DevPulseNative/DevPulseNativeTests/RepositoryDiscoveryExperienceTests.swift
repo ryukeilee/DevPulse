@@ -160,6 +160,355 @@ struct RepositoryDiscoveryExperienceTests {
         #expect(persisted.id == expectedID)
         #expect(persisted.isPinned)
     }
+
+    @MainActor
+    @Test func schedulerRebuildMigratesIgnoredPathsAndRewritesSharedSnapshotScope() throws {
+        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let archiveKey = "ignored_repositories_v1_json"
+        let legacyKey = "ignored_repository_paths"
+        let previousArchive = defaults.data(forKey: archiveKey)
+        let previousLegacy = defaults.stringArray(forKey: legacyKey)
+        let previousSnapshot = try? AppGroupStore.read().get()
+        defer {
+            restore(previousArchive, forKey: archiveKey, in: defaults)
+            if let previousLegacy {
+                defaults.set(previousLegacy, forKey: legacyKey)
+            } else {
+                defaults.removeObject(forKey: legacyKey)
+            }
+            if let previousSnapshot {
+                _ = AppGroupStore.write(previousSnapshot)
+            } else if let url = AppGroupStore.snapshotURL {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+
+        defaults.removeObject(forKey: archiveKey)
+        let root = try temporaryDirectory(named: "ignored-rebuild")
+        defer { try? FileManager.default.removeItem(at: root) }
+        defaults.set([root.path], forKey: legacyKey)
+        let now = DateFormatting.nowISO()
+        let repository = RepositorySnapshot(
+            id: "legacy-ignored-id",
+            name: root.lastPathComponent,
+            path: root.path,
+            branch: "main",
+            status: .clean,
+            modifiedFileCount: 0,
+            addedFileCount: 0,
+            deletedFileCount: 0,
+            untrackedFileCount: 0,
+            stagedFileCount: 0,
+            unstagedFileCount: 0,
+            conflictedFileCount: 0,
+            aheadCount: 0,
+            changedFileCount: 0,
+            changedFilesPreview: [],
+            risk: .low,
+            lastScannedAt: now,
+            lastChangedAt: nil,
+            errorMessage: nil,
+            isPinned: false
+        )
+        _ = AppGroupStore.write(AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: now,
+            writtenAt: now,
+            scanSummary: ScanSummary.build(from: [repository]),
+            repositories: [repository],
+            recentActivityEvents: [ActivityEventSummary(
+                id: "ignored-summary",
+                repositoryID: repository.id,
+                repositoryName: repository.name,
+                kind: .workingTreeChanged,
+                occurredAt: now,
+                message: "ignored",
+                priority: ActivityEventKind.workingTreeChanged.priority
+            )]
+        ))
+
+        let scheduler = ScanScheduler()
+        defer { scheduler.stopBackgroundScanning() }
+        #expect(scheduler.ignoredRepositories.map(\.path) == [RepositoryIdentity.canonicalPath(root.path)])
+        #expect(scheduler.lastResult.repositories.isEmpty)
+        #expect(defaults.object(forKey: legacyKey) == nil)
+
+        let persisted = try #require(try? AppGroupStore.read().get())
+        #expect(persisted.repositories.isEmpty)
+        #expect(persisted.scanSummary.totalRepositories == 0)
+        #expect(persisted.recentActivityEvents?.isEmpty == true)
+
+        let rebuilt = ScanScheduler()
+        defer { rebuilt.stopBackgroundScanning() }
+        #expect(rebuilt.ignoredRepositories.map(\.path) == [RepositoryIdentity.canonicalPath(root.path)])
+        #expect(rebuilt.lastResult.repositories.isEmpty)
+    }
+
+    @MainActor
+    @Test func restoringIgnoredRepositoryImmediatelyRequestsForcedDiscoveryWithExistingRoots() async throws {
+        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let archiveKey = "ignored_repositories_v1_json"
+        let locationsKey = "scan_locations_v1_json"
+        let previousArchive = defaults.data(forKey: archiveKey)
+        let previousLocations = defaults.data(forKey: locationsKey)
+        let previousSnapshot = try? AppGroupStore.read().get()
+        defer {
+            restore(previousArchive, forKey: archiveKey, in: defaults)
+            restore(previousLocations, forKey: locationsKey, in: defaults)
+            if let previousSnapshot {
+                _ = AppGroupStore.write(previousSnapshot)
+            } else if let url = AppGroupStore.snapshotURL {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+
+        let root = try temporaryDirectory(named: "ignored-restore-request")
+        defer { try? FileManager.default.removeItem(at: root) }
+        defaults.set(
+            try JSONEncoder().encode(IgnoredRepositoryArchive(paths: [root.path])),
+            forKey: archiveKey
+        )
+        defaults.set(
+            try JSONEncoder().encode(ScanLocationConfiguration(
+                enabledBuiltInPaths: [],
+                customDirectories: [CustomScanDirectory(path: root.path)]
+            )),
+            forKey: locationsKey
+        )
+
+        let recorder = ScanRequestRecorder()
+        let scheduler = ScanScheduler { request in
+            await recorder.record(request)
+            return (.empty(), [], [])
+        }
+        defer { scheduler.stopBackgroundScanning() }
+        scheduler.restoreIgnoredRepository(path: root.path)
+
+        let request = try #require(await recorder.waitForCount(1).first)
+        #expect(request.forceRepositoryDiscovery)
+        #expect(request.ignoredRepositoryPaths.isEmpty)
+        #expect(request.roots == [RepositoryIdentity.canonicalPath(root.path)])
+        #expect(scheduler.ignoredRepositories.isEmpty)
+    }
+
+    @MainActor
+    @Test func ignoringRepositoryImmediatelyFiltersAppAndSharedWidgetSnapshotAndForcesScopedScan() async throws {
+        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let archiveKey = "ignored_repositories_v1_json"
+        let legacyKey = "ignored_repository_paths"
+        let locationsKey = "scan_locations_v1_json"
+        let discoveredKey = "last_discovered_repository_paths"
+        let pinnedKey = "pinned_repo_ids"
+        let previousArchive = defaults.data(forKey: archiveKey)
+        let previousLegacy = defaults.stringArray(forKey: legacyKey)
+        let previousLocations = defaults.data(forKey: locationsKey)
+        let previousDiscovered = defaults.stringArray(forKey: discoveredKey)
+        let previousPins = defaults.stringArray(forKey: pinnedKey)
+        let previousSnapshot = try? AppGroupStore.read().get()
+        defer {
+            restore(previousArchive, forKey: archiveKey, in: defaults)
+            restore(previousLocations, forKey: locationsKey, in: defaults)
+            if let previousLegacy { defaults.set(previousLegacy, forKey: legacyKey) }
+            else { defaults.removeObject(forKey: legacyKey) }
+            if let previousDiscovered { defaults.set(previousDiscovered, forKey: discoveredKey) }
+            else { defaults.removeObject(forKey: discoveredKey) }
+            if let previousPins { defaults.set(previousPins, forKey: pinnedKey) }
+            else { defaults.removeObject(forKey: pinnedKey) }
+            if let previousSnapshot { _ = AppGroupStore.write(previousSnapshot) }
+            else if let url = AppGroupStore.snapshotURL { try? FileManager.default.removeItem(at: url) }
+        }
+
+        let root = try temporaryDirectory(named: "ignore-immediate")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let canonicalPath = RepositoryIdentity.canonicalPath(root.path)
+        let repository = repositorySnapshot(path: canonicalPath)
+        defaults.set(try JSONEncoder().encode(IgnoredRepositoryArchive(paths: [])), forKey: archiveKey)
+        defaults.removeObject(forKey: legacyKey)
+        defaults.set(try JSONEncoder().encode(ScanLocationConfiguration(
+            enabledBuiltInPaths: [],
+            customDirectories: [CustomScanDirectory(path: canonicalPath)]
+        )), forKey: locationsKey)
+        defaults.set([canonicalPath], forKey: discoveredKey)
+        defaults.set([RepositoryIdentity.id(for: canonicalPath)], forKey: pinnedKey)
+        _ = AppGroupStore.write(AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: DateFormatting.nowISO(),
+            writtenAt: DateFormatting.nowISO(),
+            scanSummary: ScanSummary.build(from: [repository]),
+            repositories: [repository],
+            recentActivityEvents: [ActivityEventSummary(
+                id: "ignored-event",
+                repositoryID: repository.id,
+                repositoryName: repository.name,
+                kind: .workingTreeChanged,
+                occurredAt: DateFormatting.nowISO(),
+                message: "ignored",
+                priority: ActivityEventKind.workingTreeChanged.priority
+            )]
+        ))
+
+        let recorder = ScanRequestRecorder()
+        let scheduler = ScanScheduler { request in
+            await recorder.record(request)
+            return (.empty(), [], [])
+        }
+        defer { scheduler.stopBackgroundScanning() }
+        scheduler.ignoreRepository(path: canonicalPath)
+
+        let request = try #require(await recorder.waitForCount(1).first)
+        #expect(request.forceRepositoryDiscovery)
+        #expect(request.ignoredRepositoryPaths == [canonicalPath])
+        #expect(scheduler.lastResult.repositories.isEmpty)
+        #expect(scheduler.activityEvents.isEmpty)
+        #expect(scheduler.ignoredRepositories.map(\.path) == [canonicalPath])
+        #expect(!scheduler.pinnedRepoIDs.contains(RepositoryIdentity.id(for: canonicalPath)))
+        let shared = try #require(try? AppGroupStore.read().get())
+        #expect(shared.repositories.isEmpty)
+        #expect(shared.scanSummary.totalRepositories == 0)
+        #expect(shared.recentActivityEvents?.isEmpty == true)
+    }
+
+    @MainActor
+    @Test func failedScanUsesScannerScopeSoDeletedRepositoryIsNotReintroduced() async throws {
+        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let archiveKey = "ignored_repositories_v1_json"
+        let locationsKey = "scan_locations_v1_json"
+        let discoveredKey = "last_discovered_repository_paths"
+        let pinnedKey = "pinned_repo_ids"
+        let previousArchive = defaults.data(forKey: archiveKey)
+        let previousLocations = defaults.data(forKey: locationsKey)
+        let previousDiscovered = defaults.stringArray(forKey: discoveredKey)
+        let previousPins = defaults.stringArray(forKey: pinnedKey)
+        let previousSnapshot = try? AppGroupStore.read().get()
+        defer {
+            restore(previousArchive, forKey: archiveKey, in: defaults)
+            restore(previousLocations, forKey: locationsKey, in: defaults)
+            if let previousDiscovered { defaults.set(previousDiscovered, forKey: discoveredKey) }
+            else { defaults.removeObject(forKey: discoveredKey) }
+            if let previousPins { defaults.set(previousPins, forKey: pinnedKey) }
+            else { defaults.removeObject(forKey: pinnedKey) }
+            if let previousSnapshot { _ = AppGroupStore.write(previousSnapshot) }
+            else if let url = AppGroupStore.snapshotURL { try? FileManager.default.removeItem(at: url) }
+        }
+
+        let root = try temporaryDirectory(named: "failure-scope")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let deletedPath = root.appendingPathComponent("deleted").path
+        let unavailablePath = root.appendingPathComponent("unavailable").path
+        try FileManager.default.createDirectory(atPath: unavailablePath, withIntermediateDirectories: true)
+        let deleted = RepositoryIdentity.normalize(repositorySnapshot(path: deletedPath))
+        let unavailable = RepositoryIdentity.normalize(repositorySnapshot(path: unavailablePath))
+        let previous = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: DateFormatting.nowISO(),
+            writtenAt: DateFormatting.nowISO(),
+            scanSummary: ScanSummary.build(from: [deleted, unavailable]),
+            repositories: [deleted, unavailable]
+        )
+        let retainedUnavailable = unavailable.retainingLastSuccessfulData(
+            attemptedAt: DateFormatting.nowISO(),
+            errorMessage: "权限暂时不可用"
+        )
+        let fallback = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: DateFormatting.nowISO(),
+            writtenAt: nil,
+            scanSummary: ScanSummary.build(from: [retainedUnavailable]),
+            repositories: [retainedUnavailable]
+        )
+        defaults.set(try JSONEncoder().encode(IgnoredRepositoryArchive(paths: [])), forKey: archiveKey)
+        defaults.set(try JSONEncoder().encode(ScanLocationConfiguration(
+            enabledBuiltInPaths: [],
+            customDirectories: [CustomScanDirectory(path: root.path)]
+        )), forKey: locationsKey)
+        defaults.set([deleted.path, unavailable.path], forKey: discoveredKey)
+        defaults.set([deleted.id, unavailable.id], forKey: pinnedKey)
+        _ = AppGroupStore.write(previous)
+
+        let scheduler = ScanScheduler { _ in
+            (fallback, [GitRepositoryScanner.incompleteDiscoveryWarning], [unavailablePath])
+        }
+        defer { scheduler.stopBackgroundScanning() }
+        scheduler.scanNow(forceRepositoryDiscovery: true)
+        try await waitForSchedulerToFinish(scheduler)
+
+        #expect(scheduler.refreshPhase == .failure)
+        #expect(scheduler.lastResult.repositories.map(\.path) == [RepositoryIdentity.canonicalPath(unavailablePath)])
+        #expect(!scheduler.lastResult.repositories.contains { $0.path == RepositoryIdentity.canonicalPath(deletedPath) })
+        #expect(!scheduler.pinnedRepoIDs.contains(deleted.id))
+        #expect(scheduler.pinnedRepoIDs.contains(unavailable.id))
+        #expect(defaults.stringArray(forKey: discoveredKey) == [RepositoryIdentity.canonicalPath(unavailablePath)])
+        let shared = try #require(try? AppGroupStore.read().get())
+        #expect(shared.repositories.map(\.path) == [RepositoryIdentity.canonicalPath(unavailablePath)])
+    }
+
+    @MainActor
+    @Test func forcedIncompleteDiscoveryClearsFreshnessSoNextAutomaticScanForcesDiscovery() async throws {
+        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let archiveKey = "ignored_repositories_v1_json"
+        let locationsKey = "scan_locations_v1_json"
+        let discoveredKey = "last_discovered_repository_paths"
+        let discoveryAtKey = "last_repository_discovery_at"
+        let discoverySignatureKey = "last_repository_discovery_scan_roots"
+        let previousArchive = defaults.data(forKey: archiveKey)
+        let previousLocations = defaults.data(forKey: locationsKey)
+        let previousDiscovered = defaults.stringArray(forKey: discoveredKey)
+        let previousDiscoveryAt = defaults.object(forKey: discoveryAtKey)
+        let previousSignature = defaults.string(forKey: discoverySignatureKey)
+        let previousSnapshot = try? AppGroupStore.read().get()
+        defer {
+            restore(previousArchive, forKey: archiveKey, in: defaults)
+            restore(previousLocations, forKey: locationsKey, in: defaults)
+            if let previousDiscovered { defaults.set(previousDiscovered, forKey: discoveredKey) }
+            else { defaults.removeObject(forKey: discoveredKey) }
+            if let previousDiscoveryAt { defaults.set(previousDiscoveryAt, forKey: discoveryAtKey) }
+            else { defaults.removeObject(forKey: discoveryAtKey) }
+            if let previousSignature { defaults.set(previousSignature, forKey: discoverySignatureKey) }
+            else { defaults.removeObject(forKey: discoverySignatureKey) }
+            if let previousSnapshot { _ = AppGroupStore.write(previousSnapshot) }
+            else if let url = AppGroupStore.snapshotURL { try? FileManager.default.removeItem(at: url) }
+        }
+
+        let root = try temporaryDirectory(named: "incomplete-discovery-retry")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let canonicalPath = RepositoryIdentity.canonicalPath(root.path)
+        let signature = ScanSchedulerPolicy.scanRootsSignature([canonicalPath])
+        let repository = RepositoryIdentity.normalize(repositorySnapshot(path: canonicalPath))
+        let snapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: DateFormatting.nowISO(),
+            writtenAt: nil,
+            scanSummary: ScanSummary.build(from: [repository]),
+            repositories: [repository]
+        )
+        defaults.set(try JSONEncoder().encode(IgnoredRepositoryArchive(paths: [])), forKey: archiveKey)
+        defaults.set(try JSONEncoder().encode(ScanLocationConfiguration(
+            enabledBuiltInPaths: [],
+            customDirectories: [CustomScanDirectory(path: canonicalPath)]
+        )), forKey: locationsKey)
+        defaults.set([canonicalPath], forKey: discoveredKey)
+        defaults.set(Date(), forKey: discoveryAtKey)
+        defaults.set(signature, forKey: discoverySignatureKey)
+        _ = AppGroupStore.write(snapshot)
+
+        let recorder = ScanRequestRecorder()
+        let scheduler = ScanScheduler { request in
+            await recorder.record(request)
+            return (snapshot, [GitRepositoryScanner.incompleteDiscoveryWarning], [canonicalPath])
+        }
+        defer { scheduler.stopBackgroundScanning() }
+
+        scheduler.scanNow(forceRepositoryDiscovery: true)
+        _ = await recorder.waitForCount(1)
+        try await waitForSchedulerToFinish(scheduler)
+        #expect(defaults.object(forKey: discoveryAtKey) == nil)
+
+        scheduler.scanNow()
+        let requests = await recorder.waitForCount(2)
+        #expect(requests.count == 2)
+        #expect(requests[1].forceRepositoryDiscovery)
+    }
+
     @MainActor
     @Test func startupRootsMismatchForcesDiscoveryEvenWithFreshSnapshot() async throws {
         let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
@@ -622,6 +971,131 @@ struct RepositoryDiscoveryExperienceTests {
     }
 
     @MainActor
+    @Test func legacyScanConfigMissingNewFieldsPreservesPathsAndExplicitDisabledBuiltIns() throws {
+        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let keys = ["scan_config_json", "scan_directories_json", "scan_locations_v1_json"]
+        let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, defaults.data(forKey: $0)) })
+        defer { previous.forEach { restore($0.value, forKey: $0.key, in: defaults) } }
+        keys.forEach(defaults.removeObject(forKey:))
+
+        let root = try temporaryDirectory(named: "legacy-config-missing-fields")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let custom = root.appendingPathComponent("custom")
+        try FileManager.default.createDirectory(at: custom, withIntermediateDirectories: true)
+
+        // This is the pre-timeout/concurrency/active-threshold shape. The
+        // decoder should fill newly introduced fields from ScanConfig.default
+        // instead of discarding the user's explicit empty built-in selection.
+        let legacyJSON = """
+        {
+          "enabledBuiltInPaths": [],
+          "customPaths": ["\(custom.path)"],
+          "maxDepth": 4,
+          "changedPreviewLimit": 5
+        }
+        """.data(using: .utf8)!
+        defaults.set(legacyJSON, forKey: "scan_config_json")
+
+        let scheduler = ScanScheduler()
+
+        #expect(scheduler.config.enabledBuiltInPaths.isEmpty)
+        #expect(scheduler.config.customPaths == [ScanLocationProvider.canonicalExistingFilePath(custom.path)])
+        #expect(scheduler.scanDirectories.map(\.path) == [ScanLocationProvider.canonicalExistingFilePath(custom.path)])
+        #expect(!scheduler.isBuiltInEnabled(path: ScanLocationProvider.expandTilde("~/Developer")))
+    }
+
+    @MainActor
+    @Test func legacyVersionedLocationsMissingVersionAndDirectoryFieldsPreserveDisabledSelection() throws {
+        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let keys = ["scan_config_json", "scan_directories_json", "scan_locations_v1_json"]
+        let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, defaults.data(forKey: $0)) })
+        defer { previous.forEach { restore($0.value, forKey: $0.key, in: defaults) } }
+        keys.forEach(defaults.removeObject(forKey:))
+
+        let root = try temporaryDirectory(named: "legacy-locations-missing-fields")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let custom = root.appendingPathComponent("custom")
+        try FileManager.default.createDirectory(at: custom, withIntermediateDirectories: true)
+
+        let legacyLocationsJSON = """
+        {
+          "enabledBuiltInPaths": [],
+          "customDirectories": [{"path": "\(custom.path)"}]
+        }
+        """.data(using: .utf8)!
+        defaults.set(legacyLocationsJSON, forKey: "scan_locations_v1_json")
+
+        let scheduler = ScanScheduler()
+
+        #expect(scheduler.scanLocationConfiguration.enabledBuiltInPaths.isEmpty)
+        #expect(scheduler.scanDirectories.count == 1)
+        #expect(scheduler.scanDirectories.first?.path == ScanLocationProvider.canonicalExistingFilePath(custom.path))
+        #expect(scheduler.scanDirectories.first?.id.isEmpty == false)
+    }
+
+    @Test func ignoredRepositoryArchiveMigratesLegacyPathsWithCanonicalDeduplication() throws {
+        let root = try temporaryDirectory(named: "ignored-archive")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repository")
+        let alias = root.appendingPathComponent("alias")
+        let missing = root.appendingPathComponent("missing")
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: repository)
+
+        let legacy = try JSONSerialization.data(withJSONObject: [
+            repository.path,
+            alias.path,
+            repository.path,
+            missing.path
+        ])
+        let archive = try JSONDecoder().decode(IgnoredRepositoryArchive.self, from: legacy)
+
+        #expect(archive.version == IgnoredRepositoryArchive.currentVersion)
+        #expect(archive.paths.count == 2)
+        #expect(archive.paths.contains(RepositoryIdentity.canonicalPath(repository.path)))
+        #expect(archive.paths.contains(RepositoryIdentity.canonicalPath(missing.path)))
+        #expect(try JSONDecoder().decode(
+            IgnoredRepositoryArchive.self,
+            from: JSONEncoder().encode(archive)
+        ) == archive)
+    }
+
+    @Test func ignoredNonexistentPathStillFiltersRepositoryWhenItReappears() throws {
+        let root = try temporaryDirectory(named: "ignored-reappearance")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repository")
+        let archive = IgnoredRepositoryArchive(paths: [repository.path])
+
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        let repositorySnapshot = repositorySnapshot(path: repository.path)
+        let data = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: DateFormatting.nowISO(),
+            writtenAt: nil,
+            scanSummary: ScanSummary.build(from: [repositorySnapshot]),
+            repositories: [repositorySnapshot],
+            recentActivityEvents: [ActivityEventSummary(
+                id: "ignored-event",
+                repositoryID: repositorySnapshot.id,
+                repositoryName: repositorySnapshot.name,
+                kind: .workingTreeChanged,
+                occurredAt: DateFormatting.nowISO(),
+                message: "ignored",
+                priority: ActivityEventKind.workingTreeChanged.priority
+            )],
+            repositoryUnavailableSinceByPath: [
+                RepositoryIdentity.canonicalPath(repository.path): "2026-07-01T00:00:00Z"
+            ]
+        )
+        let filtered = RepositoryScope.filtering(data, excluding: Set(archive.paths))
+
+        #expect(filtered.repositories.isEmpty)
+        #expect(filtered.scanSummary.totalRepositories == 0)
+        #expect(filtered.recentActivityEvents?.isEmpty == true)
+        #expect(filtered.repositoryUnavailableSinceByPath == nil)
+    }
+
+    @MainActor
     @Test func enablingBuiltInDirectoryPersistsAcrossSchedulerReload() throws {
         let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
         let configKey = "scan_config_json"
@@ -673,6 +1147,33 @@ struct RepositoryDiscoveryExperienceTests {
         }
     }
 
+    private func repositorySnapshot(path: String) -> RepositorySnapshot {
+        RepositorySnapshot(
+            id: "legacy-repository",
+            name: (path as NSString).lastPathComponent,
+            path: path,
+            branch: "main",
+            status: .clean,
+            modifiedFileCount: 0,
+            addedFileCount: 0,
+            deletedFileCount: 0,
+            untrackedFileCount: 0,
+            stagedFileCount: 0,
+            unstagedFileCount: 0,
+            conflictedFileCount: 0,
+            aheadCount: 0,
+            behindCount: 0,
+            hasUpstream: false,
+            changedFileCount: 0,
+            changedFilesPreview: [],
+            risk: .low,
+            lastScannedAt: DateFormatting.nowISO(),
+            lastChangedAt: nil,
+            errorMessage: nil,
+            isPinned: false
+        )
+    }
+
     @MainActor
     private func waitForDefaultsString(_ defaults: UserDefaults, key: String, equals expected: String) async throws {
         let clock = ContinuousClock()
@@ -680,6 +1181,22 @@ struct RepositoryDiscoveryExperienceTests {
         while defaults.string(forKey: key) != expected {
             guard clock.now < deadline else {
                 throw NSError(domain: "DevPulseTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for \(key)"])
+            }
+            await Task.yield()
+        }
+    }
+
+    @MainActor
+    private func waitForSchedulerToFinish(_ scheduler: ScanScheduler) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(3)
+        while scheduler.isScanning {
+            guard clock.now < deadline else {
+                throw NSError(
+                    domain: "DevPulseTests",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for scan completion"]
+                )
             }
             await Task.yield()
         }
