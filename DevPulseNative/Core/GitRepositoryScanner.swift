@@ -161,16 +161,11 @@ enum GitRepositoryScanner {
         // Phase 3: sort
         let sorted = RepositorySorter.sort(completeSnapshots)
 
-        // Phase 4: build summary
-        let changedCount = sorted.filter { $0.status == .changed }.count
-        let errorCount = sorted.filter { $0.status == .error }.count
-        let totalChangedFiles = sorted.reduce(0) { $0 + $1.changedFileCount }
-
-        let summary = ScanSummary(
-            totalRepositories: discoveredPaths.count,
-            changedRepositories: changedCount,
-            totalChangedFiles: totalChangedFiles,
-            errorRepositories: errorCount
+        // Phase 4: build a summary from current observations only. Retained
+        // values remain available for context but never count as current work.
+        let summary = ScanSummary.build(
+            from: sorted,
+            totalRepositories: discoveredPaths.count
         )
 
         let result = AppGroupData(
@@ -196,11 +191,9 @@ enum GitRepositoryScanner {
             previousSnapshot: previousSnapshot
         )
         let sorted = RepositorySorter.sort(merged)
-        let summary = ScanSummary(
-            totalRepositories: discoveredPaths.count,
-            changedRepositories: sorted.filter { $0.status == .changed }.count,
-            totalChangedFiles: sorted.reduce(0) { $0 + $1.changedFileCount },
-            errorRepositories: sorted.filter { $0.status == .error }.count
+        let summary = ScanSummary.build(
+            from: sorted,
+            totalRepositories: discoveredPaths.count
         )
         return (
             AppGroupData(
@@ -389,8 +382,11 @@ enum GitRepositoryScanner {
         let (activePaths, skippedPaths) = await filterSlowRepos(paths)
         for skipped in skippedPaths {
             let index = paths.firstIndex(of: skipped) ?? 0
-            let fallback = previousByPath[skipped] ?? placeholderSnapshot(
-                for: skipped,
+            let canonicalPath = RepositoryIdentity.canonicalPath(skipped)
+            let previous = previousByPath[canonicalPath]
+            let fallback = failedSnapshot(
+                for: canonicalPath,
+                previousSnapshot: previous,
                 errorMessage: "扫描已跳过"
             )
             resultsByIndex[index] = SnapshotReadResult(
@@ -399,7 +395,7 @@ enum GitRepositoryScanner {
                 elapsed: 0
             )
             warnings.append(
-                previousByPath[skipped] == nil
+                previous == nil
                     ? "扫描已跳过：\(skipped)"
                     : "扫描已跳过：保留 \((skipped as NSString).lastPathComponent) 的上次结果"
             )
@@ -493,15 +489,16 @@ enum GitRepositoryScanner {
                 continue
             }
 
-            if let previous = previousByPath[RepositoryIdentity.canonicalPath(path)] {
-                results.append(previous)
-                continue
-            }
-
             let message = timedOut || Date() >= overallDeadline
                 ? "扫描超时"
                 : (cancelled ? "扫描已取消" : "读取失败")
-            results.append(placeholderSnapshot(for: path, errorMessage: message))
+            results.append(
+                failedSnapshot(
+                    for: path,
+                    previousSnapshot: previousByPath[RepositoryIdentity.canonicalPath(path)],
+                    errorMessage: message
+                )
+            )
         }
 
         // A cancellation can happen before a task group is entered. Keep the
@@ -605,6 +602,8 @@ enum GitRepositoryScanner {
             changedFilesPreview: preview,
             risk: risk.level,
             lastScannedAt: scannedAt,
+            dataSource: .current,
+            lastSuccessfulScanAt: scannedAt,
             lastChangedAt: lastCommitAt,
             lastCommitSummary: lastCommitSummary,
             lastCommitMetadataAvailable: lastCommitMetadataAvailable,
@@ -620,41 +619,46 @@ enum GitRepositoryScanner {
         return snapshot
     }
 
-    private static func placeholderSnapshot(for path: String, errorMessage: String) -> RepositorySnapshot {
-        failedSnapshot(for: path, previousSnapshot: nil, errorMessage: errorMessage)
-    }
-
     private static func failedSnapshot(for path: String,
                                        previousSnapshot: RepositorySnapshot?,
                                        errorMessage: String) -> RepositorySnapshot {
         let path = RepositoryIdentity.canonicalPath(path)
         let previous = previousSnapshot.map(RepositoryIdentity.normalize)
+        let attemptedAt = DateFormatting.nowISO()
+        if let previous {
+            return previous.retainingLastSuccessfulData(
+                attemptedAt: attemptedAt,
+                errorMessage: errorMessage
+            )
+        }
         return RepositorySnapshot(
             id: RepositoryIdentity.id(for: path),
-            name: previous?.name ?? (path as NSString).lastPathComponent,
+            name: (path as NSString).lastPathComponent,
             path: path,
-            branch: previous?.branch ?? "unknown",
+            branch: "unknown",
             status: .error,
-            modifiedFileCount: previous?.modifiedFileCount ?? 0,
-            addedFileCount: previous?.addedFileCount ?? 0,
-            deletedFileCount: previous?.deletedFileCount ?? 0,
-            untrackedFileCount: previous?.untrackedFileCount ?? 0,
-            stagedFileCount: previous?.stagedFileCount,
-            unstagedFileCount: previous?.unstagedFileCount,
-            conflictedFileCount: previous?.conflictedFileCount,
-            aheadCount: previous?.aheadCount,
-            behindCount: previous?.behindCount,
-            hasUpstream: previous?.hasUpstream,
-            changedFileCount: previous?.changedFileCount ?? 0,
-            changedFilesPreview: previous?.changedFilesPreview ?? [],
-            risk: previous?.risk ?? .low,
-            lastScannedAt: DateFormatting.nowISO(),
-            lastChangedAt: previous?.lastChangedAt,
-            lastCommitSummary: previous?.lastCommitSummary,
+            modifiedFileCount: 0,
+            addedFileCount: 0,
+            deletedFileCount: 0,
+            untrackedFileCount: 0,
+            stagedFileCount: nil,
+            unstagedFileCount: nil,
+            conflictedFileCount: nil,
+            aheadCount: nil,
+            behindCount: nil,
+            hasUpstream: nil,
+            changedFileCount: 0,
+            changedFilesPreview: [],
+            risk: .low,
+            lastScannedAt: attemptedAt,
+            dataSource: .unknown,
+            lastSuccessfulScanAt: nil,
+            lastChangedAt: nil,
+            lastCommitSummary: nil,
             lastCommitMetadataAvailable: false,
-            lastActivityAt: previous?.lastActivityAt ?? previous?.lastChangedAt,
+            lastActivityAt: nil,
             errorMessage: errorMessage,
-            isPinned: previous?.isPinned ?? false
+            isPinned: false
         )
     }
 
@@ -725,8 +729,9 @@ enum GitRepositoryScanner {
         for path in discoveredPaths {
             let normalizedPath = RepositoryIdentity.canonicalPath(path)
             guard byPath[normalizedPath] == nil else { continue }
-            byPath[normalizedPath] = previousByPath[normalizedPath] ?? placeholderSnapshot(
+            byPath[normalizedPath] = failedSnapshot(
                 for: normalizedPath,
+                previousSnapshot: previousByPath[normalizedPath],
                 errorMessage: "本轮未完成扫描"
             )
         }

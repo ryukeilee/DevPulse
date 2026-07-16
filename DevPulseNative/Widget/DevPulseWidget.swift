@@ -32,7 +32,10 @@ private enum WidgetSnapshotStore {
                         actual: snapshot.schemaVersion
                     ))
                 }
-                return .success(snapshot)
+                // Match the App startup migration path so legacy schema-v1
+                // snapshots get inferred provenance and a safe summary before
+                // any Widget family renders them.
+                return .success(RepositoryIdentity.normalize(snapshot))
             } catch {
                 return .failure(.decodeFailed(path: snapshotURL.path, reason: error.localizedDescription))
             }
@@ -146,11 +149,7 @@ struct WidgetEntry: TimelineEntry {
 
     static func content(snapshot: AppGroupData,
                         feed: ActivityTimelineFeed) -> WidgetEntry {
-        let trustAssessment = RefreshStatusFormatter.snapshotAssessment(
-            generatedAt: snapshot.generatedAt,
-            writtenAt: snapshot.writtenAt,
-            missingReason: "共享快照缺少 generatedAt / writtenAt，无法确认 Widget 数据是否最新。"
-        )
+        let trustAssessment = RefreshStatusFormatter.snapshotAssessment(snapshot: snapshot)
 
         return WidgetEntry(
             date: Date(),
@@ -395,10 +394,10 @@ private struct WidgetSummaryStrip: View {
     var body: some View {
         HStack(spacing: compact ? 4 : 6) {
             WidgetMetricCell(label: "仓库", value: "\(summary.totalRepositories)", compact: compact)
-            WidgetMetricCell(label: "活跃", value: "\(summary.changedRepositories + summary.errorRepositories)", compact: compact)
+            WidgetMetricCell(label: "有改动", value: "\(summary.changedRepositories)", compact: compact)
             WidgetMetricCell(label: "改动", value: "\(summary.totalChangedFiles)", compact: compact)
             if summary.errorRepositories > 0 {
-                WidgetMetricCell(label: "异常", value: "\(summary.errorRepositories)", tone: .warning, compact: compact)
+                WidgetMetricCell(label: "待确认", value: "\(summary.errorRepositories)", tone: .warning, compact: compact)
             }
         }
     }
@@ -509,7 +508,7 @@ private struct WidgetRepositoryRow: View {
 
     private var panelBody: some View {
         HStack(alignment: .center, spacing: 7) {
-            WidgetStatusDot(status: item.status)
+            WidgetStatusDot(status: item.status, source: item.resolvedDataSource)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(item.repoName)
@@ -531,6 +530,8 @@ private struct WidgetRepositoryRow: View {
             Spacer(minLength: 4)
 
             VStack(alignment: .trailing, spacing: 1) {
+                WidgetDataSourceBadge(item: item, style: .micro)
+
                 Text(item.widgetChangeCountLabel)
                     .font(.system(size: 9, weight: .bold, design: .rounded))
                     .monospacedDigit()
@@ -555,7 +556,7 @@ private struct WidgetRepositoryRow: View {
     private var cardBody: some View {
         VStack(alignment: .leading, spacing: rowSpacing) {
             HStack(alignment: .top, spacing: 8) {
-                WidgetStatusDot(status: item.status)
+                WidgetStatusDot(status: item.status, source: item.resolvedDataSource)
 
                 VStack(alignment: .leading, spacing: density == .compact ? 2 : 3) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -599,9 +600,9 @@ private struct WidgetRepositoryRow: View {
             }
 
             HStack(spacing: 5) {
-                WidgetRepositoryStatusBadge(status: item.status)
+                WidgetDataSourceBadge(item: item)
 
-                if !hideSecondaryBadge {
+                if item.resolvedDataSource == .current, !hideSecondaryBadge {
                     WidgetReadinessBadge(level: readiness.level, size: prominent ? .large : .compact)
                 }
 
@@ -609,7 +610,7 @@ private struct WidgetRepositoryRow: View {
             }
 
             if showHint {
-                Text(readiness.widgetShortHint)
+                Text(item.widgetReadinessOrSourceHint)
                     .font(.system(size: density == .compact ? 9 : 10, weight: .medium, design: .rounded))
                     .foregroundStyle(WidgetPalette.textSecondary)
                     .lineLimit(1)
@@ -650,10 +651,18 @@ private struct WidgetRepositoryRow: View {
     }
 
     private var branchLabel: String {
-        item.branch.isEmpty ? "detached" : item.branch
+        item.branchDisplayLabel
     }
 
     private var changeCountColor: Color {
+        switch item.resolvedDataSource {
+        case .lastSuccessful:
+            return WidgetPalette.changed
+        case .unknown:
+            return WidgetPalette.error
+        case .current:
+            break
+        }
         switch item.status {
         case .clean:
             return WidgetPalette.textMuted
@@ -671,7 +680,7 @@ private struct WidgetSmallRepositoryFocus: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .center, spacing: 7) {
-                WidgetStatusDot(status: item.status)
+                WidgetStatusDot(status: item.status, source: item.resolvedDataSource)
 
                 Text(item.repoName)
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
@@ -683,9 +692,9 @@ private struct WidgetSmallRepositoryFocus: View {
             }
 
             HStack(spacing: 5) {
-                WidgetRepositoryStatusBadge(status: item.status, compact: true)
+                WidgetDataSourceBadge(item: item, compact: true)
 
-                if item.changedFileCount > 0 {
+                if item.resolvedDataSource == .unknown || item.changedFileCount > 0 {
                     Text(smallChangeLabel)
                         .font(.system(size: 9, weight: .bold, design: .rounded))
                         .monospacedDigit()
@@ -718,17 +727,33 @@ private struct WidgetSmallRepositoryFocus: View {
     }
 
     private var smallChangeLabel: String {
-        if item.changedFileCount > 99 {
-            return "99+改"
+        if item.resolvedDataSource == .unknown {
+            return "改动未知"
         }
-        return "\(item.changedFileCount)改"
+        if item.changedFileCount > 99 {
+            return item.resolvedDataSource == .lastSuccessful ? "上次 99+改" : "99+改"
+        }
+        return item.resolvedDataSource == .lastSuccessful ? "上次 \(item.changedFileCount)改" : "\(item.changedFileCount)改"
     }
 
     private var shortReadinessLabel: String {
-        item.commitReadiness.level.shortLabel
+        switch item.resolvedDataSource {
+        case .current:
+            return item.commitReadiness.widgetShortHint
+        case .lastSuccessful, .unknown:
+            return item.activityLabel
+        }
     }
 
     private var changeCountColor: Color {
+        switch item.resolvedDataSource {
+        case .lastSuccessful:
+            return WidgetPalette.changed
+        case .unknown:
+            return WidgetPalette.error
+        case .current:
+            break
+        }
         switch item.status {
         case .clean:
             return WidgetPalette.textMuted
@@ -742,6 +767,7 @@ private struct WidgetSmallRepositoryFocus: View {
 
 private struct WidgetStatusDot: View {
     let status: RepositoryStatus
+    let source: RepositoryDataSource
 
     var body: some View {
         ZStack {
@@ -761,6 +787,14 @@ private struct WidgetStatusDot: View {
     }
 
     private var tint: Color {
+        switch source {
+        case .lastSuccessful:
+            return WidgetPalette.changed
+        case .unknown:
+            return WidgetPalette.error
+        case .current:
+            break
+        }
         switch status {
         case .clean:
             return WidgetPalette.clean
@@ -827,6 +861,88 @@ private struct WidgetRepositoryStatusBadge: View {
     }
 }
 
+private struct WidgetDataSourceBadge: View {
+    enum Style {
+        case regular
+        case micro
+    }
+
+    let item: ActivityTimelineItem
+    var compact: Bool = false
+    var style: Style = .regular
+
+    var body: some View {
+        Group {
+            switch style {
+            case .regular:
+                HStack(spacing: compact ? 3 : 4) {
+                    Image(systemName: symbolName)
+                    Text(item.dataSourcePresentation.label)
+                }
+                .font(.system(size: compact ? 8 : 9, weight: .bold, design: .rounded))
+                .padding(.horizontal, compact ? 5 : 6)
+                .padding(.vertical, 2)
+            case .micro:
+                Image(systemName: symbolName)
+                    .font(.system(size: 7, weight: .bold, design: .rounded))
+                    .frame(width: 10, height: 10)
+            }
+        }
+        .foregroundStyle(tint)
+        .background(background)
+        .accessibilityLabel(item.dataSourcePresentation.detail)
+    }
+
+    @ViewBuilder
+    private var background: some View {
+        switch style {
+        case .regular:
+            Capsule(style: .continuous)
+                .fill(tint.opacity(backgroundOpacity))
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(tint.opacity(0.12), lineWidth: 0.5)
+                )
+        case .micro:
+            Circle()
+                .fill(tint.opacity(0.14))
+        }
+    }
+
+    private var tint: Color {
+        switch item.resolvedDataSource {
+        case .current:
+            return WidgetPalette.textMuted
+        case .lastSuccessful:
+            return WidgetPalette.changed
+        case .unknown:
+            return WidgetPalette.error
+        }
+    }
+
+    private var backgroundOpacity: Double {
+        switch item.resolvedDataSource {
+        case .current:
+            return 0.08
+        case .lastSuccessful:
+            return 0.14
+        case .unknown:
+            return 0.16
+        }
+    }
+
+    private var symbolName: String {
+        switch item.resolvedDataSource {
+        case .current:
+            return "checkmark.circle.fill"
+        case .lastSuccessful:
+            return "clock.arrow.circlepath"
+        case .unknown:
+            return "questionmark.circle.fill"
+        }
+    }
+}
+
 private struct SmallGlanceWidgetView: View {
     let entry: WidgetEntry
 
@@ -881,8 +997,8 @@ private struct SmallGlanceWidgetView: View {
             )
         case .unknown, .failed:
             shortState(
-                title: WidgetRefreshCopy.pendingConfirmationTitle,
-                detail: WidgetRefreshCopy.pendingConfirmationDetail,
+                title: entry.trustAssessment?.title ?? WidgetRefreshCopy.pendingConfirmationTitle,
+                detail: entry.trustAssessment?.detail ?? WidgetRefreshCopy.pendingConfirmationDetail,
                 icon: "questionmark.circle"
             )
         case .none:
@@ -979,16 +1095,22 @@ private struct MediumGlanceWidgetView: View {
             return "没有仓库"
         }
 
-        let activeRepos = summary.changedRepositories + summary.errorRepositories
-        if activeRepos == 0 {
+        if summary.errorRepositories > 0 {
+            if summary.changedRepositories > 0 {
+                return "\(summary.errorRepositories) 待确认 · \(summary.changedRepositories) 有改动"
+            }
+            return "\(summary.errorRepositories) 个状态待确认"
+        }
+
+        if summary.changedRepositories == 0 {
             return "全部干净"
         }
 
         if summary.totalChangedFiles > 0 {
-            return "\(activeRepos) 个活跃仓库 · \(summary.totalChangedFiles) 个文件"
+            return "\(summary.changedRepositories) 个活跃仓库 · \(summary.totalChangedFiles) 个文件"
         }
 
-        return "\(activeRepos) 个活跃仓库"
+        return "\(summary.changedRepositories) 个活跃仓库"
     }
 
     @ViewBuilder
@@ -1026,8 +1148,8 @@ private struct MediumGlanceWidgetView: View {
             )
         case .unknown, .failed:
             shortState(
-                title: WidgetRefreshCopy.pendingConfirmationTitle,
-                detail: WidgetRefreshCopy.pendingConfirmationDetail,
+                title: entry.trustAssessment?.title ?? WidgetRefreshCopy.pendingConfirmationTitle,
+                detail: entry.trustAssessment?.detail ?? WidgetRefreshCopy.pendingConfirmationDetail,
                 icon: "questionmark.circle"
             )
         case .none:
@@ -1134,12 +1256,18 @@ private struct LargeGlanceWidgetView: View {
             return "没有仓库"
         }
 
-        let activeRepos = summary.changedRepositories + summary.errorRepositories
-        if activeRepos == 0 {
+        if summary.errorRepositories > 0 {
+            if summary.changedRepositories > 0 {
+                return "\(summary.errorRepositories) 待确认 · \(summary.changedRepositories) 有改动"
+            }
+            return "\(summary.errorRepositories) 个状态待确认"
+        }
+
+        if summary.changedRepositories == 0 {
             return "全部干净"
         }
 
-        return "\(activeRepos) 个待看仓库"
+        return "\(summary.changedRepositories) 个有改动仓库"
     }
 
     @ViewBuilder
@@ -1177,8 +1305,8 @@ private struct LargeGlanceWidgetView: View {
             )
         case .unknown, .failed:
             shortState(
-                title: WidgetRefreshCopy.pendingConfirmationTitle,
-                detail: WidgetRefreshCopy.pendingConfirmationDetail,
+                title: entry.trustAssessment?.title ?? WidgetRefreshCopy.pendingConfirmationTitle,
+                detail: entry.trustAssessment?.detail ?? WidgetRefreshCopy.pendingConfirmationDetail,
                 icon: "questionmark.circle"
             )
         case .none:
@@ -1388,14 +1516,9 @@ private struct SimpleWidgetRepositoryRow: View {
             }
 
             HStack(spacing: 6) {
-                Text(statusLabel)
-                    .font(.caption2.weight(.semibold))
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(statusTint.opacity(0.14)))
-                    .foregroundStyle(statusTint)
+                WidgetDataSourceBadge(item: item, compact: true)
 
-                Text(item.branch.isEmpty ? "detached" : item.branch)
+                Text(item.branchDisplayLabel)
                     .font(.caption2)
                     .lineLimit(1)
                     .foregroundStyle(.secondary)
@@ -1410,27 +1533,6 @@ private struct SimpleWidgetRepositoryRow: View {
         }
     }
 
-    private var statusLabel: String {
-        switch item.status {
-        case .clean:
-            return "Clean"
-        case .changed:
-            return "Dirty"
-        case .error:
-            return "Error"
-        }
-    }
-
-    private var statusTint: Color {
-        switch item.status {
-        case .clean:
-            return .green
-        case .changed:
-            return .orange
-        case .error:
-            return .red
-        }
-    }
 }
 
 private struct SimpleSmallGlanceWidgetView: View {
@@ -1735,15 +1837,40 @@ private extension WidgetSnapshotLoadError {
 
 private extension ActivityTimelineItem {
     var widgetChangeCountLabel: String {
-        changedFileCount == 1 ? "1 处改动" : "\(changedFileCount) 处改动"
+        switch resolvedDataSource {
+        case .current:
+            return changedFileCount == 1 ? "1 处改动" : "\(changedFileCount) 处改动"
+        case .lastSuccessful:
+            return changedFileCount == 1 ? "上次 1 处改动" : "上次 \(changedFileCount) 处改动"
+        case .unknown:
+            return "改动未知"
+        }
     }
 
     var activityLabel: String {
-        if let lastChangedAt {
-            return DateFormatting.relativeTime(from: lastChangedAt)
+        switch resolvedDataSource {
+        case .current:
+            if let lastChangedAt {
+                return "改动 \(DateFormatting.relativeTime(from: lastChangedAt))"
+            }
+            return "扫描 \(DateFormatting.relativeTime(from: lastScannedAt))"
+        case .lastSuccessful:
+            if let resolvedLastSuccessfulScanAt {
+                return "上次成功 \(DateFormatting.relativeTime(from: resolvedLastSuccessfulScanAt))"
+            }
+            return "上次成功时间未知"
+        case .unknown:
+            return "上次尝试 \(DateFormatting.relativeTime(from: lastScannedAt))"
         }
+    }
 
-        return DateFormatting.relativeTime(from: lastScannedAt)
+    var widgetReadinessOrSourceHint: String {
+        switch resolvedDataSource {
+        case .current:
+            return commitReadiness.widgetShortHint
+        case .lastSuccessful, .unknown:
+            return dataSourcePresentation.detail
+        }
     }
 }
 

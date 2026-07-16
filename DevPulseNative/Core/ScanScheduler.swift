@@ -127,6 +127,10 @@ enum ScanSchedulerPolicy {
     static let repositoryRediscoveryInterval: TimeInterval = 60 * 60
     static let widgetReloadThrottleInterval: TimeInterval = 15 * 60
 
+    static func allRepositoryDataUnavailable(_ repositories: [RepositorySnapshot]) -> Bool {
+        RepositoryDataAvailability.allUnavailable(repositories)
+    }
+
     struct WidgetReloadDecision: Equatable {
         let shouldRequest: Bool
         let detail: String
@@ -316,6 +320,11 @@ enum ScanSchedulerPolicy {
             && previous.changedFileCount == next.changedFileCount
             && previous.changedFilesPreview == next.changedFilesPreview
             && previous.risk == next.risk
+            && previous.resolvedDataSource == next.resolvedDataSource
+            && (
+                previous.resolvedDataSource == .current
+                    || previous.resolvedLastSuccessfulScanAt == next.resolvedLastSuccessfulScanAt
+            )
             && previous.lastChangedAt == next.lastChangedAt
             && previous.lastCommitSummary == next.lastCommitSummary
             && previous.lastCommitMetadataAvailable == next.lastCommitMetadataAvailable
@@ -583,7 +592,7 @@ final class ScanScheduler: ObservableObject {
 
         gitAvailable = ProcessRunner.isGitAvailable()
         guard gitAvailable else {
-            failRefresh("Git 不可用")
+            failRefresh("Git 不可用", persistRepositoryTrustFailure: true)
             _ = refreshCoordinator.completeCurrent()
             startNextCoalescedScanIfNeeded()
             return
@@ -658,6 +667,11 @@ final class ScanScheduler: ObservableObject {
                     self.warnings = [failureMessage] + combinedWarnings.filter { $0 != failureMessage }
                     self.diagnostics.validationIssues = self.warnings
                     self.recordEvent(.scanFailed, failureMessage)
+
+                    self.persistRepositoryTrustFailure(
+                        failureMessage,
+                        fallbackSnapshot: result.data
+                    )
                     self.triggerPendingWakeRefreshIfNeeded()
                     return
                 }
@@ -720,7 +734,7 @@ final class ScanScheduler: ObservableObject {
     func runSelfCheck() async -> ScanSelfCheckReport {
         gitAvailable = ProcessRunner.isGitAvailable()
         guard gitAvailable else {
-            failRefresh("Git 不可用")
+            failRefresh("Git 不可用", persistRepositoryTrustFailure: true)
             return makeSelfCheckReport()
         }
 
@@ -964,13 +978,25 @@ final class ScanScheduler: ObservableObject {
             if let writtenAt = restoredSnapshot.writtenAt.flatMap(DateFormatting.date(from:)) {
                 diagnostics.lastSharedWriteAt = writtenAt
             }
-            if let generatedAt = DateFormatting.date(from: restoredSnapshot.generatedAt) {
+            let hasSuccessfulRepositoryData = pinned.repositories.contains {
+                $0.resolvedLastSuccessfulScanAt != nil
+            }
+            if (pinned.repositories.isEmpty || hasSuccessfulRepositoryData),
+               let generatedAt = DateFormatting.date(from: restoredSnapshot.generatedAt) {
                 lastScanAt = generatedAt
                 diagnostics.lastScanAt = generatedAt
             }
-            refreshPhase = .idle
-            refreshFailureMessage = nil
-            warnings = []
+            let retainedOnly = ScanSchedulerPolicy.allRepositoryDataUnavailable(pinned.repositories)
+            if retainedOnly {
+                let message = "上次扫描未能刷新仓库，当前显示上次成功或未知数据"
+                refreshPhase = .failure
+                refreshFailureMessage = message
+                warnings = [message]
+            } else {
+                refreshPhase = .idle
+                refreshFailureMessage = nil
+                warnings = []
+            }
             setWidgetReadableSnapshot(restoredSnapshot, readAt: now)
             validateConsistency(expected: pinned, shared: restoredSnapshot, widget: diagnostics.widgetSnapshot, reason: "startup")
         case .failure(.snapshotMissing):
@@ -1206,10 +1232,50 @@ final class ScanScheduler: ObservableObject {
             return warning
         }
 
+        if ScanSchedulerPolicy.allRepositoryDataUnavailable(data.repositories) {
+            return "本轮未能读取任何仓库的当前 Git 状态"
+        }
+
         return nil
     }
 
-    private func failRefresh(_ message: String) {
+    private func persistRepositoryTrustFailure(
+        _ message: String,
+        fallbackSnapshot: AppGroupData? = nil
+    ) {
+        // Preserve the top-level generatedAt as the last successful scan time
+        // while writing a new repository-level provenance state for Widget and
+        // relaunch recovery. When no prior snapshot exists, keep the unknown
+        // repositories from the failed attempt instead of dropping them.
+        let previousSnapshot = lastResult
+        let failureBasis = previousSnapshot.repositories.isEmpty
+            ? fallbackSnapshot
+            : previousSnapshot
+        guard let failureBasis, !failureBasis.repositories.isEmpty else { return }
+
+        let retained = failureBasis.retainingLastSuccessfulRepositories(
+            attemptedAt: DateFormatting.nowISO(),
+            errorMessage: message
+        )
+        let sortedRetained = AppGroupData(
+            schemaVersion: retained.schemaVersion,
+            generatedAt: retained.generatedAt,
+            writtenAt: retained.writtenAt,
+            scanSummary: retained.scanSummary,
+            repositories: RepositorySorter.sort(retained.repositories)
+        )
+        lastResult = applyPins(sortedRetained)
+        syncSharedSnapshot(
+            from: lastResult,
+            previousSnapshot: previousSnapshot,
+            reason: "scan-failure"
+        )
+    }
+
+    private func failRefresh(
+        _ message: String,
+        persistRepositoryTrustFailure shouldPersistRepositoryTrustFailure: Bool = false
+    ) {
         isScanning = false
         refreshPhase = .failure
         refreshFailureMessage = message
@@ -1218,6 +1284,9 @@ final class ScanScheduler: ObservableObject {
         diagnostics.validationIssues = [message]
         diagnostics.nextSteps = suggestedNextSteps(from: [message])
         recordEvent(.scanFailed, message)
+        if shouldPersistRepositoryTrustFailure {
+            persistRepositoryTrustFailure(message)
+        }
         triggerPendingWakeRefreshIfNeeded()
     }
 

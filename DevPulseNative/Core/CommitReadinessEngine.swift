@@ -88,7 +88,8 @@ enum CommitReadinessEngine {
             ),
             conflictedFileCount: snapshot.conflictedFileCount ?? 0,
             aheadCount: snapshot.aheadCount ?? 0,
-            scanError: snapshot.errorMessage != nil
+            scanError: snapshot.errorMessage != nil,
+            dataSource: snapshot.resolvedDataSource
         )
     }
 
@@ -103,7 +104,31 @@ enum CommitReadinessEngine {
                        unstagedFileCount: Int,
                        conflictedFileCount: Int,
                        aheadCount: Int,
-                       scanError: Bool) -> CommitReadinessAssessment {
+                       scanError: Bool,
+                       dataSource: RepositoryDataSource = .current) -> CommitReadinessAssessment {
+        switch dataSource {
+        case .lastSuccessful:
+            return assessment(
+                level: .unknown,
+                reasons: [.scanError],
+                detail: "当前状态待确认，正在显示上次成功数据",
+                nextStep: "先重新扫描确认当前状态，再决定是否提交、push 或同步",
+                widgetShortHint: "上次成功数据，先刷新确认",
+                basisSummary: "数据来源：上次成功扫描；本轮读取未成功"
+            )
+        case .unknown:
+            return assessment(
+                level: .unknown,
+                reasons: [.scanError],
+                detail: "当前仓库数据未知",
+                nextStep: "先打开 Diagnostics 并重新扫描，再决定是否操作仓库",
+                widgetShortHint: "数据未知，先看 Diagnostics",
+                basisSummary: "数据来源：未知；没有可用的成功扫描结果"
+            )
+        case .current:
+            break
+        }
+
         let changedFileCount = modifiedFileCount + addedFileCount + deletedFileCount + untrackedFileCount
         let branchNeedsConfirmation = branchNeedsConfirmation(branch)
         let looseFileCount = unstagedFileCount + untrackedFileCount

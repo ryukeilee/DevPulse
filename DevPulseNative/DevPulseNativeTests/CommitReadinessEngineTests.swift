@@ -241,6 +241,42 @@ struct CommitReadinessEngineTests {
         #expect(assessment.basis.contains("writtenAt"))
     }
 
+    @Test func snapshotTrustAssessmentDoesNotTreatFailureHealthWriteAsFreshData() {
+        let now = Date(timeIntervalSince1970: 1_718_000_000)
+        let formatter = ISO8601DateFormatter()
+        let lastSuccessfulAt = formatter.string(from: now.addingTimeInterval(-20 * 60))
+        let snapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: lastSuccessfulAt,
+            writtenAt: formatter.string(from: now),
+            scanSummary: ScanSummary(
+                totalRepositories: 1,
+                changedRepositories: 0,
+                totalChangedFiles: 0,
+                errorRepositories: 1
+            ),
+            repositories: [
+                self.snapshot(
+                    status: .error,
+                    lastScannedAt: formatter.string(from: now),
+                    dataSource: .lastSuccessful,
+                    lastSuccessfulScanAt: lastSuccessfulAt,
+                    errorMessage: "读取失败"
+                )
+            ]
+        )
+
+        let assessment = RefreshStatusFormatter.snapshotAssessment(
+            snapshot: snapshot,
+            now: now
+        )
+
+        #expect(assessment.state == .failed)
+        #expect(assessment.title == "显示上次成功数据")
+        #expect(assessment.detail.contains("上次成功刷新"))
+        #expect(assessment.basis.contains("writtenAt"))
+    }
+
     @Test func widgetPrioritySummaryUsesReadyAdviceWhenFresh() {
         let summary = WidgetPrioritySummaryBuilder.build(
             feed: ActivityTimelineFeed(
@@ -342,7 +378,7 @@ struct CommitReadinessEngineTests {
 
         #expect(summary.title == "repo-1")
         #expect(summary.readinessLevel == .unknown)
-        #expect(summary.message == "状态读取失败，先看 Diagnostics")
+        #expect(summary.message == "数据未知，先看 Diagnostics")
     }
 
     @Test func widgetRepositoryPriorityBuilderPrefersDirtyRepos() {
@@ -907,13 +943,202 @@ struct CommitReadinessEngineTests {
         )
 
         #expect(failedPresentation.action.title == "检查读取异常")
-        #expect(failedPresentation.latestCommit == "提交信息暂不可用")
+        #expect(failedPresentation.latestCommit == "提交信息未知")
         #expect(failedPresentation.localChanges == "本地改动未知")
         #expect(failedPresentation.synchronization == "同步状态未知")
-        #expect(failedPresentation.recentActivity == "暂无活动记录")
+        #expect(failedPresentation.recentActivity == "当前活动未知")
         #expect(localOnlyPresentation.synchronization == "未关联上游")
         #expect(localOnlyPresentation.action.title == "无需处理")
-        #expect(lastKnownPresentation.latestCommit == "上次记录 · 2 小时前 · Last known subject")
+        #expect(lastKnownPresentation.latestCommit == "上次成功提交 · 2 小时前 · Last known subject")
+    }
+
+    @Test func currentRepositoryWithPartialCommitMetadataFailureKeepsCurrentReadiness() {
+        let repository = snapshot(
+            modified: 1,
+            status: .changed,
+            lastCommitSummary: "Last successful subject",
+            lastCommitMetadataAvailable: false,
+            dataSource: .current
+        )
+        let presentation = RepositoryListItemPresentationBuilder.build(snapshot: repository)
+
+        #expect(repository.resolvedDataSource == .current)
+        #expect(repository.commitReadiness.level == .review)
+        #expect(repository.actionState.kind == .reviewLocalChanges)
+        #expect(presentation.latestCommit.contains("上次成功提交"))
+        #expect(presentation.dataSource.source == .current)
+    }
+
+    @Test func legacyV1SnapshotsInferTrustSourceFromRepositoryStatus() throws {
+        let repositories = [
+            snapshot(id: "clean", name: "clean", status: .clean),
+            snapshot(id: "changed", name: "changed", modified: 1),
+            snapshot(id: "error", name: "error", status: .error, errorMessage: "读取失败")
+        ]
+        let current = AppGroupData(
+            schemaVersion: 1,
+            generatedAt: "2026-07-14T00:00:00Z",
+            writtenAt: "2026-07-14T00:00:01Z",
+            scanSummary: ScanSummary(totalRepositories: 3, changedRepositories: 3, totalChangedFiles: 99, errorRepositories: 0),
+            repositories: repositories
+        )
+        let encoded = try JSONEncoder().encode(current)
+        var legacyObject = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var legacyRepositories = try #require(legacyObject["repositories"] as? [[String: Any]])
+        for index in legacyRepositories.indices {
+            legacyRepositories[index].removeValue(forKey: "dataSource")
+            legacyRepositories[index].removeValue(forKey: "lastSuccessfulScanAt")
+        }
+        legacyObject["repositories"] = legacyRepositories
+
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+        let decoded = try JSONDecoder().decode(AppGroupData.self, from: legacyData)
+
+        #expect(decoded.repositories.first(where: { $0.id == "clean" })?.resolvedDataSource == .current)
+        #expect(decoded.repositories.first(where: { $0.id == "changed" })?.resolvedDataSource == .current)
+        let errored = try #require(decoded.repositories.first(where: { $0.id == "error" }))
+        #expect(errored.resolvedDataSource == .unknown)
+        #expect(errored.commitReadiness.level == .unknown)
+
+        let normalizedForWidget = RepositoryIdentity.normalize(decoded)
+        #expect(normalizedForWidget.scanSummary.changedRepositories == 1)
+        #expect(normalizedForWidget.scanSummary.totalChangedFiles == 1)
+        #expect(normalizedForWidget.scanSummary.errorRepositories == 1)
+    }
+
+    @Test func staleAndUnknownSourcesUseRefreshSafetyAcrossPresentationsAndWidgetPriority() throws {
+        let current = snapshot(
+            id: "current",
+            name: "current",
+            modified: 1,
+            lastChangedAt: "2026-07-14T10:00:00Z",
+            dataSource: .current
+        )
+        let stale = snapshot(
+            id: "stale",
+            name: "stale",
+            modified: 5,
+            staged: 5,
+            ahead: 2,
+            dataSource: .lastSuccessful,
+            lastSuccessfulScanAt: "2026-07-14T08:00:00Z"
+        )
+        let unknown = snapshot(
+            id: "unknown",
+            name: "unknown",
+            status: .error,
+            dataSource: .unknown,
+            errorMessage: "读取失败"
+        )
+
+        let stalePresentation = RepositoryListItemPresentationBuilder.build(snapshot: stale)
+        #expect(stalePresentation.dataSource.source == .lastSuccessful)
+        #expect(stalePresentation.action.kind == .refreshRepositoryState)
+        #expect(stale.commitReadiness.level == .unknown)
+
+        let unknownPresentation = RepositoryListItemPresentationBuilder.build(snapshot: unknown)
+        #expect(unknownPresentation.dataSource.source == .unknown)
+        #expect(unknownPresentation.action.kind == .diagnoseReadFailure)
+        #expect(unknown.commitReadiness.level == .unknown)
+
+        let timeline = ActivityTimelineBuilder.build(
+            from: [stale, current, unknown],
+            lastScanAt: DateFormatting.date(from: "2026-07-14T10:00:00Z")
+        )
+        let staleItem = try #require(timeline.items.first(where: { $0.id == "stale" }))
+        let unknownItem = try #require(timeline.items.first(where: { $0.id == "unknown" }))
+        #expect(staleItem.resolvedDataSource == .lastSuccessful)
+        #expect(staleItem.commitReadiness.level == .unknown)
+        #expect(unknownItem.resolvedDataSource == .unknown)
+        #expect(unknownItem.commitReadiness.level == .unknown)
+
+        let widgetItems = WidgetRepositoryPriorityBuilder.build(from: [stale, current, unknown])
+        #expect(widgetItems.first(where: { $0.id == "stale" })?.resolvedDataSource == .lastSuccessful)
+        #expect(widgetItems.first(where: { $0.id == "unknown" })?.commitReadiness.level == .unknown)
+        #expect(Set(widgetItems.map(\.id)) == Set(timeline.items.map(\.id)))
+    }
+
+    @Test func appGroupRetentionKeepsOriginalSuccessfulTimestampAcrossFailures() throws {
+        let successfulAt = "2026-07-14T08:00:00Z"
+        let initial = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: successfulAt,
+            writtenAt: successfulAt,
+            scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 1, totalChangedFiles: 1, errorRepositories: 0),
+            repositories: [
+                snapshot(
+                    modified: 1,
+                    staged: 1,
+                    lastScannedAt: successfulAt,
+                    dataSource: .current
+                )
+            ]
+        )
+
+        let firstFailure = initial.retainingLastSuccessfulRepositories(
+            attemptedAt: "2026-07-14T09:00:00Z",
+            errorMessage: "Git 读取失败"
+        )
+        let secondFailure = firstFailure.retainingLastSuccessfulRepositories(
+            attemptedAt: "2026-07-14T10:00:00Z",
+            errorMessage: "Git 读取失败"
+        )
+        let firstRepository = try #require(firstFailure.repositories.first)
+        let secondRepository = try #require(secondFailure.repositories.first)
+
+        #expect(firstRepository.resolvedDataSource == .lastSuccessful)
+        #expect(firstRepository.resolvedLastSuccessfulScanAt == successfulAt)
+        #expect(firstRepository.actionState.kind == .refreshRepositoryState)
+        #expect(secondRepository.resolvedDataSource == .lastSuccessful)
+        #expect(secondRepository.resolvedLastSuccessfulScanAt == successfulAt)
+        #expect(secondRepository.lastScannedAt == "2026-07-14T10:00:00Z")
+        #expect(secondRepository.commitReadiness.level == .unknown)
+        #expect(secondFailure.generatedAt == successfulAt)
+        #expect(secondFailure.scanSummary.changedRepositories == 0)
+        #expect(secondFailure.scanSummary.totalChangedFiles == 0)
+        #expect(secondFailure.scanSummary.errorRepositories == 1)
+    }
+
+    @Test func schedulerPolicyTreatsOnlyUnavailableRepositoriesAsScanFailure() {
+        let stale = snapshot(
+            id: "stale",
+            name: "stale",
+            modified: 3,
+            dataSource: .lastSuccessful,
+            lastSuccessfulScanAt: "2026-07-14T08:00:00Z"
+        )
+        let unknown = snapshot(
+            id: "unknown",
+            name: "unknown",
+            status: .error,
+            dataSource: .unknown,
+            errorMessage: "读取失败"
+        )
+        let current = snapshot(id: "current", name: "current", modified: 1, dataSource: .current)
+
+        #expect(ScanSchedulerPolicy.allRepositoryDataUnavailable([stale, unknown]))
+        #expect(!ScanSchedulerPolicy.allRepositoryDataUnavailable([stale, current]))
+        #expect(!ScanSchedulerPolicy.allRepositoryDataUnavailable([]))
+    }
+
+    @Test func branchPresentationNeverShowsRetainedBranchAsCurrent() {
+        let current = snapshot(branch: "main", dataSource: .current)
+        let stale = snapshot(
+            branch: "feature/stale",
+            dataSource: .lastSuccessful,
+            lastSuccessfulScanAt: "2026-07-14T08:00:00Z"
+        )
+        let unknown = snapshot(
+            status: .error,
+            branch: "feature/unverified",
+            dataSource: .unknown,
+            errorMessage: "读取失败"
+        )
+
+        #expect(current.branchDisplayLabel == "main")
+        #expect(stale.branchDisplayLabel == "上次 · feature/stale")
+        #expect(unknown.branchDisplayLabel == "分支未知")
+        #expect(ActivityTimelineItem(from: stale).branchDisplayLabel == stale.branchDisplayLabel)
     }
 
     @Test func repositorySorterPreservesPinsThenOrdersTheActionQueue() {
@@ -1061,9 +1286,9 @@ struct CommitReadinessEngineTests {
             repositories: [snapshot(status: .error, errorMessage: "读取失败")]
         )
 
-        #expect(focus.title == "repo-1 状态读取失败")
+        #expect(focus.title == "repo-1 当前数据未知")
         #expect(focus.action.kind == .openDiagnostics)
-        #expect(focus.detail == "先看 Diagnostics，确认 Git 读取失败原因。")
+        #expect(focus.detail == "先看 Diagnostics 并重新扫描；当前没有可用于提交、push 或同步的可信数据。")
     }
 
     @Test func overviewFocusUsesRepositoriesAsPrimaryActionWhenWorkExists() {
@@ -1266,10 +1491,10 @@ struct CommitReadinessEngineTests {
         #expect(result.level == .unknown)
         #expect(result.reasons == [.scanError])
         #expect(result.shortLabel == "Unknown")
-        #expect(result.detail == "Git 状态读取失败")
-        #expect(result.reviewReceipt.nextStep == "先打开 Diagnostics，确认 Git 读取失败原因")
-        #expect(result.widgetShortHint == "状态读取失败，先看 Diagnostics")
-        #expect(repo.nextActionHint == "先看 Diagnostics，确认 Git 读取失败原因。")
+        #expect(result.detail == "当前仓库数据未知")
+        #expect(result.reviewReceipt.nextStep == "先打开 Diagnostics 并重新扫描，再决定是否操作仓库")
+        #expect(result.widgetShortHint == "数据未知，先看 Diagnostics")
+        #expect(repo.nextActionHint == "先看 Diagnostics 并重新扫描；当前没有可用于提交、push 或同步的可信数据。")
     }
 
     @Test func conflictedFilesAreDirty() {
@@ -1627,8 +1852,10 @@ struct CommitReadinessEngineTests {
         let repo = try #require(result.data.repositories.first(where: { $0.name == "broken-repo" }))
         #expect(repo.status == .error)
         #expect(repo.errorMessage == "读取失败")
+        #expect(repo.resolvedDataSource == .unknown)
         #expect(repo.commitReadiness.level == .unknown)
-        #expect(repo.commitReadiness.reviewReceipt.nextStep == "先打开 Diagnostics，确认 Git 读取失败原因")
+        #expect(repo.actionState.kind == .diagnoseReadFailure)
+        #expect(repo.commitReadiness.reviewReceipt.nextStep == "先打开 Diagnostics 并重新扫描，再决定是否操作仓库")
     }
 
     @Test func gitScannerReusesDiscoveryCacheUntilForcedRescan() async throws {
@@ -1787,10 +2014,83 @@ struct CommitReadinessEngineTests {
         )
 
         let retained = try #require(timedOut.data.repositories.first)
-        #expect(retained == baselineRepo)
         #expect(timedOut.data.repositories.count == 1)
         #expect(timedOut.warnings.contains { $0.contains("timeout") })
         #expect(retained.id == RepositoryIdentity.id(for: retained.path))
+        #expect(baselineRepo.resolvedDataSource == .current)
+        #expect(retained.resolvedDataSource == .lastSuccessful)
+        #expect(retained.resolvedLastSuccessfulScanAt == baselineRepo.resolvedLastSuccessfulScanAt)
+        #expect(retained.commitReadiness.level == .unknown)
+        #expect(retained.actionState.kind == .refreshRepositoryState)
+    }
+
+    @Test func gitScannerFailureRetainsLastSuccessfulSnapshotUntilRecovery() async throws {
+        let root = try temporaryDirectory(named: "scanner-read-failure-retain")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repository = root.appendingPathComponent("repo")
+        try createCommittedRepository(at: repository)
+        try "staged change\n".write(
+            to: repository.appendingPathComponent("staged.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "staged.txt"], in: repository)
+
+        let baseline = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true
+        )
+        let baselineRepository = try #require(baseline.data.repositories.first)
+        let gitDirectory = repository.appendingPathComponent(".git")
+        let heldGitDirectory = repository.appendingPathComponent(".git-held")
+        try FileManager.default.moveItem(at: gitDirectory, to: heldGitDirectory)
+        defer {
+            if FileManager.default.fileExists(atPath: heldGitDirectory.path) {
+                try? FileManager.default.moveItem(at: heldGitDirectory, to: gitDirectory)
+            }
+        }
+
+        let firstFailure = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            knownRepositoryPaths: baseline.discoveredRepositoryPaths,
+            previousSnapshot: baseline.data
+        )
+        let firstRetained = try #require(firstFailure.data.repositories.first)
+
+        let secondFailure = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            knownRepositoryPaths: baseline.discoveredRepositoryPaths,
+            previousSnapshot: firstFailure.data
+        )
+        let secondRetained = try #require(secondFailure.data.repositories.first)
+
+        #expect(baselineRepository.resolvedDataSource == .current)
+        #expect(baselineRepository.actionState.kind == .commitStagedChanges)
+        #expect(firstRetained.resolvedDataSource == .lastSuccessful)
+        #expect(firstRetained.resolvedLastSuccessfulScanAt == baselineRepository.resolvedLastSuccessfulScanAt)
+        #expect(firstRetained.commitReadiness.level == .unknown)
+        #expect(firstRetained.actionState.kind == .refreshRepositoryState)
+        #expect(secondRetained.resolvedDataSource == .lastSuccessful)
+        #expect(secondRetained.resolvedLastSuccessfulScanAt == firstRetained.resolvedLastSuccessfulScanAt)
+        #expect(secondRetained.commitReadiness.level == .unknown)
+        #expect(secondRetained.actionState.kind == .refreshRepositoryState)
+
+        try FileManager.default.moveItem(at: heldGitDirectory, to: gitDirectory)
+        let recovered = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            knownRepositoryPaths: baseline.discoveredRepositoryPaths,
+            previousSnapshot: secondFailure.data
+        )
+        let recoveredRepository = try #require(recovered.data.repositories.first)
+
+        #expect(recoveredRepository.resolvedDataSource == .current)
+        #expect(recoveredRepository.commitReadiness.level == .ready)
+        #expect(recoveredRepository.actionState.kind == .commitStagedChanges)
     }
 
     @Test func processRunnerStopsCancelledCommand() async throws {
@@ -2201,6 +2501,8 @@ struct CommitReadinessEngineTests {
         lastCommitSummary: String? = nil,
         lastCommitMetadataAvailable: Bool? = nil,
         lastActivityAt: String? = nil,
+        dataSource: RepositoryDataSource? = nil,
+        lastSuccessfulScanAt: String? = nil,
         errorMessage: String? = nil,
         isPinned: Bool = false
     ) -> RepositorySnapshot {
@@ -2224,6 +2526,8 @@ struct CommitReadinessEngineTests {
             changedFilesPreview: [],
             risk: risk,
             lastScannedAt: lastScannedAt,
+            dataSource: dataSource,
+            lastSuccessfulScanAt: lastSuccessfulScanAt,
             lastChangedAt: lastChangedAt,
             lastCommitSummary: lastCommitSummary,
             lastCommitMetadataAvailable: lastCommitMetadataAvailable,

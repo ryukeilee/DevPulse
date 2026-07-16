@@ -114,6 +114,8 @@ enum RepositoryIdentity {
             changedFilesPreview: snapshot.changedFilesPreview,
             risk: snapshot.risk,
             lastScannedAt: snapshot.lastScannedAt,
+            dataSource: snapshot.resolvedDataSource,
+            lastSuccessfulScanAt: snapshot.resolvedLastSuccessfulScanAt,
             lastChangedAt: snapshot.lastChangedAt,
             lastCommitSummary: snapshot.lastCommitSummary,
             lastCommitMetadataAvailable: snapshot.lastCommitMetadataAvailable,
@@ -142,12 +144,7 @@ enum RepositoryIdentity {
             repositories.append(normalized)
         }
 
-        let summary = ScanSummary(
-            totalRepositories: repositories.count,
-            changedRepositories: repositories.filter { $0.status == .changed }.count,
-            totalChangedFiles: repositories.reduce(0) { $0 + $1.changedFileCount },
-            errorRepositories: repositories.filter { $0.status == .error }.count
-        )
+        let summary = ScanSummary.build(from: repositories)
         return AppGroupData(
             schemaVersion: data.schemaVersion,
             generatedAt: data.generatedAt,
@@ -180,6 +177,8 @@ enum RepositoryIdentity {
             changedFilesPreview: lhs.changedFilesPreview,
             risk: lhs.risk,
             lastScannedAt: lhs.lastScannedAt,
+            dataSource: lhs.resolvedDataSource,
+            lastSuccessfulScanAt: lhs.resolvedLastSuccessfulScanAt,
             lastChangedAt: lhs.lastChangedAt,
             lastCommitSummary: lhs.lastCommitSummary,
             lastCommitMetadataAvailable: lhs.lastCommitMetadataAvailable,
@@ -274,6 +273,23 @@ enum RepositoryStatus: String, Codable {
     case error = "error"
 }
 
+/// Describes whether repository values came from the latest scan attempt.
+///
+/// The persisted property is optional on `RepositorySnapshot` so schema-v1
+/// snapshots written before provenance was introduced remain decodable.
+enum RepositoryDataSource: String, Codable, Equatable {
+    case current
+    case lastSuccessful
+    case unknown
+}
+
+enum RepositoryDataAvailability {
+    static func allUnavailable(_ repositories: [RepositorySnapshot]) -> Bool {
+        !repositories.isEmpty
+            && !repositories.contains { $0.resolvedDataSource == .current }
+    }
+}
+
 // MARK: - Repository snapshot
 
 struct RepositoryChangeCounts: Codable, Equatable {
@@ -310,6 +326,8 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
     let changedFilesPreview: [String]
     let risk: RiskLevel
     let lastScannedAt: String
+    let dataSource: RepositoryDataSource?
+    let lastSuccessfulScanAt: String?
     let lastChangedAt: String?
     let lastCommitSummary: String?
     let lastCommitMetadataAvailable: Bool?
@@ -336,6 +354,8 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
          changedFilesPreview: [String],
          risk: RiskLevel,
          lastScannedAt: String,
+         dataSource: RepositoryDataSource? = nil,
+         lastSuccessfulScanAt: String? = nil,
          lastChangedAt: String?,
          lastCommitSummary: String? = nil,
          lastCommitMetadataAvailable: Bool? = nil,
@@ -361,6 +381,11 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
         self.changedFilesPreview = changedFilesPreview
         self.risk = risk
         self.lastScannedAt = lastScannedAt
+        let resolvedDataSource = dataSource
+            ?? ((status == .error || errorMessage != nil) ? .unknown : .current)
+        self.dataSource = resolvedDataSource
+        self.lastSuccessfulScanAt = lastSuccessfulScanAt
+            ?? (resolvedDataSource == .current ? lastScannedAt : nil)
         self.lastChangedAt = lastChangedAt
         self.lastCommitSummary = lastCommitSummary
         self.lastCommitMetadataAvailable = lastCommitMetadataAvailable
@@ -389,6 +414,8 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
             && lhs.changedFilesPreview == rhs.changedFilesPreview
             && lhs.risk == rhs.risk
             && lhs.lastScannedAt == rhs.lastScannedAt
+            && lhs.dataSource == rhs.dataSource
+            && lhs.lastSuccessfulScanAt == rhs.lastSuccessfulScanAt
             && lhs.lastChangedAt == rhs.lastChangedAt
             && lhs.lastCommitSummary == rhs.lastCommitSummary
             && lhs.lastCommitMetadataAvailable == rhs.lastCommitMetadataAvailable
@@ -424,10 +451,159 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
     var actionState: RepositoryActionState {
         RepositoryActionStateBuilder.build(snapshot: self)
     }
+
+    /// Effective provenance for legacy and current schema-v1 payloads.
+    /// Legacy successful snapshots did not persist provenance, so a non-error
+    /// value is treated as current at the time that snapshot was generated.
+    /// Legacy error snapshots remain unknown because their retained fields
+    /// cannot be proven to have come from a successful scan.
+    var resolvedDataSource: RepositoryDataSource {
+        if let dataSource {
+            return dataSource
+        }
+        return status == .error || errorMessage != nil ? .unknown : .current
+    }
+
+    var resolvedLastSuccessfulScanAt: String? {
+        if let lastSuccessfulScanAt {
+            return lastSuccessfulScanAt
+        }
+        guard dataSource == nil,
+              status != .error,
+              errorMessage == nil else {
+            return nil
+        }
+        return lastScannedAt
+    }
+
+    var dataSourcePresentation: RepositoryDataSourcePresentation {
+        RepositoryDataSourcePresentationBuilder.build(snapshot: self)
+    }
+
+    var branchDisplayLabel: String {
+        RepositoryBranchPresentationBuilder.build(
+            branch: branch,
+            source: resolvedDataSource
+        )
+    }
+
+    /// Preserve payload values after a failed attempt while making it
+    /// impossible for consumers to treat them as current observations.
+    func retainingLastSuccessfulData(
+        attemptedAt: String,
+        errorMessage: String
+    ) -> RepositorySnapshot {
+        let successfulAt = resolvedLastSuccessfulScanAt
+        let retainedSource: RepositoryDataSource = successfulAt == nil
+            ? .unknown
+            : .lastSuccessful
+
+        return RepositorySnapshot(
+            id: id,
+            name: name,
+            path: path,
+            branch: branch,
+            status: .error,
+            modifiedFileCount: modifiedFileCount,
+            addedFileCount: addedFileCount,
+            deletedFileCount: deletedFileCount,
+            untrackedFileCount: untrackedFileCount,
+            stagedFileCount: stagedFileCount,
+            unstagedFileCount: unstagedFileCount,
+            conflictedFileCount: conflictedFileCount,
+            aheadCount: aheadCount,
+            behindCount: behindCount,
+            hasUpstream: hasUpstream,
+            changedFileCount: changedFileCount,
+            changedFilesPreview: changedFilesPreview,
+            risk: risk,
+            lastScannedAt: attemptedAt,
+            dataSource: retainedSource,
+            lastSuccessfulScanAt: successfulAt,
+            lastChangedAt: lastChangedAt,
+            lastCommitSummary: lastCommitSummary,
+            lastCommitMetadataAvailable: false,
+            lastActivityAt: lastActivityAt,
+            errorMessage: errorMessage,
+            isPinned: isPinned
+        )
+    }
+}
+
+struct RepositoryDataSourcePresentation: Equatable {
+    let source: RepositoryDataSource
+    let label: String
+    let detail: String
+}
+
+enum RepositoryDataSourcePresentationBuilder {
+    static func build(
+        snapshot: RepositorySnapshot,
+        now: Date = Date()
+    ) -> RepositoryDataSourcePresentation {
+        build(
+            source: snapshot.resolvedDataSource,
+            lastSuccessfulScanAt: snapshot.resolvedLastSuccessfulScanAt,
+            lastAttemptedScanAt: snapshot.lastScannedAt,
+            now: now
+        )
+    }
+
+    static func build(
+        source: RepositoryDataSource,
+        lastSuccessfulScanAt: String?,
+        lastAttemptedScanAt: String?,
+        now: Date = Date()
+    ) -> RepositoryDataSourcePresentation {
+        switch source {
+        case .current:
+            return RepositoryDataSourcePresentation(
+                source: .current,
+                label: "当前数据",
+                detail: "本轮扫描成功"
+            )
+        case .lastSuccessful:
+            let relativeTime = lastSuccessfulScanAt.flatMap {
+                DateFormatting.relativeTimeChinese(from: $0, relativeTo: now)
+            } ?? "时间未知"
+            return RepositoryDataSourcePresentation(
+                source: .lastSuccessful,
+                label: "上次成功",
+                detail: "上次成功 · \(relativeTime)"
+            )
+        case .unknown:
+            let relativeAttempt = lastAttemptedScanAt.flatMap {
+                DateFormatting.relativeTimeChinese(from: $0, relativeTo: now)
+            }
+            return RepositoryDataSourcePresentation(
+                source: .unknown,
+                label: "数据未知",
+                detail: relativeAttempt.map { "读取失败 · \($0)" }
+                    ?? "当前读取失败，无可用成功数据"
+            )
+        }
+    }
+}
+
+enum RepositoryBranchPresentationBuilder {
+    static func build(branch: String, source: RepositoryDataSource) -> String {
+        let normalizedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        let branchIsKnown = !normalizedBranch.isEmpty
+            && normalizedBranch.lowercased() != "unknown"
+
+        guard source != .unknown, branchIsKnown else {
+            return "分支未知"
+        }
+
+        return source == .lastSuccessful
+            ? "上次 · \(normalizedBranch)"
+            : normalizedBranch
+    }
 }
 
 enum RepositoryActionKind: Equatable {
     case diagnoseReadFailure
+    case refreshRepositoryState
     case resolveConflicts
     case confirmBranch
     case synchronizeDivergedBranch
@@ -446,6 +622,15 @@ struct RepositoryActionState: Equatable {
 
 enum RepositoryActionStateBuilder {
     static func build(snapshot: RepositorySnapshot) -> RepositoryActionState {
+        switch snapshot.resolvedDataSource {
+        case .lastSuccessful:
+            return action(.refreshRepositoryState, title: "先刷新确认状态", priority: 0)
+        case .unknown:
+            return action(.diagnoseReadFailure, title: "检查读取异常", priority: 0)
+        case .current:
+            break
+        }
+
         if snapshot.status == .error || snapshot.errorMessage != nil {
             return action(.diagnoseReadFailure, title: "检查读取异常", priority: 0)
         }
@@ -510,6 +695,7 @@ enum RepositoryActionStateBuilder {
 }
 
 struct RepositoryListItemPresentation: Equatable {
+    let dataSource: RepositoryDataSourcePresentation
     let action: RepositoryActionState
     let latestCommit: String
     let localChanges: String
@@ -520,6 +706,7 @@ struct RepositoryListItemPresentation: Equatable {
 enum RepositoryListItemPresentationBuilder {
     static func build(snapshot: RepositorySnapshot, now: Date = Date()) -> RepositoryListItemPresentation {
         RepositoryListItemPresentation(
+            dataSource: RepositoryDataSourcePresentationBuilder.build(snapshot: snapshot, now: now),
             action: snapshot.actionState,
             latestCommit: latestCommitLabel(snapshot: snapshot, now: now),
             localChanges: localChangesLabel(snapshot: snapshot),
@@ -534,9 +721,18 @@ enum RepositoryListItemPresentationBuilder {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty
 
+        if snapshot.resolvedDataSource == .unknown {
+            return "提交信息未知"
+        }
+
         if snapshot.lastCommitMetadataAvailable == false {
-            guard time != nil || summary != nil else { return "提交信息暂不可用" }
-            return "上次记录 · \(time ?? "时间未知") · \(summary ?? "摘要不可用")"
+            guard time != nil || summary != nil else { return "上次成功提交未知" }
+            return "上次成功提交 · \(time ?? "时间未知") · \(summary ?? "摘要不可用")"
+        }
+
+        if snapshot.resolvedDataSource == .lastSuccessful {
+            guard time != nil || summary != nil else { return "上次成功提交未知" }
+            return "上次成功提交 · \(time ?? "时间未知") · \(summary ?? "摘要不可用")"
         }
 
         if time == nil, summary == nil {
@@ -552,13 +748,30 @@ enum RepositoryListItemPresentationBuilder {
     }
 
     private static func localChangesLabel(snapshot: RepositorySnapshot) -> String {
-        guard snapshot.status != .error else { return "本地改动未知" }
-        return "\(snapshot.changedFileCount) 个文件"
+        switch snapshot.resolvedDataSource {
+        case .unknown:
+            return "本地改动未知"
+        case .lastSuccessful:
+            return "上次成功 · \(snapshot.changedFileCount) 个文件"
+        case .current:
+            guard snapshot.status != .error else { return "本地改动未知" }
+            return "\(snapshot.changedFileCount) 个文件"
+        }
     }
 
     private static func synchronizationLabel(snapshot: RepositorySnapshot) -> String {
-        guard snapshot.status != .error else { return "同步状态未知" }
+        switch snapshot.resolvedDataSource {
+        case .unknown:
+            return "同步状态未知"
+        case .lastSuccessful:
+            return "上次成功 · \(currentSynchronizationLabel(snapshot: snapshot))"
+        case .current:
+            guard snapshot.status != .error else { return "同步状态未知" }
+            return currentSynchronizationLabel(snapshot: snapshot)
+        }
+    }
 
+    private static func currentSynchronizationLabel(snapshot: RepositorySnapshot) -> String {
         if snapshot.hasUpstream == false {
             return "未关联上游"
         }
@@ -578,9 +791,15 @@ enum RepositoryListItemPresentationBuilder {
     }
 
     private static func recentActivityLabel(snapshot: RepositorySnapshot, now: Date) -> String {
+        if snapshot.resolvedDataSource == .unknown {
+            return "当前活动未知"
+        }
         let timestamp = snapshot.lastActivityAt ?? snapshot.lastChangedAt
         guard let timestamp else { return "暂无活动记录" }
-        return relativeTime(timestamp, now: now) ?? "时间未知"
+        let label = relativeTime(timestamp, now: now) ?? "时间未知"
+        return snapshot.resolvedDataSource == .lastSuccessful
+            ? "上次活动 · \(label)"
+            : label
     }
 
     private static func relativeTime(_ timestamp: String?, now: Date) -> String? {
@@ -597,6 +816,15 @@ private extension String {
 
 enum RepositoryNextActionHintBuilder {
     static func build(snapshot: RepositorySnapshot) -> String {
+        switch snapshot.resolvedDataSource {
+        case .lastSuccessful:
+            return "先重新扫描确认当前状态；不要依据上次成功数据提交、push 或同步。"
+        case .unknown:
+            return "先看 Diagnostics 并重新扫描；当前没有可用于提交、push 或同步的可信数据。"
+        case .current:
+            break
+        }
+
         let readiness = snapshot.commitReadiness
 
         if snapshot.status == .error || readiness.level == .unknown {
@@ -679,6 +907,15 @@ enum RepositoryNextActionHintBuilder {
 
 enum RepositoryStatusSummaryBuilder {
     static func build(snapshot: RepositorySnapshot) -> String {
+        switch snapshot.resolvedDataSource {
+        case .lastSuccessful:
+            return "当前状态待确认 · 显示上次成功数据"
+        case .unknown:
+            return "仓库数据未知"
+        case .current:
+            break
+        }
+
         if snapshot.status == .error || snapshot.commitReadiness.level == .unknown {
             return snapshot.errorMessage ?? "Git 状态不可用"
         }
@@ -763,6 +1000,10 @@ struct ActivityTimelineItem: Codable, Identifiable, Equatable {
     let changedFilesPreview: [String]
     let lastChangedAt: String?
     let lastScannedAt: String
+    let dataSource: RepositoryDataSource?
+    let lastSuccessfulScanAt: String?
+    let lastActivityAt: String?
+    let errorMessage: String?
 
     init(from snapshot: RepositorySnapshot) {
         id = snapshot.id
@@ -783,13 +1024,62 @@ struct ActivityTimelineItem: Codable, Identifiable, Equatable {
         changedFilesPreview = ActivityTimelineItem.previewBasenames(from: snapshot.changedFilesPreview)
         lastChangedAt = snapshot.lastChangedAt
         lastScannedAt = snapshot.lastScannedAt
+        dataSource = snapshot.resolvedDataSource
+        lastSuccessfulScanAt = snapshot.resolvedLastSuccessfulScanAt
+        lastActivityAt = snapshot.lastActivityAt
+        errorMessage = snapshot.errorMessage
+    }
+
+    var resolvedDataSource: RepositoryDataSource {
+        if let dataSource {
+            return dataSource
+        }
+        return status == .error || errorMessage != nil ? .unknown : .current
+    }
+
+    var resolvedLastSuccessfulScanAt: String? {
+        if let lastSuccessfulScanAt {
+            return lastSuccessfulScanAt
+        }
+        guard dataSource == nil,
+              status != .error,
+              errorMessage == nil else {
+            return nil
+        }
+        return lastScannedAt
+    }
+
+    var dataSourcePresentation: RepositoryDataSourcePresentation {
+        RepositoryDataSourcePresentationBuilder.build(
+            source: resolvedDataSource,
+            lastSuccessfulScanAt: resolvedLastSuccessfulScanAt,
+            lastAttemptedScanAt: lastScannedAt
+        )
+    }
+
+    var branchDisplayLabel: String {
+        RepositoryBranchPresentationBuilder.build(
+            branch: branch,
+            source: resolvedDataSource
+        )
     }
 
     var activityDate: Date? {
-        if let lastChangedAt, let date = DateFormatting.date(from: lastChangedAt) {
-            return date
+        let candidates: [String?]
+        switch resolvedDataSource {
+        case .current:
+            candidates = [lastActivityAt, lastChangedAt, lastScannedAt]
+        case .lastSuccessful:
+            candidates = [resolvedLastSuccessfulScanAt, lastActivityAt, lastChangedAt]
+        case .unknown:
+            candidates = [lastScannedAt]
         }
-        return DateFormatting.date(from: lastScannedAt)
+        for candidate in candidates.compactMap({ $0 }) {
+            if let date = DateFormatting.date(from: candidate) {
+                return date
+            }
+        }
+        return nil
     }
 
     var commitReadiness: CommitReadinessAssessment {
@@ -805,7 +1095,8 @@ struct ActivityTimelineItem: Codable, Identifiable, Equatable {
             unstagedFileCount: unstagedFileCount,
             conflictedFileCount: conflictedFileCount,
             aheadCount: aheadCount,
-            scanError: status == .error
+            scanError: status == .error,
+            dataSource: resolvedDataSource
         )
     }
 
@@ -852,10 +1143,14 @@ enum ActivityTimelineBuilder {
             return lastScanAt == nil ? .neverScanned : .noRepositories
         }
 
-        let hasChanged = repositories.contains { $0.status == .changed }
-        let hasError = repositories.contains { $0.status == .error }
+        let hasChanged = repositories.contains {
+            $0.resolvedDataSource == .current && $0.status == .changed
+        }
+        let hasUnavailableData = repositories.contains {
+            $0.resolvedDataSource != .current || $0.status == .error
+        }
 
-        if !hasChanged && !hasError {
+        if !hasChanged && !hasUnavailableData {
             return .allClean
         }
 
@@ -864,8 +1159,8 @@ enum ActivityTimelineBuilder {
 
     private static func sort(_ lhs: ActivityTimelineItem,
                              _ rhs: ActivityTimelineItem) -> Bool {
-        let lhsPriority = statusPriority(lhs.status)
-        let rhsPriority = statusPriority(rhs.status)
+        let lhsPriority = itemPriority(lhs)
+        let rhsPriority = itemPriority(rhs)
         if lhsPriority != rhsPriority {
             return lhsPriority < rhsPriority
         }
@@ -882,25 +1177,36 @@ enum ActivityTimelineBuilder {
             return false
         }
 
-        if lhs.changedFileCount != rhs.changedFileCount {
+        if lhs.resolvedDataSource == .current,
+           rhs.resolvedDataSource == .current,
+           lhs.changedFileCount != rhs.changedFileCount {
             return lhs.changedFileCount > rhs.changedFileCount
         }
 
-        if lhs.risk != rhs.risk {
+        if lhs.resolvedDataSource == .current,
+           rhs.resolvedDataSource == .current,
+           lhs.risk != rhs.risk {
             return lhs.risk > rhs.risk
         }
 
         return lhs.repoName.localizedStandardCompare(rhs.repoName) == .orderedAscending
     }
 
-    private static func statusPriority(_ status: RepositoryStatus) -> Int {
-        switch status {
-        case .changed:
+    private static func itemPriority(_ item: ActivityTimelineItem) -> Int {
+        switch item.resolvedDataSource {
+        case .unknown:
             return 0
-        case .error:
+        case .lastSuccessful:
             return 1
-        case .clean:
-            return 2
+        case .current:
+            switch item.status {
+            case .error:
+                return 0
+            case .changed:
+                return 2
+            case .clean:
+                return 3
+            }
         }
     }
 }
@@ -972,10 +1278,21 @@ enum WidgetPrioritySummaryBuilder {
                 title: item.repoName,
                 message: item.commitReadiness.widgetShortHint,
                 readinessLevel: item.commitReadiness.level,
-                auxiliary: item.commitReadiness.level == .unknown
-                    ? "状态异常"
-                    : (item.changedFileCount == 1 ? "1 处改动" : "\(item.changedFileCount) 处改动")
+                auxiliary: auxiliaryLabel(for: item)
             )
+        }
+    }
+
+    private static func auxiliaryLabel(for item: ActivityTimelineItem) -> String {
+        switch item.resolvedDataSource {
+        case .lastSuccessful:
+            return "上次成功数据"
+        case .unknown:
+            return "数据未知"
+        case .current:
+            return item.changedFileCount == 1
+                ? "1 处改动"
+                : "\(item.changedFileCount) 处改动"
         }
     }
 }
@@ -993,13 +1310,15 @@ enum WidgetRepositoryPriorityBuilder {
 
     private static func sort(_ lhs: ActivityTimelineItem,
                              _ rhs: ActivityTimelineItem) -> Bool {
-        let lhsStatusPriority = statusPriority(lhs.status)
-        let rhsStatusPriority = statusPriority(rhs.status)
+        let lhsStatusPriority = itemPriority(lhs)
+        let rhsStatusPriority = itemPriority(rhs)
         if lhsStatusPriority != rhsStatusPriority {
             return lhsStatusPriority < rhsStatusPriority
         }
 
-        if lhs.changedFileCount != rhs.changedFileCount {
+        if lhs.resolvedDataSource == .current,
+           rhs.resolvedDataSource == .current,
+           lhs.changedFileCount != rhs.changedFileCount {
             return lhs.changedFileCount > rhs.changedFileCount
         }
 
@@ -1021,21 +1340,30 @@ enum WidgetRepositoryPriorityBuilder {
             return lhsReadinessPriority < rhsReadinessPriority
         }
 
-        if lhs.risk != rhs.risk {
+        if lhs.resolvedDataSource == .current,
+           rhs.resolvedDataSource == .current,
+           lhs.risk != rhs.risk {
             return lhs.risk > rhs.risk
         }
 
         return lhs.repoName.localizedStandardCompare(rhs.repoName) == .orderedAscending
     }
 
-    private static func statusPriority(_ status: RepositoryStatus) -> Int {
-        switch status {
-        case .changed:
+    private static func itemPriority(_ item: ActivityTimelineItem) -> Int {
+        switch item.resolvedDataSource {
+        case .unknown:
             return 0
-        case .error:
+        case .lastSuccessful:
             return 1
-        case .clean:
-            return 2
+        case .current:
+            switch item.status {
+            case .error:
+                return 0
+            case .changed:
+                return 2
+            case .clean:
+                return 3
+            }
         }
     }
 
@@ -1106,6 +1434,23 @@ struct ScanSummary: Codable, Equatable {
     let changedRepositories: Int
     let totalChangedFiles: Int
     let errorRepositories: Int
+
+    static func build(
+        from repositories: [RepositorySnapshot],
+        totalRepositories: Int? = nil
+    ) -> ScanSummary {
+        let currentRepositories = repositories.filter {
+            $0.resolvedDataSource == .current && $0.status != .error
+        }
+        return ScanSummary(
+            totalRepositories: totalRepositories ?? repositories.count,
+            changedRepositories: currentRepositories.filter { $0.status == .changed }.count,
+            totalChangedFiles: currentRepositories.reduce(0) { $0 + $1.changedFileCount },
+            errorRepositories: repositories.filter {
+                $0.resolvedDataSource != .current || $0.status == .error
+            }.count
+        )
+    }
 }
 
 // MARK: - App Group root data
@@ -1139,6 +1484,31 @@ struct AppGroupData: Codable, Equatable {
             writtenAt: writtenAt,
             scanSummary: scanSummary,
             repositories: repositories
+        )
+    }
+
+    /// Retain the last payload after a scan-level failure and downgrade every
+    /// repository's provenance. `generatedAt` remains the last successful scan
+    /// time; only `writtenAt` changes when this health update is shared.
+    func retainingLastSuccessfulRepositories(
+        attemptedAt: String,
+        errorMessage: String
+    ) -> AppGroupData {
+        let retainedRepositories = repositories.map {
+            $0.retainingLastSuccessfulData(
+                attemptedAt: attemptedAt,
+                errorMessage: errorMessage
+            )
+        }
+        return AppGroupData(
+            schemaVersion: schemaVersion,
+            generatedAt: generatedAt,
+            writtenAt: writtenAt,
+            scanSummary: ScanSummary.build(
+                from: retainedRepositories,
+                totalRepositories: max(scanSummary.totalRepositories, retainedRepositories.count)
+            ),
+            repositories: retainedRepositories
         )
     }
 }
@@ -1297,6 +1667,66 @@ enum RefreshStatusFormatter {
             referenceDate: reference?.date,
             now: now,
             sourceLabel: reference?.label ?? "snapshotTime",
+            missingReason: missingReason
+        )
+    }
+
+    static func snapshotAssessment(
+        snapshot: AppGroupData,
+        now: Date = Date(),
+        readError: String? = nil,
+        missingReason: String = "共享快照缺少 generatedAt / writtenAt，无法确认 Widget 数据是否最新。"
+    ) -> SnapshotTrustAssessment {
+        if let readError, !readError.isEmpty {
+            return snapshotAssessment(
+                generatedAt: snapshot.generatedAt,
+                writtenAt: snapshot.writtenAt,
+                now: now,
+                readError: readError,
+                missingReason: missingReason
+            )
+        }
+
+        if RepositoryDataAvailability.allUnavailable(snapshot.repositories) {
+            let lastSuccessfulCount = snapshot.repositories.filter {
+                $0.resolvedDataSource == .lastSuccessful
+            }.count
+            let unknownCount = snapshot.repositories.filter {
+                $0.resolvedDataSource == .unknown
+            }.count
+            let latestSuccessfulDate = snapshot.repositories
+                .compactMap(\.resolvedLastSuccessfulScanAt)
+                .compactMap { DateFormatting.date(from: $0) }
+                .max()
+
+            let title: String
+            let detail: String
+            if unknownCount == 0 {
+                title = "显示上次成功数据"
+                detail = latestSuccessfulDate.map {
+                    "所有仓库状态待确认 · 上次成功刷新：\(updateLabel(for: $0, now: now))"
+                } ?? "所有仓库状态待确认 · 上次成功时间未知"
+            } else if lastSuccessfulCount == 0 {
+                title = "仓库数据未知"
+                detail = "没有可用的成功仓库数据"
+            } else {
+                title = "仓库数据待确认"
+                detail = "\(lastSuccessfulCount) 个上次成功 · \(unknownCount) 个未知"
+            }
+
+            return SnapshotTrustAssessment(
+                state: .failed,
+                title: title,
+                detail: detail,
+                basis: "共享快照不含任何 current 仓库；writtenAt 仅表示可信度状态已写入，不代表仓库扫描成功。"
+            )
+        }
+
+        return snapshotAssessment(
+            generatedAt: snapshot.generatedAt,
+            writtenAt: snapshot.writtenAt,
+            now: now,
+            readError: readError,
             missingReason: missingReason
         )
     }
@@ -1720,6 +2150,35 @@ enum OverviewFocusBuilder {
     }
 
     private static func repositoryFocus(_ repo: RepositorySnapshot) -> OverviewFocusModel {
+        switch repo.resolvedDataSource {
+        case .lastSuccessful:
+            return OverviewFocusModel(
+                title: "\(repo.name) 正显示上次成功数据",
+                summary: repo.statusSummary,
+                detail: repo.nextActionHint,
+                severity: .warning,
+                action: OverviewPrimaryAction(
+                    kind: .refreshData,
+                    title: "刷新确认",
+                    systemImage: "arrow.clockwise"
+                )
+            )
+        case .unknown:
+            return OverviewFocusModel(
+                title: "\(repo.name) 当前数据未知",
+                summary: repo.statusSummary,
+                detail: repo.nextActionHint,
+                severity: .error,
+                action: OverviewPrimaryAction(
+                    kind: .openDiagnostics,
+                    title: "查看诊断",
+                    systemImage: "stethoscope"
+                )
+            )
+        case .current:
+            break
+        }
+
         if repo.status == .error || repo.commitReadiness.level == .unknown {
             return OverviewFocusModel(
                 title: "\(repo.name) 状态读取失败",

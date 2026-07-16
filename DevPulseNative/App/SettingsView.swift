@@ -893,13 +893,26 @@ struct SettingsView: View {
         let repositories = scheduler.lastResult.repositories
         guard !repositories.isEmpty else { return "0 个仓库" }
 
-        let changedCount = repositories.filter {
-            $0.status != .clean || $0.changedFileCount > 0 || ($0.aheadCount ?? 0) > 0
+        let currentActiveCount = repositories.filter {
+            $0.resolvedDataSource == .current
+                && ($0.status != .clean || $0.changedFileCount > 0 || ($0.aheadCount ?? 0) > 0)
+        }.count
+        let unavailableCount = repositories.filter {
+            $0.resolvedDataSource != .current
         }.count
 
-        return changedCount == 0
-            ? "\(repositories.count) 个仓库 · 全部干净"
-            : "\(repositories.count) 个仓库 · \(changedCount) 个有活动"
+        if currentActiveCount == 0, unavailableCount == 0 {
+            return "\(repositories.count) 个仓库 · 全部干净"
+        }
+
+        var parts = ["\(repositories.count) 个仓库"]
+        if currentActiveCount > 0 {
+            parts.append("\(currentActiveCount) 个当前有活动")
+        }
+        if unavailableCount > 0 {
+            parts.append("\(unavailableCount) 个状态待确认")
+        }
+        return parts.joined(separator: " · ")
     }
 
     private func diagnosticsRepositoryCompactRow(_ repo: RepositorySnapshot) -> some View {
@@ -927,13 +940,13 @@ struct SettingsView: View {
             Spacer(minLength: 8)
 
             VStack(alignment: .trailing, spacing: 2) {
-                Text("提交 \(snapshotTimeLabel(repo.lastChangedAt))")
+                Text(repositoryCommitTimeLabel(repo, compact: true))
                     .font(.caption2)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
-                Text("扫描 \(snapshotTimeLabel(repo.lastScannedAt))")
+                Text(repositoryScanTimeLabel(repo))
                     .font(.caption2)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(repositoryDataSourceColor(repo))
                     .lineLimit(1)
             }
         }
@@ -998,11 +1011,11 @@ struct SettingsView: View {
                 .foregroundColor(diagnosticsRepositoryActionColor(repo))
 
             HStack(spacing: 8) {
-                Text("最近提交 · \(snapshotTimeLabel(repo.lastChangedAt))")
-                Text("扫描时间 · \(snapshotTimeLabel(repo.lastScannedAt))")
+                Text(repositoryCommitTimeLabel(repo))
+                Text(repositoryScanTimeLabel(repo))
             }
             .font(.caption2)
-            .foregroundColor(.secondary)
+            .foregroundColor(repositoryDataSourceColor(repo))
         }
         .padding(8)
         .background(DevPulseVisualStyle.strongerSurface)
@@ -1013,7 +1026,7 @@ struct SettingsView: View {
         HStack(spacing: 4) {
             Image(systemName: diagnosticsRepositoryBranchIconName(repo))
                 .font(.system(size: 10, weight: .medium))
-            Text(repo.branch)
+            Text(repo.branchDisplayLabel)
                 .lineLimit(1)
         }
         .font(.caption2)
@@ -1050,7 +1063,52 @@ struct SettingsView: View {
         }
     }
 
+    private func repositoryScanTimeLabel(_ repo: RepositorySnapshot) -> String {
+        switch repo.resolvedDataSource {
+        case .current:
+            return "当前扫描 · \(snapshotTimeLabel(repo.lastScannedAt))"
+        case .lastSuccessful:
+            return "上次成功扫描 · \(snapshotTimeLabel(repo.resolvedLastSuccessfulScanAt))"
+        case .unknown:
+            return "扫描状态未知"
+        }
+    }
+
+    private func repositoryCommitTimeLabel(
+        _ repo: RepositorySnapshot,
+        compact: Bool = false
+    ) -> String {
+        switch repo.resolvedDataSource {
+        case .current:
+            let prefix = compact ? "提交" : "最近提交 ·"
+            return "\(prefix) \(snapshotTimeLabel(repo.lastChangedAt))"
+        case .lastSuccessful:
+            return "上次成功提交 · \(snapshotTimeLabel(repo.lastChangedAt))"
+        case .unknown:
+            return "提交时间未知"
+        }
+    }
+
+    private func repositoryDataSourceColor(_ repo: RepositorySnapshot) -> Color {
+        switch repo.resolvedDataSource {
+        case .current:
+            return .secondary
+        case .lastSuccessful:
+            return .orange
+        case .unknown:
+            return .red
+        }
+    }
+
     private func diagnosticsRepositoryBranchIconName(_ repo: RepositorySnapshot) -> String {
+        switch repo.resolvedDataSource {
+        case .lastSuccessful:
+            return "clock.arrow.circlepath"
+        case .unknown:
+            return "questionmark.circle.fill"
+        case .current:
+            break
+        }
         switch repo.commitReadiness.level {
         case .dirty, .unknown:
             return "exclamationmark.triangle.fill"
@@ -1062,6 +1120,14 @@ struct SettingsView: View {
     }
 
     private func diagnosticsRepositoryBranchColor(_ repo: RepositorySnapshot) -> Color {
+        switch repo.resolvedDataSource {
+        case .lastSuccessful:
+            return .orange
+        case .unknown:
+            return .red
+        case .current:
+            break
+        }
         switch repo.commitReadiness.level {
         case .dirty, .unknown:
             return .red
@@ -1073,6 +1139,14 @@ struct SettingsView: View {
     }
 
     private func diagnosticsRepositoryBranchFillOpacity(_ repo: RepositorySnapshot) -> Double {
+        switch repo.resolvedDataSource {
+        case .lastSuccessful:
+            return 0.12
+        case .unknown:
+            return 0.14
+        case .current:
+            break
+        }
         switch repo.commitReadiness.level {
         case .dirty, .unknown:
             return 0.14

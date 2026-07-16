@@ -161,6 +161,12 @@ struct RepositoryRow: View {
                             .foregroundStyle(Color.accentColor)
                             .accessibilityLabel("Pinned")
                     }
+
+                    RepositoryDataSourceBadge(
+                        source: presentation.dataSource.source,
+                        label: repo.dataSourcePresentation.label,
+                        detail: repo.dataSourcePresentation.detail
+                    )
                 }
                 .layoutPriority(1)
 
@@ -220,19 +226,30 @@ struct RepositoryRow: View {
                 .font(.system(size: 10, weight: .medium))
                 .accessibilityHidden(true)
 
-            Text(repo.branch)
+            Text(repo.branchDisplayLabel)
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
         .font(.caption.weight(.medium))
-        .foregroundStyle(.secondary)
+        .foregroundStyle(branchTint)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(
             Capsule()
                 .fill(DevPulseVisualStyle.strongerSurface)
         )
-        .accessibilityLabel("Branch: \(repo.branch)")
+        .accessibilityLabel("分支：\(repo.branchDisplayLabel)")
+    }
+
+    private var branchTint: Color {
+        switch repo.resolvedDataSource {
+        case .current:
+            return .secondary
+        case .lastSuccessful:
+            return .orange
+        case .unknown:
+            return .red
+        }
     }
 
     private func metadataLabel(title: String, value: String, systemImage: String) -> some View {
@@ -279,6 +296,8 @@ private struct RepositoryActionBadge: View {
 
     private var systemImage: String {
         switch action.kind {
+        case .refreshRepositoryState:
+            return "arrow.clockwise.circle.fill"
         case .diagnoseReadFailure:
             return "exclamationmark.octagon.fill"
         case .resolveConflicts:
@@ -302,6 +321,8 @@ private struct RepositoryActionBadge: View {
 
     private var tint: Color {
         switch action.kind {
+        case .refreshRepositoryState:
+            return .orange
         case .diagnoseReadFailure:
             return .red
         case .resolveConflicts, .confirmBranch, .synchronizeDivergedBranch, .reviewLocalChanges:
@@ -312,6 +333,47 @@ private struct RepositoryActionBadge: View {
             return .green
         case .noActionNeeded:
             return .secondary
+        }
+    }
+}
+
+private struct RepositoryDataSourceBadge: View {
+    let source: RepositoryDataSource
+    let label: String
+    let detail: String
+
+    var body: some View {
+        Label(label, systemImage: systemImage)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(tint)
+            .lineLimit(1)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(tint.opacity(0.11)))
+            .fixedSize(horizontal: true, vertical: false)
+            .help(detail)
+            .accessibilityLabel("数据来源：\(label)。\(detail)")
+    }
+
+    private var systemImage: String {
+        switch source {
+        case .current:
+            return "checkmark.circle"
+        case .lastSuccessful:
+            return "clock.arrow.circlepath"
+        case .unknown:
+            return "questionmark.circle"
+        }
+    }
+
+    private var tint: Color {
+        switch source {
+        case .current:
+            return .secondary
+        case .lastSuccessful:
+            return .orange
+        case .unknown:
+            return .red
         }
     }
 }

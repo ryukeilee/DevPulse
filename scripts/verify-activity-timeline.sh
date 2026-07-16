@@ -92,8 +92,9 @@ let activeFeed = ActivityTimelineBuilder.build(
 struct Main {
     static func main() throws {
         expect(activeFeed.state == .active, "active feed should be active")
-        expect(activeFeed.items.map(\.repoName) == ["recent-changed", "older-changed", "error-repo", "clean-repo"], "timeline sort order should prefer recent changes and keep Git read failures ahead of clean repos")
-        expect(activeFeed.topItem?.changedFilesPreview == ["timeline.swift", "README.md"], "timeline preview should be normalized to basenames and deduplicated")
+        expect(activeFeed.items.map(\.repoName) == ["error-repo", "recent-changed", "older-changed", "clean-repo"], "timeline sort order should surface unknown data before current changes and clean repositories")
+        let recentChanged = activeFeed.items.first { $0.repoName == "recent-changed" }
+        expect(recentChanged?.changedFilesPreview == ["timeline.swift", "README.md"], "timeline preview should be normalized to basenames and deduplicated")
 
         let neverScanned = ActivityTimelineBuilder.build(from: [], lastScanAt: nil)
         expect(neverScanned.state == .neverScanned, "empty feed without last scan should be never scanned")

@@ -137,30 +137,50 @@ struct ActivityTimelineRow: View {
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
 
+                TimelineDataSourceBadge(
+                    source: item.resolvedDataSource,
+                    label: item.dataSourcePresentation.label,
+                    detail: item.dataSourcePresentation.detail
+                )
+
                 Spacer(minLength: 8)
 
                 Text(relativeTime)
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(relativeTimeTint)
             }
 
             HStack(spacing: 6) {
                 statusLabel
                 branchLabel
-                RiskBadge(level: item.risk)
-                CommitReadinessBadge(level: item.commitReadiness.level, compact: true)
+                if item.resolvedDataSource == .current {
+                    RiskBadge(level: item.risk)
+                }
+                CommitReadinessBadge(level: displayedCommitReadiness, compact: true)
             }
 
-            Text(item.commitReadiness.detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if item.resolvedDataSource == .unknown {
+                Text("仓库状态暂不可用；刷新后再查看改动与提交建议。")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            } else {
+                Text(item.commitReadiness.detail)
+                    .font(.caption)
+                    .foregroundStyle(item.resolvedDataSource == .lastSuccessful ? .orange : .secondary)
+            }
 
             Text(changeSummary)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(changeSummaryTint)
 
-            if !item.changedFilesPreview.isEmpty {
+            if item.resolvedDataSource != .unknown, !item.changedFilesPreview.isEmpty {
                 HStack(spacing: 6) {
+                    if item.resolvedDataSource == .lastSuccessful {
+                        Text("上次成功文件")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+
                     ForEach(item.changedFilesPreview.prefix(3), id: \.self) { file in
                         Text(file)
                             .font(.caption2)
@@ -179,36 +199,88 @@ struct ActivityTimelineRow: View {
     }
 
     private var relativeTime: String {
-        if let lastChangedAt = item.lastChangedAt {
-            return DateFormatting.relativeTime(from: lastChangedAt)
+        switch item.resolvedDataSource {
+        case .current:
+            if let lastChangedAt = item.lastChangedAt {
+                return DateFormatting.relativeTime(from: lastChangedAt)
+            }
+            return "扫描 \(DateFormatting.relativeTime(from: item.lastScannedAt))"
+        case .lastSuccessful:
+            guard let lastSuccessfulScanAt = item.resolvedLastSuccessfulScanAt else {
+                return "上次成功扫描时间未知"
+            }
+            return "上次成功扫描 \(DateFormatting.relativeTime(from: lastSuccessfulScanAt))"
+        case .unknown:
+            return "扫描状态未知"
         }
-        return DateFormatting.relativeTime(from: item.lastScannedAt)
     }
 
     private var changeSummary: String {
+        switch item.resolvedDataSource {
+        case .current:
+            return currentChangeSummary
+        case .lastSuccessful:
+            return "上次成功 · \(currentChangeSummary)"
+        case .unknown:
+            return "改动数量未知，等待刷新"
+        }
+    }
+
+    private var currentChangeSummary: String {
         "modified \(item.modifiedFileCount) · added \(item.addedFileCount) · deleted \(item.deletedFileCount) · untracked \(item.untrackedFileCount)"
+    }
+
+    private var changeSummaryTint: Color {
+        switch item.resolvedDataSource {
+        case .current:
+            return .secondary
+        case .lastSuccessful:
+            return .orange
+        case .unknown:
+            return .red
+        }
+    }
+
+    private var relativeTimeTint: Color {
+        switch item.resolvedDataSource {
+        case .current:
+            return .secondary
+        case .lastSuccessful:
+            return .orange
+        case .unknown:
+            return .red
+        }
+    }
+
+    private var displayedCommitReadiness: CommitReadinessLevel {
+        item.resolvedDataSource == .unknown ? .unknown : item.commitReadiness.level
     }
 
     private var statusLabel: some View {
         let tint: Color
         let label: String
 
-        switch item.commitReadiness.level {
-        case .dirty:
-            tint = .orange
-            label = "dirty"
-        case .ready:
-            tint = .green
-            label = "ready"
-        case .review:
-            tint = .orange
-            label = "review"
-        case .idle:
-            tint = .secondary
-            label = "idle"
-        case .unknown:
+        if item.resolvedDataSource == .unknown {
             tint = .red
             label = "unknown"
+        } else {
+            switch item.commitReadiness.level {
+            case .dirty:
+                tint = .orange
+                label = "dirty"
+            case .ready:
+                tint = .green
+                label = "ready"
+            case .review:
+                tint = .orange
+                label = "review"
+            case .idle:
+                tint = .secondary
+                label = "idle"
+            case .unknown:
+                tint = .red
+                label = "unknown"
+            }
         }
 
         return Text(label)
@@ -220,13 +292,65 @@ struct ActivityTimelineRow: View {
     }
 
     private var branchLabel: some View {
-        Text(item.branch.isEmpty ? "detached" : item.branch)
+        Text(item.branchDisplayLabel)
             .font(.caption2)
             .lineLimit(1)
             .truncationMode(.tail)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(Capsule().fill(Color.secondary.opacity(0.12)))
-            .foregroundStyle(.secondary)
+            .background(Capsule().fill(branchTint.opacity(0.12)))
+            .foregroundStyle(branchTint)
+    }
+
+    private var branchTint: Color {
+        switch item.resolvedDataSource {
+        case .current:
+            return .secondary
+        case .lastSuccessful:
+            return .orange
+        case .unknown:
+            return .red
+        }
+    }
+}
+
+private struct TimelineDataSourceBadge: View {
+    let source: RepositoryDataSource
+    let label: String
+    let detail: String
+
+    var body: some View {
+        Label(label, systemImage: systemImage)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(tint)
+            .lineLimit(1)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(tint.opacity(0.11)))
+            .fixedSize(horizontal: true, vertical: false)
+            .help(detail)
+            .accessibilityLabel("数据来源：\(label)。\(detail)")
+    }
+
+    private var systemImage: String {
+        switch source {
+        case .current:
+            return "checkmark.circle"
+        case .lastSuccessful:
+            return "clock.arrow.circlepath"
+        case .unknown:
+            return "questionmark.circle"
+        }
+    }
+
+    private var tint: Color {
+        switch source {
+        case .current:
+            return .secondary
+        case .lastSuccessful:
+            return .orange
+        case .unknown:
+            return .red
+        }
     }
 }
