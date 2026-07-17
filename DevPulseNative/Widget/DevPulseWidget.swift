@@ -1000,7 +1000,7 @@ private struct SmallGlanceWidgetView: View {
         switch entry.trustAssessment?.state {
         case .fresh:
             readyContent
-        case .stale, .expired:
+        case .stale, .expired, .degraded:
             shortState(
                 title: WidgetRefreshCopy.waitingRefreshTitle,
                 detail: WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment),
@@ -1116,7 +1116,7 @@ private struct MediumGlanceWidgetView: View {
         switch entry.trustAssessment?.state {
         case .fresh:
             readyContent
-        case .stale, .expired:
+        case .stale, .expired, .degraded:
             shortState(
                 title: WidgetRefreshCopy.waitingRefreshTitle,
                 detail: WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment),
@@ -1242,7 +1242,7 @@ private struct LargeGlanceWidgetView: View {
         switch entry.trustAssessment?.state {
         case .fresh:
             readyContent
-        case .stale, .expired:
+        case .stale, .expired, .degraded:
             shortState(
                 title: WidgetRefreshCopy.waitingRefreshTitle,
                 detail: WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment),
@@ -1523,7 +1523,7 @@ private struct SimpleSmallGlanceWidgetView: View {
             return (entry.loadFailure?.title ?? "共享快照读取失败", entry.loadFailure?.detail, entry.loadFailure?.icon ?? "exclamationmark.triangle.fill")
         case .ready:
             switch entry.trustAssessment?.state {
-            case .stale, .expired:
+            case .stale, .expired, .degraded:
                 return (WidgetRefreshCopy.waitingRefreshTitle, WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment), "clock.badge.exclamationmark")
             case .unknown, .failed, .none:
                 return (WidgetRefreshCopy.pendingConfirmationTitle, WidgetRefreshCopy.pendingConfirmationDetail, "questionmark.circle")
@@ -1576,7 +1576,7 @@ private struct SimpleMediumGlanceWidgetView: View {
         guard case .ready = entry.loadState else { return nil }
         guard let state = entry.trustAssessment?.state, state != .fresh else { return nil }
         switch state {
-        case .stale, .expired:
+        case .stale, .expired, .degraded:
             return WidgetRefreshCopy.waitingRefreshTitle
         case .unknown, .failed:
             return WidgetRefreshCopy.pendingConfirmationTitle
@@ -1595,7 +1595,7 @@ private struct SimpleMediumGlanceWidgetView: View {
             return (entry.loadFailure?.title ?? "共享快照读取失败", entry.loadFailure?.detail, entry.loadFailure?.icon ?? "exclamationmark.triangle.fill")
         case .ready:
             switch entry.trustAssessment?.state {
-            case .stale, .expired:
+            case .stale, .expired, .degraded:
                 return (WidgetRefreshCopy.waitingRefreshTitle, WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment), "clock.badge.exclamationmark")
             case .unknown, .failed, .none:
                 return (WidgetRefreshCopy.pendingConfirmationTitle, WidgetRefreshCopy.pendingConfirmationDetail, "questionmark.circle")
@@ -1650,7 +1650,7 @@ private struct SimpleLargeGlanceWidgetView: View {
         guard case .ready = entry.loadState else { return nil }
         guard let state = entry.trustAssessment?.state, state != .fresh else { return nil }
         switch state {
-        case .stale, .expired:
+        case .stale, .expired, .degraded:
             return WidgetRefreshCopy.waitingRefreshTitle
         case .unknown, .failed:
             return WidgetRefreshCopy.pendingConfirmationTitle
@@ -1669,7 +1669,7 @@ private struct SimpleLargeGlanceWidgetView: View {
             return (entry.loadFailure?.title ?? "共享快照读取失败", entry.loadFailure?.detail, entry.loadFailure?.icon ?? "exclamationmark.triangle.fill")
         case .ready:
             switch entry.trustAssessment?.state {
-            case .stale, .expired:
+            case .stale, .expired, .degraded:
                 return (WidgetRefreshCopy.waitingRefreshTitle, WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment), "clock.badge.exclamationmark")
             case .unknown, .failed, .none:
                 return (WidgetRefreshCopy.pendingConfirmationTitle, WidgetRefreshCopy.pendingConfirmationDetail, "questionmark.circle")
@@ -1692,7 +1692,7 @@ private extension WidgetEntry {
         case .ready:
             if let trustAssessment, trustAssessment.state != .fresh {
                 switch trustAssessment.state {
-                case .stale, .expired:
+                case .stale, .expired, .degraded:
                     return "\(WidgetRefreshCopy.waitingRefreshTitle) · \(trustAssessment.detail)"
                 case .unknown, .failed:
                     return "最近刷新: \(WidgetRefreshCopy.pendingConfirmationTitle)"
@@ -1705,20 +1705,12 @@ private extension WidgetEntry {
                 return "最近刷新: 未知"
             }
 
-            var timestamps: [(timestamp: String, date: Date)] = []
-            if let writtenAt = snapshot.writtenAt, let writtenDate = DateFormatting.date(from: writtenAt) {
-                timestamps.append((timestamp: writtenAt, date: writtenDate))
-            }
-
-            if let generatedDate = DateFormatting.date(from: snapshot.generatedAt) {
-                timestamps.append((timestamp: snapshot.generatedAt, date: generatedDate))
-            }
-
-            guard let latest = timestamps.max(by: { $0.date < $1.date }) else {
+            guard let successfulAt = snapshot.lastSuccessfulRefreshAt,
+                  DateFormatting.date(from: successfulAt) != nil else {
                 return "最近刷新: 未知"
             }
 
-            return "最近刷新 \(DateFormatting.relativeTime(from: latest.timestamp, relativeTo: date))"
+            return "最近成功刷新 \(DateFormatting.relativeTime(from: successfulAt, relativeTo: date))"
         }
     }
 }

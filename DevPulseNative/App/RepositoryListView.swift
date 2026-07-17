@@ -22,25 +22,44 @@ struct RepositoryListView: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(scheduler.lastResult.repositories) { repo in
-                            Button {
-                                selectedRepository = repo
-                            } label: {
-                                RepositoryRow(repo: repo)
+                            HStack(alignment: .top, spacing: 0) {
+                                Button {
+                                    selectedRepository = repo
+                                } label: {
+                                    RepositoryRow(repo: repo)
+                                }
+                                .buttonStyle(.plain)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .accessibilityHint("打开只读仓库详情")
+
+                                if repo.needsReadRetry {
+                                    repositoryRetryButton(for: repo)
+                                }
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityHint("打开只读仓库详情")
-                                .contextMenu {
-                                    Button(repo.isPinned ? "取消置顶" : "置顶") {
-                                        scheduler.togglePin(repoID: repo.id)
+                            .contextMenu {
+                                if repo.needsReadRetry {
+                                    Button("重试读取") {
+                                        scheduler.retryRepository(repo.id)
                                     }
+                                    .disabled(
+                                        scheduler.isScanning
+                                            || scheduler.isRetryingRepository(repo.id)
+                                    )
 
                                     Divider()
-
-                                    Button("忽略此仓库", role: .destructive) {
-                                        pendingIgnoreRepository = repo
-                                    }
-                                    .help("从扫描结果中忽略此仓库")
                                 }
+
+                                Button(repo.isPinned ? "取消置顶" : "置顶") {
+                                    scheduler.togglePin(repoID: repo.id)
+                                }
+
+                                Divider()
+
+                                Button("忽略此仓库", role: .destructive) {
+                                    pendingIgnoreRepository = repo
+                                }
+                                .help("从扫描结果中忽略此仓库")
+                            }
 
                             if repo.id != scheduler.lastResult.repositories.last?.id {
                                 Divider()
@@ -88,6 +107,34 @@ struct RepositoryListView: View {
         }
     }
 
+    private func repositoryRetryButton(for repository: RepositorySnapshot) -> some View {
+        let isRetrying = scheduler.isRetryingRepository(repository.id)
+
+        return Button {
+            scheduler.retryRepository(repository.id)
+        } label: {
+            HStack(spacing: 4) {
+                if isRetrying {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 12, height: 12)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                }
+                Text(isRetrying ? "重试中" : "重试")
+            }
+            .font(.caption2.weight(.semibold))
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .disabled(scheduler.isScanning || isRetrying)
+        .padding(.top, 12)
+        .padding(.trailing, RepositoryListMetrics.rowPadding)
+        .help("只重新读取 \(repository.name)，不会阻塞其他仓库")
+        .accessibilityLabel("重试读取 \(repository.name)")
+        .accessibilityHint(repository.conciseReadFailureReason ?? "重新读取当前仓库状态")
+    }
+
     @ViewBuilder
     private var refreshHint: some View {
         if scheduler.lastScanAt != nil || scheduler.refreshPhase != .idle {
@@ -122,6 +169,12 @@ struct RepositoryListView: View {
             .padding(.horizontal, RepositoryListMetrics.pageInset)
             .padding(.top, 11)
             .padding(.bottom, 1)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(
+                [scheduler.refreshStatusText, scheduler.refreshDetailText]
+                    .compactMap { $0 }
+                    .joined(separator: "，")
+            )
         }
     }
 
@@ -155,6 +208,8 @@ struct RepositoryListView: View {
     private var refreshHintTint: Color {
         switch scheduler.refreshPhase {
         case .failure:
+            return .red
+        case .degraded:
             return .orange
         case .refreshing:
             return .secondary
@@ -203,8 +258,12 @@ struct RepositoryRow: View {
 
                 Spacer(minLength: 8)
 
-                RepositoryActionBadge(action: presentation.action)
-                    .help(repo.nextActionHint)
+                if let failureReason = repo.conciseReadFailureReason {
+                    RepositoryReadFailureBadge(reason: failureReason)
+                } else {
+                    RepositoryActionBadge(action: presentation.action)
+                        .help(repo.nextActionHint)
+                }
             }
 
             HStack(alignment: .firstTextBaseline, spacing: 7) {
@@ -365,6 +424,22 @@ private struct RepositoryActionBadge: View {
         case .noActionNeeded:
             return .secondary
         }
+    }
+}
+
+private struct RepositoryReadFailureBadge: View {
+    let reason: String
+
+    var body: some View {
+        Label(reason, systemImage: "exclamationmark.triangle.fill")
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.red)
+            .lineLimit(1)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(Color.red.opacity(0.11)))
+            .fixedSize(horizontal: true, vertical: false)
+            .accessibilityLabel("仓库读取异常：\(reason)")
     }
 }
 

@@ -63,6 +63,12 @@ struct ScanStatusView: View {
                     .disabled(scheduler.isScanning)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
+                    .accessibilityLabel("重新扫描全部仓库")
+                    .accessibilityHint(
+                        scheduler.refreshPhase == .failure
+                            ? "重新尝试读取全部仓库状态"
+                            : "重新发现并读取全部仓库"
+                    )
                 }
             }
         }
@@ -73,6 +79,8 @@ struct ScanStatusView: View {
     private var statusTint: Color {
         switch scheduler.refreshPhase {
         case .failure:
+            return .red
+        case .degraded:
             return .orange
         case .refreshing:
             return .secondary

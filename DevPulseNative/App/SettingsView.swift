@@ -651,9 +651,9 @@ struct SettingsView: View {
                 isError: widgetTrustAssessment.isError
             )
             diagnosticsRow(
-                title: "最近刷新",
+                title: "最近扫描完成",
                 value: scheduler.lastScanAt.map { snapshotTimeLabel($0) } ?? "不可用",
-                detail: scheduler.lastScanAt.map { formattedDate($0) } ?? "还没有成功刷新记录。",
+                detail: scheduler.lastScanAt.map { formattedDate($0) } ?? "还没有扫描完成记录。",
                 isError: scheduler.lastScanAt == nil
             )
             diagnosticsRow(
@@ -843,9 +843,16 @@ struct SettingsView: View {
     }
 
     private var widgetTrustAssessment: SnapshotTrustAssessment {
-        RefreshStatusFormatter.snapshotAssessment(
-            generatedAt: scheduler.diagnostics.widgetSnapshot?.generatedAt,
-            writtenAt: scheduler.diagnostics.widgetSnapshot?.writtenAt,
+        if let snapshot = scheduler.diagnostics.widgetSnapshot {
+            return RefreshStatusFormatter.snapshotAssessment(
+                snapshot: snapshot,
+                readError: scheduler.diagnostics.widgetSnapshotReadError,
+                missingReason: "小组件侧还没有拿到可证明的完整成功刷新时间。"
+            )
+        }
+        return RefreshStatusFormatter.snapshotAssessment(
+            generatedAt: nil,
+            writtenAt: nil,
             readError: scheduler.diagnostics.widgetSnapshotReadError,
             missingReason: "小组件侧还没有拿到可用快照时间。"
         )
@@ -1006,7 +1013,7 @@ struct SettingsView: View {
             return parts.isEmpty ? nil : parts.joined(separator: " · ")
         case "scan-state":
             if let lastScanAt = scheduler.lastScanAt {
-                return "最近刷新 \(snapshotTimeLabel(lastScanAt))"
+                return "最近扫描 \(snapshotTimeLabel(lastScanAt))"
             }
             return nil
         default:
@@ -1442,13 +1449,13 @@ struct SettingsView: View {
 
     private var snapshotFactsUpdatedLabel: String {
         if let lastWrittenAt = scheduler.diagnostics.lastWrittenAt {
-            return "最近更新 \(snapshotTimeLabel(lastWrittenAt))"
+            return "最近写入 \(snapshotTimeLabel(lastWrittenAt))"
         }
         if let lastGeneratedAt = scheduler.diagnostics.lastGeneratedAt {
-            return "最近更新 \(snapshotTimeLabel(lastGeneratedAt))"
+            return "最近生成 \(snapshotTimeLabel(lastGeneratedAt))"
         }
         if let lastScanAt = scheduler.lastScanAt {
-            return "最近更新 \(snapshotTimeLabel(lastScanAt))"
+            return "最近扫描 \(snapshotTimeLabel(lastScanAt))"
         }
         return "未更新"
     }

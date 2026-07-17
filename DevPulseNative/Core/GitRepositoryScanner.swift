@@ -260,6 +260,7 @@ enum GitRepositoryScanner {
             schemaVersion: RepositorySnapshotSchema.version,
             generatedAt: DateFormatting.nowISO(),
             writtenAt: nil,
+            lastSuccessfulRefreshAt: previous?.lastSuccessfulRefreshAt,
             scanSummary: summary,
             repositories: sorted,
             repositoryUnavailableSinceByPath: mergeResult.unavailableSinceByPath.isEmpty
@@ -271,6 +272,28 @@ enum GitRepositoryScanner {
             sorted.map(\.path) + Array(mergeResult.unavailableSinceByPath.keys)
         )).sorted()
         return (result, warnings, retainedDiscoveryPaths)
+    }
+
+    /// Re-read one previously known repository without rediscovering or
+    /// changing the rest of the snapshot. A read failure is represented by a
+    /// retained/unknown snapshot; `nil` is reserved for cancellation.
+    static func retryRepository(
+        config: ScanConfig = .default,
+        previousSnapshot: RepositorySnapshot
+    ) async -> RepositorySnapshot? {
+        guard !Task.isCancelled else { return nil }
+
+        let previous = RepositoryIdentity.normalize(previousSnapshot)
+        let snapshot = readSingleSnapshot(
+            repoPath: previous.path,
+            config: config,
+            overallDeadline: Date().addingTimeInterval(config.scanTimeout),
+            previousSnapshot: previous,
+            unavailableSince: previous.unavailableSince
+        )
+
+        guard !Task.isCancelled else { return nil }
+        return snapshot
     }
 
     private static func partialResult(
@@ -295,6 +318,7 @@ enum GitRepositoryScanner {
                 schemaVersion: RepositorySnapshotSchema.version,
                 generatedAt: DateFormatting.nowISO(),
                 writtenAt: nil,
+                lastSuccessfulRefreshAt: previousSnapshot?.lastSuccessfulRefreshAt,
                 scanSummary: summary,
                 repositories: sorted,
                 repositoryUnavailableSinceByPath: mergeResult.unavailableSinceByPath.isEmpty

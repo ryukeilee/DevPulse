@@ -154,7 +154,7 @@ struct CommitReadinessEngineTests {
         )
 
         #expect(assessment.state == .failed)
-        #expect(assessment.title == "刷新失败，建议打开 App 检查")
+        #expect(assessment.title == "刷新失败")
         #expect(assessment.detail == "上次成功刷新：8 分钟前更新")
     }
 
@@ -238,18 +238,19 @@ struct CommitReadinessEngineTests {
         #expect(assessment.basis == "Widget 没有时间戳")
     }
 
-    @Test func snapshotTrustAssessmentPrefersWrittenAtForStaleness() {
+    @Test func snapshotTrustAssessmentNeverUsesWrittenAtAsDataFreshness() {
         let now = Date(timeIntervalSince1970: 1_718_000_000)
         let formatter = ISO8601DateFormatter()
         let assessment = RefreshStatusFormatter.snapshotAssessment(
             generatedAt: formatter.string(from: now.addingTimeInterval(-20 * 60)),
-            writtenAt: formatter.string(from: now.addingTimeInterval(-12 * 60)),
+            writtenAt: formatter.string(from: now),
             now: now
         )
 
         #expect(assessment.state == .stale)
-        #expect(assessment.title == "数据可能已过期")
-        #expect(assessment.basis.contains("writtenAt"))
+        #expect(assessment.title == "数据需要刷新")
+        #expect(assessment.basis.contains("generatedAt"))
+        #expect(!assessment.basis.contains("writtenAt"))
     }
 
     @Test func snapshotTrustAssessmentDoesNotTreatFailureHealthWriteAsFreshData() {
@@ -260,6 +261,7 @@ struct CommitReadinessEngineTests {
             schemaVersion: RepositorySnapshotSchema.version,
             generatedAt: lastSuccessfulAt,
             writtenAt: formatter.string(from: now),
+            lastSuccessfulRefreshAt: lastSuccessfulAt,
             scanSummary: ScanSummary(
                 totalRepositories: 1,
                 changedRepositories: 0,
@@ -286,6 +288,91 @@ struct CommitReadinessEngineTests {
         #expect(assessment.title == "显示上次成功数据")
         #expect(assessment.detail.contains("上次成功刷新"))
         #expect(assessment.basis.contains("writtenAt"))
+    }
+
+    @Test func snapshotTrustAssessmentSurfacesPartialRepositoryFailureBeforeFreshTime() {
+        let now = Date(timeIntervalSince1970: 1_718_000_000)
+        let formatter = ISO8601DateFormatter()
+        let successfulAt = formatter.string(from: now.addingTimeInterval(-25 * 60))
+        let attemptedAt = formatter.string(from: now)
+        let current = snapshot(
+            id: "current",
+            name: "current",
+            status: .clean,
+            lastScannedAt: attemptedAt,
+            dataSource: .current,
+            lastSuccessfulScanAt: attemptedAt
+        )
+        let failed = snapshot(
+            id: "failed",
+            name: "failed",
+            status: .error,
+            lastScannedAt: attemptedAt,
+            dataSource: .lastSuccessful,
+            lastSuccessfulScanAt: successfulAt,
+            errorMessage: "读取超时"
+        )
+        let snapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: attemptedAt,
+            writtenAt: attemptedAt,
+            lastSuccessfulRefreshAt: successfulAt,
+            scanSummary: ScanSummary.build(from: [current, failed]),
+            repositories: [current, failed]
+        )
+
+        let assessment = RefreshStatusFormatter.snapshotAssessment(snapshot: snapshot, now: now)
+
+        #expect(assessment.state == .degraded)
+        #expect(assessment.title == "部分仓库待确认")
+        #expect(assessment.detail.contains("1 个读取失败"))
+        #expect(assessment.detail.contains("上次完整成功"))
+    }
+
+    @Test func futureSuccessfulTimestampCannotAppearJustUpdated() {
+        let now = Date(timeIntervalSince1970: 1_718_000_000)
+        let future = now.addingTimeInterval(5 * 60)
+
+        #expect(RefreshStatusFormatter.freshness(for: future, now: now) == .unknown)
+        #expect(RefreshStatusFormatter.updateLabel(for: future, now: now) == "更新时间未知")
+    }
+
+    @Test func repositoryReadFailureReasonIsConciseAndActionSafe() {
+        #expect(RepositoryReadFailureReason.conciseMessage(from: "Git command timeout") == "读取超时")
+        #expect(RepositoryReadFailureReason.conciseMessage(from: "仓库暂时不可访问：/private/path") == "暂时无法访问")
+        #expect(RepositoryReadFailureReason.conciseMessage(from: "unexpected details") == "读取失败")
+    }
+
+    @Test func completeRepositoryWatermarkUsesOldestProvenSuccess() {
+        let older = "2026-07-17T08:00:00Z"
+        let newer = "2026-07-17T08:05:00Z"
+        let repositories = [
+            snapshot(
+                id: "older",
+                name: "older",
+                status: .clean,
+                lastScannedAt: older,
+                dataSource: .current,
+                lastSuccessfulScanAt: older
+            ),
+            snapshot(
+                id: "newer",
+                name: "newer",
+                status: .clean,
+                lastScannedAt: newer,
+                dataSource: .current,
+                lastSuccessfulScanAt: newer
+            )
+        ]
+        let data = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: newer,
+            writtenAt: nil,
+            scanSummary: ScanSummary.build(from: repositories),
+            repositories: repositories
+        )
+
+        #expect(data.completeRepositorySuccessWatermark == older)
     }
 
     @Test func widgetPrioritySummaryUsesReadyAdviceWhenFresh() {
@@ -1298,6 +1385,7 @@ struct CommitReadinessEngineTests {
             schemaVersion: RepositorySnapshotSchema.version,
             generatedAt: successfulAt,
             writtenAt: successfulAt,
+            lastSuccessfulRefreshAt: successfulAt,
             scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 1, totalChangedFiles: 1, errorRepositories: 0),
             repositories: [
                 snapshot(
@@ -1328,6 +1416,7 @@ struct CommitReadinessEngineTests {
         #expect(secondRepository.lastScannedAt == "2026-07-14T10:00:00Z")
         #expect(secondRepository.commitReadiness.level == .unknown)
         #expect(secondFailure.generatedAt == successfulAt)
+        #expect(secondFailure.lastSuccessfulRefreshAt == successfulAt)
         #expect(secondFailure.scanSummary.changedRepositories == 0)
         #expect(secondFailure.scanSummary.totalChangedFiles == 0)
         #expect(secondFailure.scanSummary.errorRepositories == 1)
@@ -2137,6 +2226,36 @@ struct CommitReadinessEngineTests {
         #expect(repo.hasUpstream == false)
         #expect(repo.aheadCount == nil)
         #expect(repo.behindCount == nil)
+    }
+
+    @Test func gitScannerRepositoryRetryReusesSingleRepositoryReadPath() async throws {
+        let root = try temporaryDirectory(named: "scanner-single-retry")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repositoryURL = root.appendingPathComponent("retry-repo")
+        try createCommittedRepository(at: repositoryURL)
+        let baseline = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true
+        )
+        let previous = try #require(baseline.data.repositories.first)
+        try "retry change\n".write(
+            to: repositoryURL.appendingPathComponent("retry.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let retried = try #require(await GitRepositoryScanner.retryRepository(
+            config: testScanConfig,
+            previousSnapshot: previous
+        ))
+
+        #expect(retried.id == previous.id)
+        #expect(retried.resolvedDataSource == .current)
+        #expect(retried.status == .changed)
+        #expect(retried.untrackedFileCount == 1)
+        #expect(retried.errorMessage == nil)
     }
 
     @Test func gitScannerKeepsActivityStableUntilRepositoryStateChanges() async throws {
@@ -3286,6 +3405,7 @@ struct CommitReadinessEngineTests {
             schemaVersion: RepositorySnapshotSchema.version,
             generatedAt: "2026-07-12T00:00:00Z",
             writtenAt: "2026-07-12T00:00:00Z",
+            lastSuccessfulRefreshAt: "2026-07-12T00:00:00Z",
             scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 1, totalChangedFiles: 1, errorRepositories: 0),
             repositories: [RepositoryIdentity.normalize(repository)]
         )
@@ -3295,6 +3415,7 @@ struct CommitReadinessEngineTests {
         #expect(decoded.repositories.count == 1)
         #expect(decoded.repositories[0].id == RepositoryIdentity.id(for: decoded.repositories[0].path))
         #expect(decoded.repositories[0].path == RepositoryIdentity.canonicalPath(repository.path))
+        #expect(decoded.lastSuccessfulRefreshAt == "2026-07-12T00:00:00Z")
     }
 
     private func snapshot(

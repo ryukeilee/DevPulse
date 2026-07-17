@@ -41,6 +41,10 @@ struct ScanExecutionRequest: Sendable {
     }
 }
 typealias ScanExecution = @Sendable (ScanExecutionRequest) async -> (data: AppGroupData, warnings: [String], discoveredRepositoryPaths: [String])
+typealias RepositoryRetryExecution = @Sendable (
+    _ config: ScanConfig,
+    _ previousSnapshot: RepositorySnapshot
+) async -> RepositorySnapshot?
 
 
 /// Coalesces scan refresh requests without retaining UI or scanner state.
@@ -269,6 +273,14 @@ enum ScanSchedulerPolicy {
             )
         }
 
+        if refreshPhase == .degraded {
+            return WakeRefreshDecision(
+                shouldRefreshImmediately: true,
+                forceRepositoryDiscovery: false,
+                detail: "上次只有部分仓库刷新成功，唤醒后立即重试未确认项目。"
+            )
+        }
+
         switch RefreshStatusFormatter.freshness(for: lastScanAt, now: now) {
         case .fresh:
             return WakeRefreshDecision(
@@ -405,6 +417,8 @@ struct ScanSelfCheckReport {
             return "refreshing"
         case .success:
             return "success"
+        case .degraded:
+            return "degraded"
         case .failure:
             return "failure"
         }
@@ -450,6 +464,7 @@ final class ScanScheduler: ObservableObject {
     @Published var lastScanAt: Date?
     @Published var refreshPhase: RefreshPhase = .idle
     @Published var refreshFailureMessage: String?
+    @Published private(set) var sharedSnapshotSyncFailureMessage: String?
     @Published var gitAvailable: Bool = true
     @Published var appGroupAvailable: Bool = true
     @Published var warnings: [String] = []
@@ -463,6 +478,7 @@ final class ScanScheduler: ObservableObject {
     @Published var diagnosticEvents: [DiagnosticEvent] = []
     @Published private(set) var activityEvents: [ActivityEvent] = []
     @Published private(set) var ignoredRepositories: [IgnoredRepository] = []
+    @Published private(set) var retryingRepositoryIDs: Set<String> = []
     @Published var scanIntervalSeconds: TimeInterval = 300
     @Published var powerState: String = "normal"
 
@@ -478,6 +494,9 @@ final class ScanScheduler: ObservableObject {
     private var scanGeneration = 0
     private var locationRefreshDrainScheduled = false
     private let scanExecution: ScanExecution
+    private var repositoryRetryExecution: RepositoryRetryExecution
+    private var repositoryRetryTasks: [String: Task<Void, Never>] = [:]
+    private var repositoryRetryGeneration = 0
     private let activityEventStore: ActivityEventStore?
     private var configLoadedFromPersistence = false
     private var activityRepositoryIDMigrations: [String: String] = [:]
@@ -537,6 +556,12 @@ final class ScanScheduler: ObservableObject {
         )
     }) {
         self.scanExecution = scanExecution
+        self.repositoryRetryExecution = { config, previousSnapshot in
+            await GitRepositoryScanner.retryRepository(
+                config: config,
+                previousSnapshot: previousSnapshot
+            )
+        }
         self.activityEventStore = commandMode ? nil : activityEventStore
         if commandMode {
             appGroupAvailable = AppGroupStore.isAvailable
@@ -558,17 +583,36 @@ final class ScanScheduler: ObservableObject {
         startSleepWakeMonitoring()
     }
 
+    convenience init(
+        commandMode: Bool,
+        activityEventStore: ActivityEventStore? = nil,
+        repositoryRetryExecution: @escaping RepositoryRetryExecution,
+        scanExecution: @escaping ScanExecution
+    ) {
+        self.init(
+            commandMode: commandMode,
+            activityEventStore: activityEventStore,
+            scanExecution: scanExecution
+        )
+        self.repositoryRetryExecution = repositoryRetryExecution
+    }
+
     deinit {
         scanTask?.cancel()
+        repositoryRetryTasks.values.forEach { $0.cancel() }
+    }
+
+    var lastSuccessfulRefreshAt: Date? {
+        lastResult.lastSuccessfulRefreshAt.flatMap(DateFormatting.date(from:))
     }
 
     var snapshotFreshness: SnapshotFreshness? {
-        RefreshStatusFormatter.freshness(for: lastScanAt)
+        RefreshStatusFormatter.freshness(for: lastSuccessfulRefreshAt)
     }
 
     var refreshTrustAssessment: SnapshotTrustAssessment {
         RefreshStatusFormatter.refreshAssessment(
-            lastUpdatedAt: lastScanAt,
+            lastUpdatedAt: lastSuccessfulRefreshAt,
             failureMessage: refreshPhase == .failure ? refreshFailureMessage : nil
         )
     }
@@ -577,7 +621,15 @@ final class ScanScheduler: ObservableObject {
         switch refreshPhase {
         case .refreshing:
             return "刷新中…"
-        case .failure, .idle, .success:
+        case .degraded:
+            return "部分仓库读取失败"
+        case .failure:
+            return "刷新失败"
+        case .success:
+            return refreshTrustAssessment.state == .fresh
+                ? "刷新成功"
+                : refreshTrustAssessment.title
+        case .idle:
             return refreshTrustAssessment.title
         }
     }
@@ -585,11 +637,28 @@ final class ScanScheduler: ObservableObject {
     var refreshDetailText: String? {
         switch refreshPhase {
         case .refreshing:
-            if let lastScanAt {
-                return "上次成功刷新：\(RefreshStatusFormatter.updateLabel(for: lastScanAt))"
+            let errorCount = lastResult.scanSummary.errorRepositories
+            if errorCount > 0 {
+                return "仍显示上次结果 · \(errorCount) 个仓库待重试"
             }
-            return nil
-        case .failure, .idle, .success:
+            if let lastSuccessfulRefreshAt {
+                return "仍显示上次成功：\(RefreshStatusFormatter.updateLabel(for: lastSuccessfulRefreshAt))"
+            }
+            return lastResult.repositories.isEmpty ? nil : "仍显示上次结果"
+        case .degraded:
+            let errorCount = lastResult.scanSummary.errorRepositories
+            if errorCount > 0 {
+                return "\(errorCount) 个仓库待重试，其他仓库已更新"
+            }
+            return "部分扫描目录待重试，已发现仓库已更新"
+        case .failure:
+            let reason = refreshFailureMessage ?? "本轮未能建立可用结果"
+            return "\(reason) · \(refreshTrustAssessment.detail)"
+        case .success:
+            return refreshTrustAssessment.state == .fresh
+                ? lastSuccessfulRefreshAt.map { RefreshStatusFormatter.updateLabel(for: $0) }
+                : refreshTrustAssessment.detail
+        case .idle:
             return refreshTrustAssessment.state == .fresh ? nil : refreshTrustAssessment.detail
         }
     }
@@ -597,6 +666,7 @@ final class ScanScheduler: ObservableObject {
     // MARK: - Scan (async, non-blocking)
 
     func scanNow(forceRepositoryDiscovery: Bool = false) {
+        cancelRepositoryRetries()
         let signature = ScanSchedulerPolicy.scanRootsSignature(scanRoots().roots)
         let queued: Bool
         if forceRepositoryDiscovery {
@@ -634,6 +704,7 @@ final class ScanScheduler: ObservableObject {
         diagnostics.lastRefreshCompletedAt = nil
         refreshPhase = .refreshing
         refreshFailureMessage = nil
+        sharedSnapshotSyncFailureMessage = nil
         warnings = []
         diagnostics.validationIssues = []
         diagnostics.sharedDataWriteError = nil
@@ -721,6 +792,14 @@ final class ScanScheduler: ObservableObject {
 
                 let previousSnapshot = self.lastResult
                 let pinned = self.applyPins(result.data)
+                let completedAt = DateFormatting.date(from: pinned.generatedAt)
+                let isDegraded = pinned.scanSummary.errorRepositories > 0
+                    || GitRepositoryScanner.discoveryWasIncomplete(result.warnings)
+                let trustedResult = pinned.withLastSuccessfulRefreshAt(
+                    !isDegraded && completedAt != nil
+                        ? pinned.generatedAt
+                        : previousSnapshot.lastSuccessfulRefreshAt
+                )
                 let combinedWarnings = self.summarizeWarnings(
                     result.warnings,
                     accessWarning: currentScanRoots.warning
@@ -728,8 +807,8 @@ final class ScanScheduler: ObservableObject {
                 self.warnings = combinedWarnings
                 let recorded = self.recordActivityEvents(
                     previous: previousSnapshot,
-                    current: pinned,
-                    observedAt: pinned.generatedAt
+                    current: trustedResult,
+                    observedAt: trustedResult.generatedAt
                 )
                 self.cleanupRemovedRepositoryPins(
                     previous: previousSnapshot,
@@ -738,10 +817,10 @@ final class ScanScheduler: ObservableObject {
                 let hadChanges = self.hadChanges(before: previousSnapshot, after: recorded)
 
                 self.lastResult = recorded
-                self.lastScanAt = DateFormatting.date(from: recorded.generatedAt) ?? Date()
+                self.lastScanAt = completedAt
                 self.diagnostics.lastScanAt = self.lastScanAt
                 self.isScanning = false
-                self.refreshPhase = .success
+                self.refreshPhase = isDegraded ? .degraded : .success
                 self.refreshFailureMessage = nil
                 self.scanRootAccessWarning = currentScanRoots.warning
                 self.diagnostics.validationIssues = self.warnings
@@ -787,7 +866,128 @@ final class ScanScheduler: ObservableObject {
         scanNow(forceRepositoryDiscovery: true)
     }
 
+    func isRetryingRepository(_ repositoryID: String) -> Bool {
+        retryingRepositoryIDs.contains(repositoryID)
+    }
+
+    func retryRepository(_ repositoryID: String) {
+        guard !isScanning,
+              !retryingRepositoryIDs.contains(repositoryID),
+              let previousRepository = lastResult.repositories.first(where: { $0.id == repositoryID }),
+              previousRepository.needsReadRetry else {
+            return
+        }
+
+        let execution = repositoryRetryExecution
+        let retryConfig = scanConfigForExecution()
+        let generation = repositoryRetryGeneration
+        retryingRepositoryIDs.insert(repositoryID)
+
+        let task = Task.detached(priority: .userInitiated) { [weak self] in
+            let retriedRepository = await execution(retryConfig, previousRepository)
+            let wasCancelled = Task.isCancelled
+
+            await MainActor.run { [weak self] in
+                guard let self,
+                      self.repositoryRetryGeneration == generation else {
+                    return
+                }
+
+                self.repositoryRetryTasks[repositoryID] = nil
+                self.retryingRepositoryIDs.remove(repositoryID)
+
+                guard !wasCancelled,
+                      var retriedRepository,
+                      let currentRepository = self.lastResult.repositories.first(where: {
+                          $0.id == repositoryID && $0.path == previousRepository.path
+                      }) else {
+                    return
+                }
+
+                retriedRepository.isPinned = currentRepository.isPinned
+                let previousSnapshot = self.lastResult
+                let repositories = RepositorySorter.sort(
+                    previousSnapshot.repositories.map {
+                        $0.id == repositoryID ? retriedRepository : $0
+                    }
+                )
+                var unavailableSinceByPath = previousSnapshot.repositoryUnavailableSinceByPath ?? [:]
+                if retriedRepository.resolvedDataSource == .current,
+                   retriedRepository.status != .error {
+                    unavailableSinceByPath[retriedRepository.path] = nil
+                } else if unavailableSinceByPath[retriedRepository.path] == nil {
+                    unavailableSinceByPath[retriedRepository.path] = retriedRepository.unavailableSince
+                        ?? retriedRepository.lastScannedAt
+                }
+
+                let updated = AppGroupData(
+                    schemaVersion: previousSnapshot.schemaVersion,
+                    generatedAt: previousSnapshot.generatedAt,
+                    writtenAt: previousSnapshot.writtenAt,
+                    lastSuccessfulRefreshAt: previousSnapshot.lastSuccessfulRefreshAt,
+                    scanSummary: ScanSummary.build(
+                        from: repositories,
+                        totalRepositories: max(
+                            previousSnapshot.scanSummary.totalRepositories,
+                            repositories.count
+                        )
+                    ),
+                    repositories: repositories,
+                    recentActivityEvents: previousSnapshot.recentActivityEvents,
+                    repositoryUnavailableSinceByPath: unavailableSinceByPath.isEmpty
+                        ? nil
+                        : unavailableSinceByPath
+                )
+                let recorded = self.recordActivityEvents(
+                    previous: previousSnapshot,
+                    current: updated,
+                    observedAt: retriedRepository.lastScannedAt
+                )
+                let completeWatermark = recorded.scanSummary.errorRepositories == 0
+                    ? recorded.completeRepositorySuccessWatermark
+                    : nil
+                let finalSnapshot = completeWatermark == nil
+                    ? recorded
+                    : recorded.withLastSuccessfulRefreshAt(completeWatermark)
+                self.lastResult = finalSnapshot
+
+                let hasCurrentData = finalSnapshot.repositories.contains {
+                    $0.resolvedDataSource == .current && $0.status != .error
+                }
+                if hasCurrentData {
+                    if finalSnapshot.scanSummary.errorRepositories > 0 {
+                        self.refreshPhase = .degraded
+                    } else {
+                        self.refreshPhase = completeWatermark == nil ? .idle : .success
+                    }
+                    self.refreshFailureMessage = nil
+                } else {
+                    self.refreshPhase = .failure
+                    if self.refreshFailureMessage == nil {
+                        self.refreshFailureMessage = "本轮未能读取任何仓库的当前 Git 状态"
+                    }
+                }
+
+                self.syncSharedSnapshot(
+                    from: finalSnapshot,
+                    previousSnapshot: previousSnapshot,
+                    reason: "repository-retry"
+                )
+            }
+        }
+        repositoryRetryTasks[repositoryID] = task
+    }
+
+    private func cancelRepositoryRetries() {
+        guard !repositoryRetryTasks.isEmpty else { return }
+        repositoryRetryGeneration &+= 1
+        repositoryRetryTasks.values.forEach { $0.cancel() }
+        repositoryRetryTasks.removeAll()
+        retryingRepositoryIDs.removeAll()
+    }
+
     func runSelfCheck() async -> ScanSelfCheckReport {
+        cancelRepositoryRetries()
         gitAvailable = ProcessRunner.isGitAvailable()
         guard gitAvailable else {
             failRefresh("Git 不可用", persistRepositoryTrustFailure: true)
@@ -806,6 +1006,7 @@ final class ScanScheduler: ObservableObject {
         isScanning = true
         refreshPhase = .refreshing
         refreshFailureMessage = nil
+        sharedSnapshotSyncFailureMessage = nil
         warnings = []
 
         let currentConfig = scanConfigForExecution()
@@ -849,6 +1050,14 @@ final class ScanScheduler: ObservableObject {
 
         let previousSnapshot = lastResult
         let pinned = applyPins(result.data)
+        let completedAt = DateFormatting.date(from: pinned.generatedAt)
+        let isDegraded = pinned.scanSummary.errorRepositories > 0
+            || GitRepositoryScanner.discoveryWasIncomplete(result.warnings)
+        let trustedResult = pinned.withLastSuccessfulRefreshAt(
+            !isDegraded && completedAt != nil
+                ? pinned.generatedAt
+                : previousSnapshot.lastSuccessfulRefreshAt
+        )
         let combinedWarnings = summarizeWarnings(
             result.warnings,
             accessWarning: currentScanRoots.warning
@@ -856,16 +1065,16 @@ final class ScanScheduler: ObservableObject {
         warnings = combinedWarnings
         let recorded = recordActivityEvents(
             previous: previousSnapshot,
-            current: pinned,
-            observedAt: pinned.generatedAt
+            current: trustedResult,
+            observedAt: trustedResult.generatedAt
         )
         cleanupRemovedRepositoryPins(previous: previousSnapshot, current: recorded)
 
         lastResult = recorded
-        lastScanAt = DateFormatting.date(from: recorded.generatedAt) ?? Date()
+        lastScanAt = completedAt
         diagnostics.lastScanAt = lastScanAt
         isScanning = false
-        refreshPhase = .success
+        refreshPhase = isDegraded ? .degraded : .success
         refreshFailureMessage = nil
         scanRootAccessWarning = currentScanRoots.warning
         diagnostics.validationIssues = warnings
@@ -1161,29 +1370,32 @@ final class ScanScheduler: ObservableObject {
             if let writtenAt = sharedSnapshot.writtenAt.flatMap(DateFormatting.date(from:)) {
                 diagnostics.lastSharedWriteAt = writtenAt
             }
-            let hasSuccessfulRepositoryData = pinned.repositories.contains {
-                $0.resolvedLastSuccessfulScanAt != nil
-            }
-            if (pinned.repositories.isEmpty || hasSuccessfulRepositoryData),
-               let generatedAt = DateFormatting.date(from: restoredSnapshot.generatedAt) {
+            if let generatedAt = DateFormatting.date(from: restoredSnapshot.generatedAt) {
                 lastScanAt = generatedAt
                 diagnostics.lastScanAt = generatedAt
             }
             let retainedOnly = ScanSchedulerPolicy.allRepositoryDataUnavailable(pinned.repositories)
             if let startupWriteError {
-                let message = "启动时未能更新共享仓库范围"
-                refreshPhase = .failure
-                refreshFailureMessage = message
-                warnings = [message, startupWriteError]
-            } else if retainedOnly {
+                sharedSnapshotSyncFailureMessage = "启动时未能更新共享仓库范围"
+                warnings = [sharedSnapshotSyncFailureMessage ?? "共享快照同步失败", startupWriteError]
+            } else {
+                sharedSnapshotSyncFailureMessage = nil
+                warnings = []
+            }
+
+            if retainedOnly {
                 let message = "上次扫描未能刷新仓库，当前显示上次成功或未知数据"
                 refreshPhase = .failure
                 refreshFailureMessage = message
-                warnings = [message]
+                if !warnings.contains(message) {
+                    warnings.insert(message, at: 0)
+                }
+            } else if pinned.scanSummary.errorRepositories > 0 {
+                refreshPhase = .degraded
+                refreshFailureMessage = nil
             } else {
                 refreshPhase = .idle
                 refreshFailureMessage = nil
-                warnings = []
             }
             setWidgetReadableSnapshot(sharedSnapshot, readAt: now)
             validateConsistency(expected: pinned, shared: sharedSnapshot, widget: diagnostics.widgetSnapshot, reason: "startup")
@@ -1196,6 +1408,7 @@ final class ScanScheduler: ObservableObject {
             diagnostics.validationIssues = []
             refreshPhase = .idle
             refreshFailureMessage = nil
+            sharedSnapshotSyncFailureMessage = nil
             warnings = []
         case .failure(let error):
             diagnostics.snapshotDecodable = false
@@ -1204,6 +1417,7 @@ final class ScanScheduler: ObservableObject {
             diagnostics.validationIssues = [error.localizedDescription]
             refreshPhase = .failure
             refreshFailureMessage = "读取共享快照失败"
+            sharedSnapshotSyncFailureMessage = nil
             recordEvent(.sharedDataReadFailed, "Shared snapshot read failed at startup: \(error.localizedDescription)")
         }
     }
@@ -1224,6 +1438,7 @@ final class ScanScheduler: ObservableObject {
         switch AppGroupStore.write(snapshotToWrite) {
         case .success(let readBack):
             let now = Date()
+            sharedSnapshotSyncFailureMessage = nil
             syncStoreInspection()
             appGroupAvailable = AppGroupStore.isAvailable
             diagnostics.lastRefreshCompletedAt = now
@@ -1291,9 +1506,8 @@ final class ScanScheduler: ObservableObject {
     }
 
     private func markSharedSnapshotSyncFailure(_ reason: String) {
-        let message = "扫描已完成，但 Widget 数据同步失败"
-        refreshPhase = .failure
-        refreshFailureMessage = message
+        let message = "当前列表数据已保留，但 Widget 数据同步失败"
+        sharedSnapshotSyncFailureMessage = message
         if !warnings.contains(message) {
             warnings.append(message)
         }
@@ -1475,6 +1689,9 @@ final class ScanScheduler: ObservableObject {
             writtenAt: previousHasRepositoryTrustState
                 ? previousSnapshot.writtenAt
                 : retained.writtenAt,
+            lastSuccessfulRefreshAt: previousHasRepositoryTrustState
+                ? previousSnapshot.lastSuccessfulRefreshAt
+                : retained.lastSuccessfulRefreshAt,
             scanSummary: retained.scanSummary,
             repositories: RepositorySorter.sort(retained.repositories),
             recentActivityEvents: retained.recentActivityEvents,
@@ -1576,7 +1793,7 @@ final class ScanScheduler: ObservableObject {
         updatePowerState()
 
         let decision = ScanSchedulerPolicy.wakeRefreshDecision(
-            lastScanAt: lastScanAt,
+            lastScanAt: lastSuccessfulRefreshAt,
             refreshPhase: refreshPhase,
             sleepBeganAt: lastSystemSleepAt,
             refreshStartedAt: diagnostics.lastRefreshStartedAt,
@@ -1657,6 +1874,7 @@ final class ScanScheduler: ObservableObject {
             schemaVersion: migration.snapshot.schemaVersion,
             generatedAt: migration.snapshot.generatedAt,
             writtenAt: migration.snapshot.writtenAt,
+            lastSuccessfulRefreshAt: migration.snapshot.lastSuccessfulRefreshAt,
             scanSummary: migration.snapshot.scanSummary,
             repositories: repos,
             recentActivityEvents: migration.snapshot.recentActivityEvents,
@@ -2032,10 +2250,10 @@ final class ScanScheduler: ObservableObject {
 
     private var shouldRunImmediateStartupScan: Bool {
         if requiresStartupScopeRefresh { return true }
-        guard refreshPhase != .failure else { return true }
+        guard refreshPhase != .failure, refreshPhase != .degraded else { return true }
         guard !lastResult.repositories.isEmpty else { return true }
 
-        switch RefreshStatusFormatter.freshness(for: lastScanAt) {
+        switch RefreshStatusFormatter.freshness(for: lastSuccessfulRefreshAt) {
         case .fresh:
             return false
         case .stale, .expired, .unknown:

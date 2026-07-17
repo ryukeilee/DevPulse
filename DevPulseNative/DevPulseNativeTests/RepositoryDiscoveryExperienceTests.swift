@@ -72,7 +72,7 @@ struct RepositoryDiscoveryExperienceTests {
         defaults.set(try JSONEncoder().encode(ScanLocationConfiguration(enabledBuiltInPaths: [], customDirectories: [CustomScanDirectory(path: canonical)])), forKey: locationsKey)
         defaults.set(signature, forKey: discoveryKey)
         let now = DateFormatting.nowISO()
-        let snapshot = AppGroupData(schemaVersion: RepositorySnapshotSchema.version, generatedAt: now, writtenAt: now, scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 0, totalChangedFiles: 0, errorRepositories: 0), repositories: [RepositorySnapshot(id: "startup-match", name: "startup-match", path: canonical, branch: "main", status: .clean, modifiedFileCount: 0, addedFileCount: 0, deletedFileCount: 0, untrackedFileCount: 0, stagedFileCount: 0, unstagedFileCount: 0, conflictedFileCount: 0, aheadCount: 0, changedFileCount: 0, changedFilesPreview: [], risk: .low, lastScannedAt: now, lastChangedAt: nil, errorMessage: nil, isPinned: false)])
+        let snapshot = AppGroupData(schemaVersion: RepositorySnapshotSchema.version, generatedAt: now, writtenAt: now, lastSuccessfulRefreshAt: now, scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 0, totalChangedFiles: 0, errorRepositories: 0), repositories: [RepositorySnapshot(id: "startup-match", name: "startup-match", path: canonical, branch: "main", status: .clean, modifiedFileCount: 0, addedFileCount: 0, deletedFileCount: 0, untrackedFileCount: 0, stagedFileCount: 0, unstagedFileCount: 0, conflictedFileCount: 0, aheadCount: 0, changedFileCount: 0, changedFilesPreview: [], risk: .low, lastScannedAt: now, lastChangedAt: nil, errorMessage: nil, isPinned: false)])
         _ = AppGroupStore.write(snapshot)
         let recorder = ScanRequestRecorder()
         let scheduler = ScanScheduler { request in
@@ -474,10 +474,12 @@ struct RepositoryDiscoveryExperienceTests {
         let canonicalPath = RepositoryIdentity.canonicalPath(root.path)
         let signature = ScanSchedulerPolicy.scanRootsSignature([canonicalPath])
         let repository = RepositoryIdentity.normalize(repositorySnapshot(path: canonicalPath))
+        let snapshotTime = DateFormatting.nowISO()
         let snapshot = AppGroupData(
             schemaVersion: RepositorySnapshotSchema.version,
-            generatedAt: DateFormatting.nowISO(),
+            generatedAt: snapshotTime,
             writtenAt: nil,
+            lastSuccessfulRefreshAt: snapshotTime,
             scanSummary: ScanSummary.build(from: [repository]),
             repositories: [repository]
         )
@@ -536,6 +538,7 @@ struct RepositoryDiscoveryExperienceTests {
             schemaVersion: RepositorySnapshotSchema.version,
             generatedAt: now,
             writtenAt: now,
+            lastSuccessfulRefreshAt: now,
             scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 0, totalChangedFiles: 0, errorRepositories: 0),
             repositories: [RepositorySnapshot(id: "startup-repo", name: "startup-repo", path: canonical, branch: "main", status: .clean, modifiedFileCount: 0, addedFileCount: 0, deletedFileCount: 0, untrackedFileCount: 0, stagedFileCount: 0, unstagedFileCount: 0, conflictedFileCount: 0, aheadCount: 0, changedFileCount: 0, changedFilesPreview: [], risk: .low, lastScannedAt: now, lastChangedAt: nil, errorMessage: nil, isPinned: false)]
         )
@@ -627,6 +630,8 @@ struct RepositoryDiscoveryExperienceTests {
             return requests.count
         }
 
+        func requestCount() -> Int { requests.count }
+
         func waitForCount(_ count: Int) async -> [ScanExecutionRequest] {
             if requests.count >= count { return requests }
             return await withCheckedContinuation { requestWaiter = $0 }
@@ -682,6 +687,205 @@ struct RepositoryDiscoveryExperienceTests {
         #expect(request.roots.isEmpty)
         #expect(request.rootsSignature.isEmpty)
         #expect(request.forceRepositoryDiscovery)
+    }
+
+    @MainActor
+    @Test func fullRefreshKeepsPreviousSnapshotVisibleWhileExecutionIsBlocked() async throws {
+        let previousSharedSnapshot = try? AppGroupStore.read().get()
+        defer { restoreSharedSnapshot(previousSharedSnapshot) }
+
+        let oldTime = "2026-07-16T08:00:00Z"
+        let oldRepository = refreshRepository(
+            id: "old",
+            name: "Old",
+            modified: 1,
+            scannedAt: oldTime
+        )
+        let oldSnapshot = refreshSnapshot(
+            generatedAt: oldTime,
+            lastSuccessfulRefreshAt: oldTime,
+            repositories: [oldRepository]
+        )
+        let recorder = BlockingScanRequestRecorder()
+        let scheduler = ScanScheduler(commandMode: true) { _ in
+            _ = await recorder.record(.init(
+                config: .default,
+                roots: [],
+                rootsSignature: "",
+                knownRepositoryPaths: [],
+                forceRepositoryDiscovery: false
+            ))
+            await recorder.waitUntilReleased()
+            return (oldSnapshot, [], [])
+        }
+        scheduler.lastResult = oldSnapshot
+        scheduler.lastScanAt = try #require(DateFormatting.date(from: oldTime))
+
+        scheduler.scanNow()
+        try await waitForBlockingRequest(recorder)
+
+        #expect(scheduler.isScanning)
+        #expect(scheduler.refreshPhase == .refreshing)
+        #expect(scheduler.lastResult == oldSnapshot)
+
+        await recorder.release()
+        try await waitForSchedulerToFinish(scheduler)
+    }
+
+    @MainActor
+    @Test func mixedRefreshIsDegradedWithoutAdvancingLastSuccessfulRefresh() async throws {
+        let previousSharedSnapshot = try? AppGroupStore.read().get()
+        defer { restoreSharedSnapshot(previousSharedSnapshot) }
+
+        let successfulAt = "2026-07-16T08:00:00Z"
+        let attemptedAt = "2026-07-16T09:00:00Z"
+        let previousCurrent = refreshRepository(
+            id: "current",
+            name: "Current",
+            modified: 1,
+            scannedAt: successfulAt
+        )
+        let previousFailed = refreshRepository(
+            id: "failed",
+            name: "Failed",
+            modified: 2,
+            scannedAt: successfulAt
+        )
+        let oldSnapshot = refreshSnapshot(
+            generatedAt: successfulAt,
+            lastSuccessfulRefreshAt: successfulAt,
+            repositories: [previousCurrent, previousFailed]
+        )
+        let updatedCurrent = refreshRepository(
+            id: "current",
+            name: "Current",
+            modified: 5,
+            scannedAt: attemptedAt
+        )
+        let retainedFailed = previousFailed.retainingLastSuccessfulData(
+            attemptedAt: attemptedAt,
+            errorMessage: "权限暂时不可用"
+        )
+        let mixedSnapshot = refreshSnapshot(
+            generatedAt: attemptedAt,
+            lastSuccessfulRefreshAt: attemptedAt,
+            repositories: [updatedCurrent, retainedFailed]
+        )
+        let scheduler = ScanScheduler(commandMode: true) { _ in
+            (mixedSnapshot, [], [])
+        }
+        scheduler.lastResult = oldSnapshot
+        scheduler.lastScanAt = try #require(DateFormatting.date(from: successfulAt))
+
+        scheduler.scanNow()
+        try await waitForSchedulerToFinish(scheduler)
+
+        #expect(scheduler.refreshPhase == .degraded)
+        #expect(scheduler.lastResult.lastSuccessfulRefreshAt == successfulAt)
+        #expect(scheduler.lastScanAt == DateFormatting.date(from: attemptedAt))
+        #expect(scheduler.lastResult.repositories.first(where: { $0.name == "Current" })?.modifiedFileCount == 5)
+        let failed = try #require(scheduler.lastResult.repositories.first(where: { $0.name == "Failed" }))
+        #expect(failed.resolvedDataSource == .lastSuccessful)
+        #expect(failed.modifiedFileCount == previousFailed.modifiedFileCount)
+        #expect(failed.resolvedLastSuccessfulScanAt == successfulAt)
+    }
+
+    @MainActor
+    @Test func repositoryRetryReplacesOnlyTargetAndClearsRetryState() async throws {
+        let previousSharedSnapshot = try? AppGroupStore.read().get()
+        defer { restoreSharedSnapshot(previousSharedSnapshot) }
+
+        let successfulAt = "2026-07-16T08:00:00Z"
+        let retriedAt = "2026-07-16T09:00:00Z"
+        let other = refreshRepository(
+            id: "other",
+            name: "Alpha",
+            modified: 3,
+            scannedAt: successfulAt
+        )
+        var failed = refreshRepository(
+            id: "failed",
+            name: "Zulu",
+            modified: 2,
+            scannedAt: successfulAt,
+            isPinned: true
+        ).retainingLastSuccessfulData(
+            attemptedAt: "2026-07-16T08:30:00Z",
+            errorMessage: "读取失败"
+        )
+        failed.isPinned = true
+        let oldSnapshot = refreshSnapshot(
+            generatedAt: "2026-07-16T08:30:00Z",
+            lastSuccessfulRefreshAt: successfulAt,
+            repositories: RepositorySorter.sort([other, failed])
+        )
+        let recovered = refreshRepository(
+            id: "failed",
+            name: "Zulu",
+            modified: 7,
+            scannedAt: retriedAt
+        )
+        let scheduler = ScanScheduler(
+            commandMode: true,
+            repositoryRetryExecution: { _, _ in
+                return recovered
+            },
+            scanExecution: { _ in (.empty(), [], []) }
+        )
+        scheduler.lastResult = oldSnapshot
+        scheduler.refreshPhase = .degraded
+
+        scheduler.retryRepository("failed")
+        try await waitForRepositoryRetryToFinish(scheduler, repositoryID: "failed")
+
+        #expect(!scheduler.isRetryingRepository("failed"))
+        let updatedTarget = try #require(scheduler.lastResult.repositories.first(where: { $0.name == "Zulu" }))
+        #expect(updatedTarget.resolvedDataSource == .current)
+        #expect(updatedTarget.errorMessage == nil)
+        #expect(updatedTarget.modifiedFileCount == 7)
+        #expect(updatedTarget.isPinned)
+        let unchangedRepository = try #require(
+            scheduler.lastResult.repositories.first(where: { $0.name == "Alpha" })
+        )
+        #expect(unchangedRepository.modifiedFileCount == other.modifiedFileCount)
+        #expect(unchangedRepository.lastScannedAt == other.lastScannedAt)
+        #expect(unchangedRepository.resolvedDataSource == .current)
+        #expect(
+            scheduler.lastResult.repositories.map(\.id)
+                == RepositorySorter.sort(scheduler.lastResult.repositories).map(\.id)
+        )
+        #expect(scheduler.refreshPhase == .success)
+        #expect(scheduler.lastResult.lastSuccessfulRefreshAt == successfulAt)
+    }
+
+    @MainActor
+    @Test func invalidGeneratedAtDoesNotUseCurrentTimeAsLastScanAt() async throws {
+        let previousSharedSnapshot = try? AppGroupStore.read().get()
+        defer { restoreSharedSnapshot(previousSharedSnapshot) }
+
+        let successfulAt = "2026-07-16T08:00:00Z"
+        let oldSnapshot = refreshSnapshot(
+            generatedAt: successfulAt,
+            lastSuccessfulRefreshAt: successfulAt,
+            repositories: [refreshRepository(id: "repo", name: "Repo", modified: 1, scannedAt: successfulAt)]
+        )
+        let malformedSnapshot = refreshSnapshot(
+            generatedAt: "not-an-iso-date",
+            lastSuccessfulRefreshAt: "not-an-iso-date",
+            repositories: [refreshRepository(id: "repo", name: "Repo", modified: 2, scannedAt: "not-an-iso-date")]
+        )
+        let scheduler = ScanScheduler(commandMode: true) { _ in
+            (malformedSnapshot, [], [])
+        }
+        scheduler.lastResult = oldSnapshot
+        scheduler.lastScanAt = try #require(DateFormatting.date(from: successfulAt))
+
+        scheduler.scanNow()
+        try await waitForSchedulerToFinish(scheduler)
+
+        #expect(scheduler.refreshPhase == .success)
+        #expect(scheduler.lastScanAt == nil)
+        #expect(scheduler.lastResult.lastSuccessfulRefreshAt == successfulAt)
     }
 
     @MainActor
@@ -1147,6 +1351,64 @@ struct RepositoryDiscoveryExperienceTests {
         }
     }
 
+    private func restoreSharedSnapshot(_ snapshot: AppGroupData?) {
+        if let snapshot {
+            _ = AppGroupStore.write(snapshot)
+        } else if let url = AppGroupStore.snapshotURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private func refreshRepository(
+        id: String,
+        name: String,
+        modified: Int,
+        scannedAt: String,
+        isPinned: Bool = false
+    ) -> RepositorySnapshot {
+        RepositorySnapshot(
+            id: id,
+            name: name,
+            path: "/tmp/DevPulseTests/\(id)",
+            branch: "main",
+            status: modified == 0 ? .clean : .changed,
+            modifiedFileCount: modified,
+            addedFileCount: 0,
+            deletedFileCount: 0,
+            untrackedFileCount: 0,
+            stagedFileCount: 0,
+            unstagedFileCount: modified,
+            conflictedFileCount: 0,
+            aheadCount: 0,
+            behindCount: 0,
+            hasUpstream: true,
+            changedFileCount: modified,
+            changedFilesPreview: [],
+            risk: .low,
+            lastScannedAt: scannedAt,
+            dataSource: .current,
+            lastSuccessfulScanAt: scannedAt,
+            lastChangedAt: nil,
+            errorMessage: nil,
+            isPinned: isPinned
+        )
+    }
+
+    private func refreshSnapshot(
+        generatedAt: String,
+        lastSuccessfulRefreshAt: String?,
+        repositories: [RepositorySnapshot]
+    ) -> AppGroupData {
+        AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: generatedAt,
+            writtenAt: nil,
+            lastSuccessfulRefreshAt: lastSuccessfulRefreshAt,
+            scanSummary: ScanSummary.build(from: repositories),
+            repositories: repositories
+        )
+    }
+
     private func repositorySnapshot(path: String) -> RepositorySnapshot {
         RepositorySnapshot(
             id: "legacy-repository",
@@ -1197,6 +1459,32 @@ struct RepositoryDiscoveryExperienceTests {
                     code: 2,
                     userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for scan completion"]
                 )
+            }
+            await Task.yield()
+        }
+    }
+
+    private func waitForBlockingRequest(_ recorder: BlockingScanRequestRecorder) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(3)
+        while await recorder.requestCount() == 0 {
+            guard clock.now < deadline else {
+                throw NSError(domain: "DevPulseTests", code: 3, userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for blocked scan request"])
+            }
+            await Task.yield()
+        }
+    }
+
+    @MainActor
+    private func waitForRepositoryRetryToFinish(
+        _ scheduler: ScanScheduler,
+        repositoryID: String
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(3)
+        while scheduler.isRetryingRepository(repositoryID) {
+            guard clock.now < deadline else {
+                throw NSError(domain: "DevPulseTests", code: 4, userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for repository retry completion"])
             }
             await Task.yield()
         }

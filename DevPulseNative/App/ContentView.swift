@@ -152,7 +152,7 @@ struct StatusTab: View {
                 ActivityTimelineView(
                     events: scheduler.activityEvents,
                     repositories: scheduler.lastResult.repositories,
-                    lastScanAt: scheduler.lastScanAt,
+                    lastScanAt: scheduler.lastSuccessfulRefreshAt,
                     onRescan: scheduler.rescan
                 )
 
@@ -291,9 +291,16 @@ private struct OverviewFocusCard: View {
     }
 
     private var widgetTrustAssessment: SnapshotTrustAssessment {
-        RefreshStatusFormatter.snapshotAssessment(
-            generatedAt: scheduler.diagnostics.widgetSnapshot?.generatedAt,
-            writtenAt: scheduler.diagnostics.widgetSnapshot?.writtenAt,
+        if let snapshot = scheduler.diagnostics.widgetSnapshot {
+            return RefreshStatusFormatter.snapshotAssessment(
+                snapshot: snapshot,
+                readError: scheduler.diagnostics.widgetSnapshotReadError,
+                missingReason: "Widget 侧还没有拿到可证明的完整成功刷新时间。"
+            )
+        }
+        return RefreshStatusFormatter.snapshotAssessment(
+            generatedAt: nil,
+            writtenAt: nil,
             readError: scheduler.diagnostics.widgetSnapshotReadError,
             missingReason: "Widget 侧还没有拿到可用快照时间。"
         )

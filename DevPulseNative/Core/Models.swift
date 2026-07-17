@@ -180,6 +180,7 @@ enum RepositoryIdentity {
             schemaVersion: data.schemaVersion,
             generatedAt: data.generatedAt,
             writtenAt: data.writtenAt,
+            lastSuccessfulRefreshAt: data.lastSuccessfulRefreshAt,
             scanSummary: summary,
             repositories: repositories,
             recentActivityEvents: recentActivityEvents,
@@ -268,6 +269,7 @@ enum RepositoryIdentityMigration {
             schemaVersion: normalizedSnapshot.schemaVersion,
             generatedAt: normalizedSnapshot.generatedAt,
             writtenAt: normalizedSnapshot.writtenAt,
+            lastSuccessfulRefreshAt: normalizedSnapshot.lastSuccessfulRefreshAt,
             scanSummary: normalizedSnapshot.scanSummary,
             repositories: normalizedSnapshot.repositories.map { repository in
                 var copy = repository
@@ -377,6 +379,7 @@ enum RepositoryScope {
             schemaVersion: data.schemaVersion,
             generatedAt: data.generatedAt,
             writtenAt: data.writtenAt,
+            lastSuccessfulRefreshAt: data.lastSuccessfulRefreshAt,
             scanSummary: ScanSummary.build(from: repositories),
             repositories: repositories,
             recentActivityEvents: data.recentActivityEvents?.filter {
@@ -637,6 +640,15 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
         RepositoryDataSourcePresentationBuilder.build(snapshot: self)
     }
 
+    var needsReadRetry: Bool {
+        resolvedDataSource != .current || status == .error
+    }
+
+    var conciseReadFailureReason: String? {
+        guard needsReadRetry else { return nil }
+        return RepositoryReadFailureReason.conciseMessage(from: errorMessage)
+    }
+
     var branchDisplayLabel: String {
         RepositoryBranchPresentationBuilder.build(
             branch: branch,
@@ -687,6 +699,31 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
             errorMessage: errorMessage,
             isPinned: isPinned
         )
+    }
+}
+
+enum RepositoryReadFailureReason {
+    static func conciseMessage(from rawMessage: String?) -> String {
+        let message = rawMessage?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+
+        if message.contains("超时") || message.contains("timeout") {
+            return "读取超时"
+        }
+        if message.contains("跳过") || message.contains("skip") {
+            return "本轮已跳过"
+        }
+        if message.contains("不可访问")
+            || message.contains("权限")
+            || message.contains("unavailable")
+            || message.contains("permission") {
+            return "暂时无法访问"
+        }
+        if message.contains("取消") || message.contains("cancel") {
+            return "读取已取消"
+        }
+        return "读取失败"
     }
 }
 
@@ -1087,7 +1124,8 @@ enum ActivityTimelineBuilder {
     }
 
     static func build(from snapshot: AppGroupData, lastScanAt: Date? = nil) -> ActivityTimelineFeed {
-        let fallbackLastScanAt = lastScanAt ?? DateFormatting.date(from: snapshot.writtenAt ?? snapshot.generatedAt)
+        let fallbackLastScanAt = lastScanAt
+            ?? snapshot.lastSuccessfulRefreshAt.flatMap(DateFormatting.date(from:))
         return build(from: snapshot.repositories, lastScanAt: fallbackLastScanAt)
     }
 
@@ -1131,7 +1169,7 @@ enum WidgetPrioritySummaryBuilder {
         }
 
         switch trustAssessment?.state {
-        case .stale, .expired:
+        case .stale, .expired, .degraded:
             return WidgetPrioritySummary(
                 title: WidgetRefreshCopy.waitingRefreshTitle,
                 message: WidgetRefreshCopy.waitingRefreshSummary,
@@ -1324,6 +1362,10 @@ struct AppGroupData: Codable, Equatable {
     let schemaVersion: Int
     let generatedAt: String
     let writtenAt: String?
+    /// Latest refresh where the complete discovered repository set was read
+    /// successfully. Unlike `writtenAt`, this is evidence about Git data, not
+    /// merely evidence that the shared snapshot file was rewritten.
+    let lastSuccessfulRefreshAt: String?
     let scanSummary: ScanSummary
     let repositories: [RepositorySnapshot]
     /// Small Widget-facing projection only. The full local event history is
@@ -1337,6 +1379,7 @@ struct AppGroupData: Codable, Equatable {
     init(schemaVersion: Int,
          generatedAt: String,
          writtenAt: String?,
+         lastSuccessfulRefreshAt: String? = nil,
          scanSummary: ScanSummary,
          repositories: [RepositorySnapshot],
          recentActivityEvents: [ActivityEventSummary]? = nil,
@@ -1344,6 +1387,7 @@ struct AppGroupData: Codable, Equatable {
         self.schemaVersion = schemaVersion
         self.generatedAt = generatedAt
         self.writtenAt = writtenAt
+        self.lastSuccessfulRefreshAt = lastSuccessfulRefreshAt
         self.scanSummary = scanSummary
         self.repositories = repositories
         self.recentActivityEvents = recentActivityEvents
@@ -1355,6 +1399,7 @@ struct AppGroupData: Codable, Equatable {
             schemaVersion: RepositorySnapshotSchema.version,
             generatedAt: ISO8601DateFormatter().string(from: Date()),
             writtenAt: nil,
+            lastSuccessfulRefreshAt: nil,
             scanSummary: ScanSummary(
                 totalRepositories: 0,
                 changedRepositories: 0,
@@ -1372,6 +1417,20 @@ struct AppGroupData: Codable, Equatable {
             schemaVersion: schemaVersion,
             generatedAt: generatedAt,
             writtenAt: writtenAt,
+            lastSuccessfulRefreshAt: lastSuccessfulRefreshAt,
+            scanSummary: scanSummary,
+            repositories: repositories,
+            recentActivityEvents: recentActivityEvents,
+            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath
+        )
+    }
+
+    func withLastSuccessfulRefreshAt(_ timestamp: String?) -> AppGroupData {
+        AppGroupData(
+            schemaVersion: schemaVersion,
+            generatedAt: generatedAt,
+            writtenAt: writtenAt,
+            lastSuccessfulRefreshAt: timestamp,
             scanSummary: scanSummary,
             repositories: repositories,
             recentActivityEvents: recentActivityEvents,
@@ -1384,6 +1443,7 @@ struct AppGroupData: Codable, Equatable {
             schemaVersion: schemaVersion,
             generatedAt: generatedAt,
             writtenAt: writtenAt,
+            lastSuccessfulRefreshAt: lastSuccessfulRefreshAt,
             scanSummary: scanSummary,
             repositories: repositories,
             recentActivityEvents: events,
@@ -1391,9 +1451,31 @@ struct AppGroupData: Codable, Equatable {
         )
     }
 
+    /// Conservative coverage watermark for a mixed-time snapshot. When every
+    /// repository is current, the oldest successful repository observation is
+    /// the latest point at which the whole set is provably covered.
+    var completeRepositorySuccessWatermark: String? {
+        guard !repositories.isEmpty else { return nil }
+
+        var candidates: [(timestamp: String, date: Date)] = []
+        candidates.reserveCapacity(repositories.count)
+        for repository in repositories {
+            guard repository.resolvedDataSource == .current,
+                  repository.status != .error,
+                  let timestamp = repository.resolvedLastSuccessfulScanAt,
+                  let date = DateFormatting.date(from: timestamp) else {
+                return nil
+            }
+            candidates.append((timestamp, date))
+        }
+
+        return candidates.min(by: { $0.date < $1.date })?.timestamp
+    }
+
     /// Retain the last payload after a scan-level failure and downgrade every
-    /// repository's provenance. `generatedAt` remains the last successful scan
-    /// time; only `writtenAt` changes when this health update is shared.
+    /// repository's provenance. `generatedAt` remains the last completed scan
+    /// represented by this payload; the separately persisted successful time
+    /// and repository values do not advance.
     func retainingLastSuccessfulRepositories(
         attemptedAt: String,
         errorMessage: String
@@ -1408,6 +1490,7 @@ struct AppGroupData: Codable, Equatable {
             schemaVersion: schemaVersion,
             generatedAt: generatedAt,
             writtenAt: writtenAt,
+            lastSuccessfulRefreshAt: lastSuccessfulRefreshAt,
             scanSummary: ScanSummary.build(
                 from: retainedRepositories,
                 totalRepositories: max(scanSummary.totalRepositories, retainedRepositories.count)
@@ -1425,6 +1508,7 @@ enum RefreshPhase: Equatable {
     case idle
     case refreshing
     case success
+    case degraded
     case failure
 }
 
@@ -1439,6 +1523,7 @@ enum SnapshotTrustState: Equatable {
     case fresh
     case stale
     case expired
+    case degraded
     case unknown
     case failed
 }
@@ -1475,7 +1560,7 @@ enum WidgetRefreshCopy {
         switch trustAssessment.state {
         case .fresh:
             return trustAssessment.title
-        case .stale, .expired:
+        case .stale, .expired, .degraded:
             return waitingRefreshTitle
         case .unknown, .failed:
             return pendingConfirmationTitle
@@ -1492,7 +1577,9 @@ enum RefreshStatusFormatter {
             return .unknown
         }
 
-        let age = max(0, now.timeIntervalSince(lastUpdatedAt))
+        let rawAge = now.timeIntervalSince(lastUpdatedAt)
+        guard rawAge >= -60 else { return .unknown }
+        let age = max(0, rawAge)
 
         if age > expiredThreshold {
             return .expired
@@ -1520,7 +1607,7 @@ enum RefreshStatusFormatter {
 
             return SnapshotTrustAssessment(
                 state: .failed,
-                title: "刷新失败，建议打开 App 检查",
+                title: "刷新失败",
                 detail: lastUpdatedAt.map { "上次成功刷新：\(updateLabel(for: $0, now: now))" } ?? "尚无成功刷新记录",
                 basis: basis
             )
@@ -1552,20 +1639,12 @@ enum RefreshStatusFormatter {
         }
 
         let generatedDate = generatedAt.flatMap(DateFormatting.date(from:))
-        let writtenDate = writtenAt.flatMap(DateFormatting.date(from:))
-
-        let reference: (label: String, date: Date)?
-        switch (generatedDate, writtenDate) {
-        case let (.some(generatedDate), .some(writtenDate)):
-            reference = writtenDate >= generatedDate
-                ? ("writtenAt", writtenDate)
-                : ("generatedAt", generatedDate)
-        case let (.some(generatedDate), .none):
-            reference = ("generatedAt", generatedDate)
-        case let (.none, .some(writtenDate)):
-            reference = ("writtenAt", writtenDate)
-        case (.none, .none):
-            reference = nil
+        let reference = generatedDate.map { (label: "generatedAt", date: $0) }
+        let resolvedMissingReason: String
+        if generatedDate == nil, writtenAt.flatMap(DateFormatting.date(from:)) != nil {
+            resolvedMissingReason = "writtenAt 只证明共享快照已写入，不能证明仓库数据已刷新。"
+        } else {
+            resolvedMissingReason = missingReason
         }
 
         return datedAssessment(
@@ -1573,7 +1652,7 @@ enum RefreshStatusFormatter {
             referenceDate: reference?.date,
             now: now,
             sourceLabel: reference?.label ?? "snapshotTime",
-            missingReason: missingReason
+            missingReason: resolvedMissingReason
         )
     }
 
@@ -1593,7 +1672,13 @@ enum RefreshStatusFormatter {
             )
         }
 
-        if RepositoryDataAvailability.allUnavailable(snapshot.repositories) {
+        let unavailableRepositories = snapshot.repositories.filter {
+            $0.resolvedDataSource != .current || $0.status == .error
+        }
+        let successfulRefreshDate = snapshot.lastSuccessfulRefreshAt
+            .flatMap(DateFormatting.date(from:))
+
+        if !unavailableRepositories.isEmpty {
             let lastSuccessfulCount = snapshot.repositories.filter {
                 $0.resolvedDataSource == .lastSuccessful
             }.count
@@ -1605,40 +1690,54 @@ enum RefreshStatusFormatter {
                 .compactMap { DateFormatting.date(from: $0) }
                 .max()
 
+            let currentCount = snapshot.repositories.count - unavailableRepositories.count
             let title: String
             let detail: String
-            if unknownCount == 0 {
+            let state: SnapshotTrustState
+            if currentCount > 0 {
+                state = .degraded
+                title = "部分仓库待确认"
+                let successfulSuffix = successfulRefreshDate.map {
+                    " · 上次完整成功：\(updateLabel(for: $0, now: now))"
+                } ?? " · 尚无完整成功记录"
+                detail = "\(unavailableRepositories.count) 个读取失败，\(currentCount) 个已更新\(successfulSuffix)"
+            } else if unknownCount == 0 {
+                state = .failed
                 title = "显示上次成功数据"
                 detail = latestSuccessfulDate.map {
                     "所有仓库状态待确认 · 上次成功刷新：\(updateLabel(for: $0, now: now))"
                 } ?? "所有仓库状态待确认 · 上次成功时间未知"
             } else if lastSuccessfulCount == 0 {
+                state = .failed
                 title = "仓库数据未知"
                 detail = "没有可用的成功仓库数据"
             } else {
+                state = .failed
                 title = "仓库数据待确认"
                 detail = "\(lastSuccessfulCount) 个上次成功 · \(unknownCount) 个未知"
             }
 
             return SnapshotTrustAssessment(
-                state: .failed,
+                state: state,
                 title: title,
                 detail: detail,
-                basis: "共享快照不含任何 current 仓库；writtenAt 仅表示可信度状态已写入，不代表仓库扫描成功。"
+                basis: "\(unavailableRepositories.count) 个仓库没有 current 数据；writtenAt 仅表示快照已写入，不代表仓库扫描成功。"
             )
         }
 
-        return snapshotAssessment(
-            generatedAt: snapshot.generatedAt,
-            writtenAt: snapshot.writtenAt,
+        return datedAssessment(
+            freshness: freshness(for: successfulRefreshDate, now: now),
+            referenceDate: successfulRefreshDate,
             now: now,
-            readError: readError,
-            missingReason: missingReason
+            sourceLabel: "lastSuccessfulRefreshAt",
+            missingReason: "共享快照缺少可证明的完整成功刷新时间。"
         )
     }
 
     static func updateLabel(for lastUpdatedAt: Date, now: Date = Date()) -> String {
-        let age = max(0, now.timeIntervalSince(lastUpdatedAt))
+        let rawAge = now.timeIntervalSince(lastUpdatedAt)
+        guard rawAge >= -60 else { return "更新时间未知" }
+        let age = max(0, rawAge)
 
         if age < 60 {
             return "刚刚更新"
@@ -1691,7 +1790,7 @@ enum RefreshStatusFormatter {
 
             return SnapshotTrustAssessment(
                 state: .stale,
-                title: "数据可能已过期",
+                title: "数据需要刷新",
                 detail: "最近一次更新在 \(updateLabel(for: referenceDate, now: now))",
                 basis: "基于 \(sourceLabel) 判断，距离最近一次更新已超过 10 分钟。"
             )
@@ -1707,7 +1806,7 @@ enum RefreshStatusFormatter {
 
             return SnapshotTrustAssessment(
                 state: .expired,
-                title: "数据可能已过期",
+                title: "数据已过期",
                 detail: "最近一次更新在 \(updateLabel(for: referenceDate, now: now))",
                 basis: "基于 \(sourceLabel) 判断，距离最近一次更新已超过 30 分钟。"
             )
@@ -2449,7 +2548,7 @@ enum DiagnosticsOverviewBuilder {
         switch state {
         case .fresh:
             return .normal
-        case .stale, .expired, .unknown:
+        case .stale, .expired, .degraded, .unknown:
             return .warning
         case .failed:
             return .error
@@ -2743,7 +2842,7 @@ enum WidgetDataTrustBuilder {
         switch widgetTrust.state {
         case .fresh:
             return .normal
-        case .stale, .expired, .unknown, .failed:
+        case .stale, .expired, .degraded, .unknown, .failed:
             return .warning
         }
     }
@@ -2765,7 +2864,7 @@ enum WidgetDataTrustBuilder {
                 return "Widget 正等待首次刷新"
             }
             switch widgetTrust.state {
-            case .stale, .expired:
+            case .stale, .expired, .degraded:
                 return "当前 Widget 正等待刷新"
             case .unknown, .failed:
                 return "当前 Widget 状态待确认"
@@ -2801,7 +2900,7 @@ enum WidgetDataTrustBuilder {
                 return "共享快照还没有生成，Widget 当前正等待首次刷新；这是首次启动或清空快照后的正常待初始化状态。"
             }
             switch widgetTrust.state {
-            case .stale, .expired:
+            case .stale, .expired, .degraded:
                 return "\(WidgetRefreshCopy.waitingRefreshDetail(from: widgetTrust))。共享链路基本正常，但你应先刷新后再判断 Widget 里的仓库状态。"
             case .unknown, .failed:
                 return "当前还无法确认 Widget 数据是否已经追上主 App。先查看 Diagnostics，再决定是否需要重写共享快照。"
@@ -2906,7 +3005,7 @@ enum WidgetDataTrustBuilder {
         switch widgetTrust.state {
         case .fresh:
             return ["当前可以信任 Widget 数据；如果桌面没有立即变化，等待 macOS 刷新时间线即可。"]
-        case .stale, .expired:
+        case .stale, .expired, .degraded:
             return [
                 "Widget 当前正等待刷新；先执行 Refresh Data，再重新判断仓库状态。",
                 "如果刷新后仍然过期，检查 Widget reload requested 是否更新。",
@@ -3005,7 +3104,7 @@ enum WidgetDataTrustBuilder {
                 systemImage: "arrow.clockwise",
                 helpText: "手动重写共享快照并请求 Widget 更新时间线。"
             )
-        case .stale, .expired:
+        case .stale, .expired, .degraded:
             return WidgetDataTrustPrimaryAction(
                 kind: .refreshData,
                 title: "Refresh Data",
@@ -3026,7 +3125,7 @@ enum WidgetDataTrustBuilder {
         switch state {
         case .fresh:
             return .normal
-        case .stale, .expired, .unknown:
+        case .stale, .expired, .degraded, .unknown:
             return .warning
         case .failed:
             return .error
@@ -3037,7 +3136,7 @@ enum WidgetDataTrustBuilder {
         switch widgetTrust.state {
         case .fresh:
             return widgetTrust.title
-        case .stale, .expired:
+        case .stale, .expired, .degraded:
             return WidgetRefreshCopy.waitingRefreshTitle
         case .unknown, .failed:
             return WidgetRefreshCopy.pendingConfirmationTitle
