@@ -18,8 +18,11 @@ private enum PowerState {
 enum ScanRefreshSource: Int, Sendable {
     case timer
     case startup
+    case windowReopen
+    case foreground
     case wake
     case lifecycleRecovery
+    case pathRecovery
     case configuration
     case manual
 
@@ -27,7 +30,7 @@ enum ScanRefreshSource: Int, Sendable {
         switch self {
         case .manual, .configuration:
             return .userInitiated
-        case .lifecycleRecovery, .wake, .startup:
+        case .pathRecovery, .lifecycleRecovery, .wake, .foreground, .windowReopen, .startup:
             return .utility
         case .timer:
             return .background
@@ -36,7 +39,7 @@ enum ScanRefreshSource: Int, Sendable {
 
     var isAutomatic: Bool {
         switch self {
-        case .startup, .timer, .wake, .lifecycleRecovery:
+        case .startup, .timer, .windowReopen, .foreground, .wake, .lifecycleRecovery, .pathRecovery:
             return true
         case .manual, .configuration:
             return false
@@ -46,6 +49,15 @@ enum ScanRefreshSource: Int, Sendable {
     fileprivate var preservesSuccessorForMatchingRun: Bool {
         self == .lifecycleRecovery
     }
+}
+
+enum ScanLifecycleRefreshEvent: Equatable, Sendable {
+    case startup
+    case windowReopened
+    case applicationBecameActive
+    case wake
+    case systemTimeChanged
+    case pathAvailabilityChanged(rootPath: String?, isAvailable: Bool)
 }
 
 struct ScanExecutionRequest: Sendable {
@@ -84,6 +96,19 @@ typealias RepositoryRetryExecution = @Sendable (
     _ config: ScanConfig,
     _ previousSnapshot: RepositorySnapshot
 ) async -> RepositorySnapshot?
+
+private struct DeferredScanRefresh {
+    let forceRepositoryDiscovery: Bool
+    let source: ScanRefreshSource
+
+    func merging(forceRepositoryDiscovery: Bool,
+                 source: ScanRefreshSource) -> DeferredScanRefresh {
+        DeferredScanRefresh(
+            forceRepositoryDiscovery: self.forceRepositoryDiscovery || forceRepositoryDiscovery,
+            source: self.source.rawValue >= source.rawValue ? self.source : source
+        )
+    }
+}
 
 
 /// Coalesces scan refresh requests without retaining UI or scanner state.
@@ -278,6 +303,46 @@ enum ScanSchedulerPolicy {
             forceRepositoryDiscovery: rootsChanged
         )
     }
+
+    static func shouldRefreshForLifecycle(lastSuccessfulRefreshAt: Date?,
+                                          refreshPhase: RefreshPhase,
+                                          now: Date = Date()) -> Bool {
+        if refreshPhase == .failure || refreshPhase == .degraded {
+            return true
+        }
+
+        return RefreshStatusFormatter.freshness(
+            for: lastSuccessfulRefreshAt,
+            now: now
+        ) != .fresh
+    }
+
+    static func repositoriesNeedingPathRefresh(
+        _ repositories: [RepositorySnapshot],
+        under rootPath: String?,
+        isAvailable: Bool,
+        pathIsReachable: (String) -> Bool
+    ) -> [RepositorySnapshot] {
+        if !isAvailable, rootPath == nil {
+            return []
+        }
+        let canonicalRoot = rootPath.map(RepositoryIdentity.canonicalPath)
+        return repositories.filter { repository in
+            if let canonicalRoot,
+               !RepositoryIdentity.isSameOrDescendantPath(
+                   repository.path,
+                   of: canonicalRoot
+               ) {
+                return false
+            }
+
+            if isAvailable {
+                return repository.needsReadRetry && pathIsReachable(repository.path)
+            }
+            return true
+        }
+    }
+
     static let repositoryRediscoveryInterval: TimeInterval = 60 * 60
     static let widgetReloadThrottleInterval: TimeInterval = 15 * 60
 
@@ -317,6 +382,15 @@ enum ScanSchedulerPolicy {
         }
 
         return now.timeIntervalSince(lastRepositoryDiscoveryAt) >= repositoryRediscoveryInterval
+    }
+
+    static func shouldPreserveDiscoveryScopeAfterIncompleteRefresh(
+        knownRepositoryPaths: [String],
+        currentScanRootsSignature: String,
+        lastScanRootsSignature: String?
+    ) -> Bool {
+        !knownRepositoryPaths.isEmpty
+            && lastScanRootsSignature == currentScanRootsSignature
     }
 
     static func scanRootsSignature(_ scanRoots: [String]) -> String {
@@ -666,20 +740,29 @@ final class ScanScheduler: ObservableObject {
     nonisolated(unsafe) private var workspaceWakeObserver: NSObjectProtocol?
     nonisolated(unsafe) private var workspaceSessionInactiveObserver: NSObjectProtocol?
     nonisolated(unsafe) private var workspaceSessionActiveObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var workspaceVolumeMountedObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var workspaceVolumeUnmountedObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var applicationDidBecomeActiveObserver: NSObjectProtocol?
     nonisolated(unsafe) private var applicationTerminateObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var systemClockDidChangeObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var systemTimeZoneDidChangeObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var calendarDayChangedObserver: NSObjectProtocol?
     private var lastSystemSleepAt: Date?
+    private(set) var lastFreshnessRecalculationAt: Date?
     private var refreshCoordinator = ScanRefreshCoordinator()
     private var scanTask: Task<Void, Never>?
     private var scanGeneration = 0
     private var selfCheckTask: Task<ScanSelfCheckReport, Never>?
     private var selfCheckGeneration = 0
-    private var locationRefreshDebounceTask: Task<Void, Never>?
+    private var refreshDebounceTask: Task<Void, Never>?
+    private var deferredScanRefresh: DeferredScanRefresh?
     private var workSuspended = false
     private var sessionInactive = false
     private var terminating = false
     private let scanExecution: ScanExecution
     private var repositoryRetryExecution: RepositoryRetryExecution
     private var repositoryRetryTasks: [String: Task<Void, Never>] = [:]
+    private var pendingRepositoryRefreshRequirements: [String: Bool] = [:]
     private var repositoryRetryGeneration = 0
     private var repositoryRetryDrainTask: Task<Void, Never>?
     private var repositoryRetryDrainGeneration = 0
@@ -711,7 +794,7 @@ final class ScanScheduler: ObservableObject {
     private static let noChangeThreshold1 = 3  // scans w/o change → 10 min
     private static let noChangeThreshold2 = 8  // scans w/o change → 20 min
     private static let noChangeThreshold3 = 15 // scans w/o change → 30 min
-    private static let locationRefreshDebounceNanoseconds: UInt64 = 200_000_000
+    private static let refreshCoalescingNanoseconds: UInt64 = 200_000_000
 
     @Published private(set) var config: ScanConfig = .default
 
@@ -792,13 +875,25 @@ final class ScanScheduler: ObservableObject {
         selfCheckTask?.cancel()
         repositoryRetryDrainTask?.cancel()
         repositoryRetryDrainWaiters.forEach { $0.resume() }
-        locationRefreshDebounceTask?.cancel()
+        refreshDebounceTask?.cancel()
         repositoryRetryTasks.values.forEach { $0.cancel() }
         if let powerStateObserver {
             NotificationCenter.default.removeObserver(powerStateObserver)
         }
         if let applicationTerminateObserver {
             NotificationCenter.default.removeObserver(applicationTerminateObserver)
+        }
+        if let applicationDidBecomeActiveObserver {
+            NotificationCenter.default.removeObserver(applicationDidBecomeActiveObserver)
+        }
+        if let systemClockDidChangeObserver {
+            NotificationCenter.default.removeObserver(systemClockDidChangeObserver)
+        }
+        if let systemTimeZoneDidChangeObserver {
+            NotificationCenter.default.removeObserver(systemTimeZoneDidChangeObserver)
+        }
+        if let calendarDayChangedObserver {
+            NotificationCenter.default.removeObserver(calendarDayChangedObserver)
         }
         let workspaceCenter = NSWorkspace.shared.notificationCenter
         if let workspaceSleepObserver {
@@ -813,12 +908,21 @@ final class ScanScheduler: ObservableObject {
         if let workspaceSessionActiveObserver {
             workspaceCenter.removeObserver(workspaceSessionActiveObserver)
         }
+        if let workspaceVolumeMountedObserver {
+            workspaceCenter.removeObserver(workspaceVolumeMountedObserver)
+        }
+        if let workspaceVolumeUnmountedObserver {
+            workspaceCenter.removeObserver(workspaceVolumeUnmountedObserver)
+        }
     }
 
     var isWorkSuspended: Bool { workSuspended }
     var hasScheduledTimer: Bool { backgroundTimer != nil }
-    var hasPendingLocationRefresh: Bool { locationRefreshDebounceTask != nil }
+    var hasPendingLocationRefresh: Bool {
+        refreshDebounceTask != nil && deferredScanRefresh?.source == .configuration
+    }
     var pendingRepositoryRetryDrainWaiterCount: Int { repositoryRetryDrainWaiters.count }
+    var pendingPathRefreshCount: Int { pendingRepositoryRefreshRequirements.count }
     var isSessionInactive: Bool { sessionInactive }
     var isShuttingDown: Bool { terminating }
 
@@ -883,31 +987,197 @@ final class ScanScheduler: ObservableObject {
         }
     }
 
+    func freshness(at now: Date) -> SnapshotFreshness {
+        RefreshStatusFormatter.freshness(
+            for: lastSuccessfulRefreshAt,
+            now: now
+        )
+    }
+
+    func handleLifecycleRefresh(
+        _ event: ScanLifecycleRefreshEvent,
+        now: Date = Date()
+    ) {
+        guard !terminating else { return }
+
+        switch event {
+        case .systemTimeChanged:
+            lastFreshnessRecalculationAt = now
+            objectWillChange.send()
+
+        case .startup:
+            let decision = ScanSchedulerPolicy.startupRefreshDecision(
+                snapshotIsFresh: !shouldRunImmediateStartupScan,
+                currentRootsSignature: ScanSchedulerPolicy.scanRootsSignature(scanRoots().roots),
+                lastDiscoveryRootsSignature: lastRepositoryDiscoveryScanRootsSignature
+            )
+            if !decision.forceRepositoryDiscovery {
+                let recoveredCount = requestPathAvailabilityRefreshes(
+                    under: nil,
+                    isAvailable: true
+                )
+                if recoveredCount > 0, freshness(at: now) == .fresh {
+                    return
+                }
+            }
+            if decision.shouldRefreshImmediately {
+                submitScanRequest(
+                    forceRepositoryDiscovery: decision.forceRepositoryDiscovery,
+                    source: .startup,
+                    coalescingNanoseconds: Self.refreshCoalescingNanoseconds
+                )
+            }
+
+        case .windowReopened, .applicationBecameActive:
+            let recoveredCount = requestPathAvailabilityRefreshes(
+                under: nil,
+                isAvailable: true
+            )
+            if recoveredCount > 0, freshness(at: now) == .fresh {
+                return
+            }
+            guard ScanSchedulerPolicy.shouldRefreshForLifecycle(
+                    lastSuccessfulRefreshAt: lastSuccessfulRefreshAt,
+                    refreshPhase: refreshPhase,
+                    now: now
+                  ) else {
+                return
+            }
+            submitScanRequest(
+                forceRepositoryDiscovery: false,
+                source: event == .windowReopened ? .windowReopen : .foreground,
+                coalescingNanoseconds: Self.refreshCoalescingNanoseconds
+            )
+
+        case .wake:
+            let decision = ScanSchedulerPolicy.wakeRefreshDecision(
+                lastScanAt: lastSuccessfulRefreshAt,
+                refreshPhase: refreshPhase,
+                sleepBeganAt: lastSystemSleepAt,
+                refreshStartedAt: diagnostics.lastRefreshStartedAt,
+                refreshCompletedAt: diagnostics.lastRefreshCompletedAt,
+                now: now
+            )
+            let recoveredCount = requestPathAvailabilityRefreshes(
+                under: nil,
+                isAvailable: true
+            )
+            if backgroundScanningEnabled,
+               !(recoveredCount > 0 && freshness(at: now) == .fresh),
+               decision.shouldRefreshImmediately {
+                submitScanRequest(
+                    forceRepositoryDiscovery: decision.forceRepositoryDiscovery,
+                    source: .wake,
+                    coalescingNanoseconds: Self.refreshCoalescingNanoseconds
+                )
+            }
+
+        case .pathAvailabilityChanged(let rootPath, let isAvailable):
+            if isAvailable,
+               pathRecoveryRequiresDiscovery(under: rootPath) {
+                submitScanRequest(
+                    forceRepositoryDiscovery: true,
+                    source: .pathRecovery,
+                    coalescingNanoseconds: Self.refreshCoalescingNanoseconds
+                )
+                return
+            }
+            _ = requestPathAvailabilityRefreshes(
+                under: rootPath,
+                isAvailable: isAvailable
+            )
+        }
+    }
+
     // MARK: - Scan (async, non-blocking)
 
     func scanNow(forceRepositoryDiscovery: Bool = false,
                  source: ScanRefreshSource = .manual) {
+        submitScanRequest(
+            forceRepositoryDiscovery: forceRepositoryDiscovery,
+            source: source
+        )
+    }
+
+    private func submitScanRequest(
+        forceRepositoryDiscovery: Bool,
+        source: ScanRefreshSource,
+        coalescingNanoseconds: UInt64? = nil
+    ) {
         guard !terminating else { return }
 
-        if source.isAutomatic,
-           (!repositoryRetryTasks.isEmpty || repositoryRetryDrainTask != nil) {
-            // A timer or lifecycle refresh must not cancel an explicit
-            // per-repository retry that the user just requested.
+        if let coalescingNanoseconds {
+            if let deferredScanRefresh {
+                self.deferredScanRefresh = deferredScanRefresh.merging(
+                    forceRepositoryDiscovery: forceRepositoryDiscovery,
+                    source: source
+                )
+            } else {
+                deferredScanRefresh = DeferredScanRefresh(
+                    forceRepositoryDiscovery: forceRepositoryDiscovery,
+                    source: source
+                )
+            }
+
+            refreshDebounceTask?.cancel()
+            refreshDebounceTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: coalescingNanoseconds)
+                } catch {
+                    return
+                }
+                guard let self, !Task.isCancelled, !self.terminating else { return }
+                self.flushDeferredScanRequest()
+            }
             return
         }
-        cancelRepositoryRetries()
+
+        var mergedRequest = DeferredScanRefresh(
+            forceRepositoryDiscovery: forceRepositoryDiscovery,
+            source: source
+        )
+        if let deferredScanRefresh {
+            mergedRequest = deferredScanRefresh.merging(
+                forceRepositoryDiscovery: forceRepositoryDiscovery,
+                source: source
+            )
+        }
+        refreshDebounceTask?.cancel()
+        refreshDebounceTask = nil
+        deferredScanRefresh = nil
+        enqueueScanRequest(mergedRequest)
+    }
+
+    private func flushDeferredScanRequest() {
+        guard let deferredScanRefresh else {
+            refreshDebounceTask = nil
+            return
+        }
+        self.deferredScanRefresh = nil
+        refreshDebounceTask = nil
+        enqueueScanRequest(deferredScanRefresh)
+    }
+
+    private func enqueueScanRequest(_ request: DeferredScanRefresh) {
+        guard !terminating else { return }
+
+        let waitsForRepositoryRetries = request.source.isAutomatic
+            && (!repositoryRetryTasks.isEmpty || repositoryRetryDrainTask != nil)
+        if !waitsForRepositoryRetries {
+            cancelRepositoryRetries()
+        }
         let signature = ScanSchedulerPolicy.scanRootsSignature(scanRoots().roots)
         let queued: Bool
-        if forceRepositoryDiscovery {
+        if request.forceRepositoryDiscovery {
             queued = refreshCoordinator.requestForced(
                 signature: signature,
-                source: source
+                source: request.source
             )
         } else {
             queued = refreshCoordinator.request(
                 signature: signature,
                 forceRepositoryDiscovery: false,
-                source: source
+                source: request.source
             )
         }
         if queued, isScanning {
@@ -928,7 +1198,7 @@ final class ScanScheduler: ObservableObject {
         guard !isScanning else { return }
         // A cancelled repository retry may still be terminating its Git
         // process. Do not overlap it with the next full scan.
-        guard repositoryRetryDrainTask == nil else { return }
+        guard repositoryRetryTasks.isEmpty, repositoryRetryDrainTask == nil else { return }
         if sessionInactive, refreshCoordinator.nextRequest?.isAutomatic == true {
             return
         }
@@ -938,12 +1208,12 @@ final class ScanScheduler: ObservableObject {
 
     private func performScanNow(request: ScanRefreshCoordinator.Request) {
         guard !isScanning else { return }
+        pendingRepositoryRefreshRequirements.removeAll()
 
         gitAvailable = ProcessRunner.isGitAvailable()
         guard gitAvailable else {
             failRefresh("Git 不可用", persistRepositoryTrustFailure: true)
-            _ = refreshCoordinator.completeCurrent()
-            startNextCoalescedScanIfNeeded()
+            completeCurrentScanAndDrain()
             return
         }
 
@@ -1028,7 +1298,12 @@ final class ScanScheduler: ObservableObject {
                     self.lastDiscoveredRepositoryPaths = result.discoveredRepositoryPaths
                     if shouldRediscoverRepositories,
                        GitRepositoryScanner.discoveryWasIncomplete(result.warnings) {
-                        self.lastRepositoryDiscoveryAt = nil
+                        self.lastRepositoryDiscoveryAt = ScanSchedulerPolicy
+                            .shouldPreserveDiscoveryScopeAfterIncompleteRefresh(
+                                knownRepositoryPaths: knownRepositoryPaths,
+                                currentScanRootsSignature: currentScanRootsSignature,
+                                lastScanRootsSignature: self.lastRepositoryDiscoveryScanRootsSignature
+                            ) ? Date() : nil
                     }
 
                     self.persistRepositoryTrustFailure(
@@ -1080,7 +1355,12 @@ final class ScanScheduler: ObservableObject {
                 self.lastDiscoveredRepositoryPaths = result.discoveredRepositoryPaths
                 if shouldRediscoverRepositories {
                     if GitRepositoryScanner.discoveryWasIncomplete(result.warnings) {
-                        self.lastRepositoryDiscoveryAt = nil
+                        self.lastRepositoryDiscoveryAt = ScanSchedulerPolicy
+                            .shouldPreserveDiscoveryScopeAfterIncompleteRefresh(
+                                knownRepositoryPaths: knownRepositoryPaths,
+                                currentScanRootsSignature: currentScanRootsSignature,
+                                lastScanRootsSignature: self.lastRepositoryDiscoveryScanRootsSignature
+                            ) ? Date() : nil
                     } else {
                         self.lastRepositoryDiscoveryAt = Date()
                         self.lastRepositoryDiscoveryScanRootsSignature = currentScanRootsSignature
@@ -1124,6 +1404,17 @@ final class ScanScheduler: ObservableObject {
     }
 
     func retryRepository(_ repositoryID: String) {
+        _ = startRepositoryRefresh(
+            repositoryID,
+            requiresRetryState: true
+        )
+    }
+
+    @discardableResult
+    private func startRepositoryRefresh(
+        _ repositoryID: String,
+        requiresRetryState: Bool
+    ) -> Bool {
         let retryConfig = scanConfigForExecution()
         let maximumRetryCount = min(12, max(1, retryConfig.maxConcurrentGitOps))
         guard !terminating,
@@ -1133,8 +1424,8 @@ final class ScanScheduler: ObservableObject {
               repositoryRetryTasks.count < maximumRetryCount,
               !retryingRepositoryIDs.contains(repositoryID),
               let previousRepository = lastResult.repositories.first(where: { $0.id == repositoryID }),
-              previousRepository.needsReadRetry else {
-            return
+              !requiresRetryState || previousRepository.needsReadRetry else {
+            return false
         }
 
         let execution = repositoryRetryExecution
@@ -1153,6 +1444,12 @@ final class ScanScheduler: ObservableObject {
 
                 self.repositoryRetryTasks[repositoryID] = nil
                 self.retryingRepositoryIDs.remove(repositoryID)
+                defer {
+                    self.drainPendingRepositoryRefreshes()
+                    if self.repositoryRetryTasks.isEmpty, !self.terminating {
+                        self.startNextCoalescedScanIfNeeded()
+                    }
+                }
 
                 guard !wasCancelled,
                       var retriedRepository,
@@ -1238,6 +1535,101 @@ final class ScanScheduler: ObservableObject {
             }
         }
         repositoryRetryTasks[repositoryID] = task
+        return true
+    }
+
+    private func requestPathAvailabilityRefreshes(
+        under rootPath: String?,
+        isAvailable: Bool
+    ) -> Int {
+        var candidates = ScanSchedulerPolicy.repositoriesNeedingPathRefresh(
+            lastResult.repositories,
+            under: rootPath,
+            isAvailable: isAvailable,
+            pathIsReachable: { [weak self] path in
+                self?.isAccessibleScanRoot(path) == true
+            }
+        )
+
+        // A mount can race the read that was started by the matching unmount.
+        // Until that read finishes, the in-memory snapshot still looks current,
+        // so retain a follow-up intent for affected in-flight repositories.
+        if isAvailable {
+            let canonicalRoot = rootPath.map(RepositoryIdentity.canonicalPath)
+            var candidateIDs = Set(candidates.map(\.id))
+            let inFlightCandidates = lastResult.repositories.filter { repository in
+                guard retryingRepositoryIDs.contains(repository.id),
+                      isAccessibleScanRoot(repository.path) else {
+                    return false
+                }
+                guard let canonicalRoot else { return true }
+                return RepositoryIdentity.isSameOrDescendantPath(
+                    repository.path,
+                    of: canonicalRoot
+                )
+            }
+            for repository in inFlightCandidates where candidateIDs.insert(repository.id).inserted {
+                candidates.append(repository)
+            }
+        }
+
+        for repository in candidates {
+            let existingRequirement = pendingRepositoryRefreshRequirements[repository.id]
+            pendingRepositoryRefreshRequirements[repository.id] = existingRequirement.map {
+                $0 && isAvailable
+            } ?? isAvailable
+        }
+        drainPendingRepositoryRefreshes()
+        return candidates.count
+    }
+
+    private func drainPendingRepositoryRefreshes() {
+        guard !terminating,
+              !workSuspended,
+              !sessionInactive,
+              !isScanning,
+              !refreshCoordinator.hasWork,
+              repositoryRetryDrainTask == nil else {
+            return
+        }
+
+        let maximumRetryCount = min(12, max(1, scanConfigForExecution().maxConcurrentGitOps))
+        while repositoryRetryTasks.count < maximumRetryCount {
+            guard let repositoryID = pendingRepositoryRefreshRequirements.keys
+                .sorted()
+                .first(where: { !retryingRepositoryIDs.contains($0) }),
+                  let requiresRetryState = pendingRepositoryRefreshRequirements.removeValue(
+                    forKey: repositoryID
+                  ) else {
+                return
+            }
+            _ = startRepositoryRefresh(
+                repositoryID,
+                requiresRetryState: requiresRetryState
+            )
+        }
+    }
+
+    private func pathRecoveryRequiresDiscovery(under rootPath: String?) -> Bool {
+        guard let rootPath else { return false }
+        let canonicalRoot = RepositoryIdentity.canonicalPath(rootPath)
+        let configuredRootAffected = scanRoots().roots.contains { configuredRoot in
+            RepositoryIdentity.isSameOrDescendantPath(configuredRoot, of: canonicalRoot)
+                || RepositoryIdentity.isSameOrDescendantPath(canonicalRoot, of: configuredRoot)
+        }
+        guard configuredRootAffected else { return false }
+
+        let affectedKnownPaths = lastDiscoveredRepositoryPaths.filter {
+            RepositoryIdentity.isSameOrDescendantPath($0, of: canonicalRoot)
+        }
+        let visiblePaths = Set(lastResult.repositories.map {
+            RepositoryIdentity.canonicalPath($0.path)
+        })
+        if affectedKnownPaths.contains(where: { !visiblePaths.contains($0) }) {
+            return true
+        }
+
+        return affectedKnownPaths.isEmpty
     }
 
     private func cancelRepositoryRetries() {
@@ -1267,6 +1659,7 @@ final class ScanScheduler: ObservableObject {
         resumeRepositoryRetryDrainWaiters()
         if !terminating {
             startNextCoalescedScanIfNeeded()
+            drainPendingRepositoryRefreshes()
         }
     }
 
@@ -1310,6 +1703,7 @@ final class ScanScheduler: ObservableObject {
                 selfCheckTask = nil
                 if !terminating {
                     startNextCoalescedScanIfNeeded()
+                    drainPendingRepositoryRefreshes()
                 }
             }
             return report
@@ -1321,6 +1715,7 @@ final class ScanScheduler: ObservableObject {
     private func performSelfCheck() async -> ScanSelfCheckReport {
         guard !terminating else { return makeSelfCheckReport() }
         isScanning = true
+        pendingRepositoryRefreshRequirements.removeAll()
         cancelRepositoryRetries()
         await waitForRepositoryRetryDrain()
         if Task.isCancelled || terminating {
@@ -1458,17 +1853,7 @@ final class ScanScheduler: ObservableObject {
         stopBackgroundScanning()
         backgroundScanningEnabled = true
         if refreshIfNeeded {
-            let decision = ScanSchedulerPolicy.startupRefreshDecision(
-                snapshotIsFresh: !shouldRunImmediateStartupScan,
-                currentRootsSignature: ScanSchedulerPolicy.scanRootsSignature(scanRoots().roots),
-                lastDiscoveryRootsSignature: lastRepositoryDiscoveryScanRootsSignature
-            )
-            if decision.shouldRefreshImmediately {
-                scanNow(
-                    forceRepositoryDiscovery: decision.forceRepositoryDiscovery,
-                    source: .startup
-                )
-            }
+            handleLifecycleRefresh(.startup)
         }
         scheduleNextTimer()
     }
@@ -2209,9 +2594,45 @@ final class ScanScheduler: ObservableObject {
                 self?.resumeAutomaticWorkForActiveSession()
             }
         }
+
+        workspaceVolumeMountedObserver = center.addObserver(
+            forName: NSWorkspace.didMountNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let rootPath = (notification.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL)?.path
+            MainActor.assumeIsolated {
+                self?.handleLifecycleRefresh(
+                    .pathAvailabilityChanged(rootPath: rootPath, isAvailable: true)
+                )
+            }
+        }
+
+        workspaceVolumeUnmountedObserver = center.addObserver(
+            forName: NSWorkspace.didUnmountNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let rootPath = (notification.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL)?.path
+            MainActor.assumeIsolated {
+                self?.handleLifecycleRefresh(
+                    .pathAvailabilityChanged(rootPath: rootPath, isAvailable: false)
+                )
+            }
+        }
     }
 
     private func startApplicationLifecycleMonitoring() {
+        applicationDidBecomeActiveObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.handleLifecycleRefresh(.applicationBecameActive)
+            }
+        }
+
         applicationTerminateObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
             object: nil,
@@ -2219,6 +2640,36 @@ final class ScanScheduler: ObservableObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.shutdown()
+            }
+        }
+
+        systemClockDidChangeObserver = NotificationCenter.default.addObserver(
+            forName: .NSSystemClockDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.handleLifecycleRefresh(.systemTimeChanged)
+            }
+        }
+
+        systemTimeZoneDidChangeObserver = NotificationCenter.default.addObserver(
+            forName: .NSSystemTimeZoneDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.handleLifecycleRefresh(.systemTimeChanged)
+            }
+        }
+
+        calendarDayChangedObserver = NotificationCenter.default.addObserver(
+            forName: .NSCalendarDayChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.handleLifecycleRefresh(.systemTimeChanged)
             }
         }
     }
@@ -2232,16 +2683,17 @@ final class ScanScheduler: ObservableObject {
 
         let interruptedFullScan = refreshCoordinator.hasWork || isScanning || selfCheckTask != nil
         let interruptedRetry = !repositoryRetryTasks.isEmpty
-        let interruptedConfigurationDebounce = locationRefreshDebounceTask != nil
-        let interruptedForcedDiscovery = interruptedConfigurationDebounce
+        let interruptedDeferredRefresh = refreshDebounceTask != nil
+        let interruptedForcedDiscovery = deferredScanRefresh?.forceRepositoryDiscovery == true
             || selfCheckTask != nil
             || refreshCoordinator.runningRequest?.forceRepositoryDiscovery == true
             || refreshCoordinator.nextRequest?.forceRepositoryDiscovery == true
-        locationRefreshDebounceTask?.cancel()
-        locationRefreshDebounceTask = nil
+        refreshDebounceTask?.cancel()
+        refreshDebounceTask = nil
+        deferredScanRefresh = nil
         cancelRepositoryRetries()
 
-        if interruptedFullScan || interruptedRetry || interruptedConfigurationDebounce {
+        if interruptedFullScan || interruptedRetry || interruptedDeferredRefresh {
             let signature = ScanSchedulerPolicy.scanRootsSignature(scanRoots().roots)
             refreshCoordinator.retainOnlyRecovery(
                 signature: signature,
@@ -2263,22 +2715,11 @@ final class ScanScheduler: ObservableObject {
         workSuspended = false
 
         updatePowerState()
-
-        let decision = ScanSchedulerPolicy.wakeRefreshDecision(
-            lastScanAt: lastSuccessfulRefreshAt,
-            refreshPhase: refreshPhase,
-            sleepBeganAt: lastSystemSleepAt,
-            refreshStartedAt: diagnostics.lastRefreshStartedAt,
-            refreshCompletedAt: diagnostics.lastRefreshCompletedAt,
-            now: now
-        )
+        handleLifecycleRefresh(.wake, now: now)
         lastSystemSleepAt = nil
 
-        if backgroundScanningEnabled, decision.shouldRefreshImmediately {
-            requestWakeRefresh(forceRepositoryDiscovery: decision.forceRepositoryDiscovery)
-        }
-
         startNextCoalescedScanIfNeeded()
+        drainPendingRepositoryRefreshes()
         scheduleNextTimer()
     }
 
@@ -2309,7 +2750,9 @@ final class ScanScheduler: ObservableObject {
     func resumeAutomaticWorkForActiveSession() {
         guard !terminating, sessionInactive else { return }
         sessionInactive = false
+        handleLifecycleRefresh(.applicationBecameActive)
         startNextCoalescedScanIfNeeded()
+        drainPendingRepositoryRefreshes()
         scheduleNextTimer()
     }
 
@@ -2320,8 +2763,10 @@ final class ScanScheduler: ObservableObject {
         workSuspended = true
         backgroundTimer?.invalidate()
         backgroundTimer = nil
-        locationRefreshDebounceTask?.cancel()
-        locationRefreshDebounceTask = nil
+        refreshDebounceTask?.cancel()
+        refreshDebounceTask = nil
+        deferredScanRefresh = nil
+        pendingRepositoryRefreshRequirements.removeAll()
         cancelRepositoryRetries()
         refreshCoordinator.markRunningCancelled()
         refreshCoordinator.cancelAll()
@@ -2352,6 +2797,22 @@ final class ScanScheduler: ObservableObject {
             NotificationCenter.default.removeObserver(applicationTerminateObserver)
             self.applicationTerminateObserver = nil
         }
+        if let applicationDidBecomeActiveObserver {
+            NotificationCenter.default.removeObserver(applicationDidBecomeActiveObserver)
+            self.applicationDidBecomeActiveObserver = nil
+        }
+        if let systemClockDidChangeObserver {
+            NotificationCenter.default.removeObserver(systemClockDidChangeObserver)
+            self.systemClockDidChangeObserver = nil
+        }
+        if let systemTimeZoneDidChangeObserver {
+            NotificationCenter.default.removeObserver(systemTimeZoneDidChangeObserver)
+            self.systemTimeZoneDidChangeObserver = nil
+        }
+        if let calendarDayChangedObserver {
+            NotificationCenter.default.removeObserver(calendarDayChangedObserver)
+            self.calendarDayChangedObserver = nil
+        }
 
         let center = NSWorkspace.shared.notificationCenter
         if let workspaceSleepObserver {
@@ -2370,30 +2831,20 @@ final class ScanScheduler: ObservableObject {
             center.removeObserver(workspaceSessionActiveObserver)
             self.workspaceSessionActiveObserver = nil
         }
+        if let workspaceVolumeMountedObserver {
+            center.removeObserver(workspaceVolumeMountedObserver)
+            self.workspaceVolumeMountedObserver = nil
+        }
+        if let workspaceVolumeUnmountedObserver {
+            center.removeObserver(workspaceVolumeUnmountedObserver)
+            self.workspaceVolumeUnmountedObserver = nil
+        }
     }
 
     private func completeCurrentScanAndDrain() {
         _ = refreshCoordinator.completeCurrent()
         startNextCoalescedScanIfNeeded()
-    }
-
-    private func requestWakeRefresh(forceRepositoryDiscovery: Bool) {
-        let signature = ScanSchedulerPolicy.scanRootsSignature(scanRoots().roots)
-        let queued: Bool
-        if forceRepositoryDiscovery {
-            queued = refreshCoordinator.requestForced(signature: signature, source: .wake)
-        } else {
-            queued = refreshCoordinator.request(
-                signature: signature,
-                forceRepositoryDiscovery: false,
-                source: .wake
-            )
-        }
-        if queued, isScanning {
-            refreshCoordinator.markRunningCancelled()
-            scanTask?.cancel()
-        }
-        startNextCoalescedScanIfNeeded()
+        drainPendingRepositoryRefreshes()
     }
 
     /// Check if the machine is running on battery via IOKit.
@@ -2688,22 +3139,11 @@ final class ScanScheduler: ObservableObject {
     }
 
     private func requestLocationRefresh() {
-        guard !terminating else { return }
-        locationRefreshDebounceTask?.cancel()
-        let task = Task { @MainActor in
-            do {
-                try await Task.sleep(nanoseconds: Self.locationRefreshDebounceNanoseconds)
-            } catch {
-                return
-            }
-            guard !Task.isCancelled, !self.terminating else { return }
-            self.locationRefreshDebounceTask = nil
-            self.scanNow(
-                forceRepositoryDiscovery: true,
-                source: .configuration
-            )
-        }
-        locationRefreshDebounceTask = task
+        submitScanRequest(
+            forceRepositoryDiscovery: true,
+            source: .configuration,
+            coalescingNanoseconds: Self.refreshCoalescingNanoseconds
+        )
     }
 
     private func normalizeConfig(_ config: ScanConfig) -> ScanConfig {

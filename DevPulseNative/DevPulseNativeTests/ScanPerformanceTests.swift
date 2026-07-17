@@ -565,6 +565,374 @@ struct ScanPerformanceTests {
         ))
     }
 
+    @Test @MainActor func staleLifecycleEventsCoalesceToOneFullScan() async {
+        let probe = BlockingScanProbe()
+        let scheduler = ScanScheduler(commandMode: true, scanExecution: { request in
+            await probe.execute(request)
+        })
+        let now = Date()
+        let staleAt = now.addingTimeInterval(-RefreshStatusFormatter.staleThreshold - 1)
+        scheduler.lastResult = lifecycleSnapshot(
+            timestamp: DateFormatting.isoString(from: staleAt),
+            writtenAt: "written-at",
+            storageRevision: 7
+        )
+        scheduler.refreshPhase = .success
+        scheduler.startBackgroundScanning(refreshIfNeeded: false)
+
+        scheduler.handleLifecycleRefresh(.windowReopened, now: now)
+        scheduler.handleLifecycleRefresh(.applicationBecameActive, now: now)
+        scheduler.handleLifecycleRefresh(.wake, now: now)
+        scheduler.handleLifecycleRefresh(.wake, now: now)
+
+        #expect(await waitUntil { await probe.requestCount == 1 })
+        try? await Task.sleep(for: .milliseconds(300))
+        let state = await probe.state()
+        #expect(await probe.requestCount == 1)
+        #expect(state.sources == [.wake])
+        #expect(state.peakActive == 1)
+
+        scheduler.shutdown()
+        #expect(await waitUntil { await probe.activeCount == 0 })
+    }
+
+    @Test @MainActor func lifecycleEventsDoNotStartSecondFullScanWhileOneIsRunning() async {
+        let probe = BlockingScanProbe()
+        let scheduler = ScanScheduler(commandMode: true, scanExecution: { request in
+            await probe.execute(request)
+        })
+        let now = Date()
+        let staleAt = now.addingTimeInterval(-RefreshStatusFormatter.staleThreshold - 1)
+        scheduler.lastResult = lifecycleSnapshot(
+            timestamp: DateFormatting.isoString(from: staleAt),
+            writtenAt: "written-at",
+            storageRevision: 8
+        )
+        scheduler.refreshPhase = .success
+        scheduler.startBackgroundScanning(refreshIfNeeded: false)
+
+        scheduler.scanNow(source: .manual)
+        #expect(await waitUntil { await probe.requestCount == 1 })
+
+        scheduler.handleLifecycleRefresh(.windowReopened, now: now)
+        scheduler.handleLifecycleRefresh(.applicationBecameActive, now: now)
+        scheduler.handleLifecycleRefresh(.wake, now: now)
+        try? await Task.sleep(for: .milliseconds(300))
+
+        let state = await probe.state()
+        #expect(await probe.requestCount == 1)
+        #expect(state.sources == [.manual])
+        #expect(state.peakActive == 1)
+
+        scheduler.shutdown()
+        #expect(await waitUntil { await probe.activeCount == 0 })
+    }
+
+    @Test @MainActor func systemTimeChangeRecalculatesFreshnessWithoutMutatingSnapshotOrScanning() async {
+        let probe = BlockingScanProbe()
+        let scheduler = ScanScheduler(commandMode: true, scanExecution: { request in
+            await probe.execute(request)
+        })
+        let now = Date()
+        let staleAt = now.addingTimeInterval(-RefreshStatusFormatter.staleThreshold - 1)
+        let snapshot = lifecycleSnapshot(
+            timestamp: DateFormatting.isoString(from: staleAt),
+            writtenAt: "written-at",
+            storageRevision: 9
+        )
+        scheduler.lastResult = snapshot
+        scheduler.refreshPhase = .success
+
+        scheduler.handleLifecycleRefresh(.systemTimeChanged, now: now)
+
+        #expect(scheduler.lastFreshnessRecalculationAt == now)
+        #expect(scheduler.freshness(at: now) == .stale)
+        #expect(scheduler.lastResult.generatedAt == snapshot.generatedAt)
+        #expect(scheduler.lastResult.writtenAt == snapshot.writtenAt)
+        #expect(scheduler.lastResult.lastSuccessfulRefreshAt == snapshot.lastSuccessfulRefreshAt)
+        #expect(scheduler.lastResult.storageRevision == snapshot.storageRevision)
+        #expect(await probe.requestCount == 0)
+
+        scheduler.shutdown()
+    }
+
+    @Test @MainActor func recoveredPathRefreshesOnlyAffectedRepositoryWithoutFullScan() async throws {
+        let recoveredRoot = try temporaryDirectory(named: "path-recovery")
+        defer { try? FileManager.default.removeItem(at: recoveredRoot) }
+        let probe = UnifiedExecutionProbe()
+        let scheduler = ScanScheduler(
+            commandMode: true,
+            repositoryRetryExecution: { _, previous in
+                await probe.executeRetry(previous)
+            },
+            scanExecution: { request in
+                await probe.executeScan(request)
+            }
+        )
+        let timestamp = DateFormatting.nowISO()
+        let recovering = repositorySnapshot(
+            id: "recovering",
+            path: recoveredRoot.path,
+            timestamp: timestamp,
+            status: .error,
+            dataSource: .lastSuccessful
+        )
+        let healthy = repositorySnapshot(
+            id: "healthy",
+            path: "/tmp/devpulse-healthy-unaffected",
+            timestamp: timestamp
+        )
+        scheduler.lastResult = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: timestamp,
+            writtenAt: "2026-07-18T00:00:00Z",
+            lastSuccessfulRefreshAt: timestamp,
+            scanSummary: ScanSummary(
+                totalRepositories: 2,
+                changedRepositories: 0,
+                totalChangedFiles: 0,
+                errorRepositories: 1
+            ),
+            repositories: [recovering, healthy],
+            storageRevision: 3
+        )
+        scheduler.refreshPhase = .degraded
+
+        scheduler.handleLifecycleRefresh(
+            .pathAvailabilityChanged(rootPath: recoveredRoot.path, isAvailable: true)
+        )
+
+        #expect(await waitUntil { await probe.retryCount == 1 })
+        #expect(await probe.scanCount == 0)
+        let state = await probe.state()
+        #expect(state.events == [.retry])
+        #expect(state.peakActive == 1)
+
+        scheduler.shutdown()
+        #expect(await waitUntil { await probe.activeCount == 0 })
+    }
+
+    @Test @MainActor func rapidPathRecoveryRetainsFollowUpWhileUnavailableReadIsInFlight() async throws {
+        let recoveredRoot = try temporaryDirectory(named: "rapid-path-recovery")
+        defer { try? FileManager.default.removeItem(at: recoveredRoot) }
+        let retryProbe = NonCooperativeRetryProbe()
+        let scheduler = ScanScheduler(
+            commandMode: true,
+            repositoryRetryExecution: { _, previous in
+                await retryProbe.execute(previous)
+            },
+            scanExecution: { _ in (.empty(), [], []) }
+        )
+        let timestamp = DateFormatting.nowISO()
+        let repository = repositorySnapshot(
+            id: "rapid-recovery",
+            path: recoveredRoot.path,
+            timestamp: timestamp
+        )
+        scheduler.lastResult = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: timestamp,
+            writtenAt: timestamp,
+            lastSuccessfulRefreshAt: timestamp,
+            scanSummary: ScanSummary.build(from: [repository]),
+            repositories: [repository]
+        )
+
+        scheduler.handleLifecycleRefresh(
+            .pathAvailabilityChanged(rootPath: recoveredRoot.path, isAvailable: false)
+        )
+        #expect(await waitUntil { await retryProbe.isActive })
+
+        scheduler.handleLifecycleRefresh(
+            .pathAvailabilityChanged(rootPath: recoveredRoot.path, isAvailable: true)
+        )
+
+        #expect(scheduler.pendingPathRefreshCount == 1)
+        #expect(await retryProbe.executionCount == 1)
+
+        scheduler.shutdown()
+        await retryProbe.release()
+        #expect(await waitUntil { await retryProbe.isActive == false })
+    }
+
+    @Test @MainActor func staleLifecycleRecoveryKeepsTargetedRetryAndFullScan() async throws {
+        let recoveredRoot = try temporaryDirectory(named: "stale-lifecycle-recovery")
+        defer { try? FileManager.default.removeItem(at: recoveredRoot) }
+        let scanProbe = BlockingScanProbe()
+        let retryProbe = PathRefreshCapacityProbe(fastRepositoryID: "recovering")
+        let scheduler = ScanScheduler(
+            commandMode: true,
+            repositoryRetryExecution: { _, previous in
+                await retryProbe.execute(previous)
+            },
+            scanExecution: { request in
+                await scanProbe.execute(request)
+            }
+        )
+        let now = Date()
+        let staleAt = now.addingTimeInterval(-RefreshStatusFormatter.staleThreshold - 1)
+        let timestamp = DateFormatting.isoString(from: staleAt)
+        let recovering = repositorySnapshot(
+            id: "recovering",
+            path: recoveredRoot.path,
+            timestamp: timestamp,
+            status: .error,
+            dataSource: .lastSuccessful
+        )
+        scheduler.lastResult = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: timestamp,
+            writtenAt: "2026-07-18T00:00:00Z",
+            lastSuccessfulRefreshAt: timestamp,
+            scanSummary: ScanSummary.build(from: [recovering]),
+            repositories: [recovering],
+            storageRevision: 4
+        )
+        scheduler.refreshPhase = .degraded
+
+        scheduler.handleLifecycleRefresh(.windowReopened, now: now)
+
+        #expect(await waitUntil { await retryProbe.executionCount == 1 })
+        #expect(await waitUntil { await scanProbe.requestCount == 1 })
+        let state = await scanProbe.state()
+        #expect(state.sources == [.windowReopen])
+        #expect(state.peakActive == 1)
+
+        scheduler.shutdown()
+        #expect(await waitUntil { await scanProbe.activeCount == 0 })
+    }
+
+    @Test @MainActor func pathUnavailableDuringFullScanRemainsQueued() async {
+        let scanProbe = BlockingScanProbe()
+        let retryProbe = PathRefreshCapacityProbe()
+        let scheduler = ScanScheduler(
+            commandMode: true,
+            repositoryRetryExecution: { _, previous in
+                await retryProbe.execute(previous)
+            },
+            scanExecution: { request in
+                await scanProbe.execute(request)
+            }
+        )
+        let timestamp = DateFormatting.nowISO()
+        let repository = repositorySnapshot(
+            id: "external-current",
+            path: "/Volumes/Work/external-current",
+            timestamp: timestamp
+        )
+        scheduler.lastResult = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: timestamp,
+            writtenAt: timestamp,
+            lastSuccessfulRefreshAt: timestamp,
+            scanSummary: ScanSummary.build(from: [repository]),
+            repositories: [repository]
+        )
+
+        scheduler.scanNow(source: .manual)
+        #expect(await waitUntil { await scanProbe.requestCount == 1 })
+        scheduler.handleLifecycleRefresh(
+            .pathAvailabilityChanged(rootPath: "/Volumes/Work", isAvailable: false)
+        )
+
+        #expect(scheduler.pendingPathRefreshCount == 1)
+        #expect(await retryProbe.executionCount == 0)
+
+        scheduler.shutdown()
+        #expect(await waitUntil { await scanProbe.activeCount == 0 })
+    }
+
+    @Test @MainActor func pathRefreshQueueDrainsPastConcurrencyLimit() async {
+        let maximumConcurrentRetries = min(12, max(1, ScanConfig.default.maxConcurrentGitOps))
+        let repositoryCount = maximumConcurrentRetries + 2
+        let retryProbe = PathRefreshCapacityProbe(fastRepositoryID: "repo-00")
+        let scheduler = ScanScheduler(
+            commandMode: true,
+            repositoryRetryExecution: { _, previous in
+                await retryProbe.execute(previous)
+            },
+            scanExecution: { _ in (.empty(), [], []) }
+        )
+        let timestamp = DateFormatting.nowISO()
+        let repositories = (0..<repositoryCount).map { index in
+            let id = String(format: "repo-%02d", index)
+            return repositorySnapshot(
+                id: id,
+                path: "/Volumes/Batch/\(id)",
+                timestamp: timestamp
+            )
+        }
+        scheduler.lastResult = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: timestamp,
+            writtenAt: timestamp,
+            lastSuccessfulRefreshAt: timestamp,
+            scanSummary: ScanSummary.build(from: repositories),
+            repositories: repositories
+        )
+
+        scheduler.handleLifecycleRefresh(
+            .pathAvailabilityChanged(rootPath: "/Volumes/Batch", isAvailable: false)
+        )
+
+        #expect(await waitUntil {
+            await retryProbe.executionCount == maximumConcurrentRetries + 1
+        })
+        #expect(scheduler.pendingPathRefreshCount == 1)
+        #expect(scheduler.retryingRepositoryIDs.count == maximumConcurrentRetries)
+        #expect(await retryProbe.peakActiveCount <= maximumConcurrentRetries)
+
+        scheduler.shutdown()
+        #expect(await waitUntil { await retryProbe.activeCount == 0 })
+    }
+
+    @Test func pathAvailabilityPolicyTargetsOnlyAffectedRepositoriesAndReachableRetries() {
+        let timestamp = DateFormatting.nowISO()
+        let repositories = [
+            repositorySnapshot(id: "affected-current", path: "/Volumes/Work/current", timestamp: timestamp),
+            repositorySnapshot(
+                id: "affected-retry-reachable",
+                path: "/Volumes/Work/retry-reachable",
+                timestamp: timestamp,
+                status: .error,
+                dataSource: .lastSuccessful
+            ),
+            repositorySnapshot(
+                id: "affected-retry-unreachable",
+                path: "/Volumes/Work/retry-unreachable",
+                timestamp: timestamp,
+                status: .error,
+                dataSource: .lastSuccessful
+            ),
+            repositorySnapshot(id: "unrelated-current", path: "/Volumes/Other/current", timestamp: timestamp),
+            repositorySnapshot(
+                id: "unrelated-retry",
+                path: "/Volumes/Other/retry",
+                timestamp: timestamp,
+                status: .error,
+                dataSource: .lastSuccessful
+            )
+        ]
+
+        let unavailable = ScanSchedulerPolicy.repositoriesNeedingPathRefresh(
+            repositories,
+            under: "/Volumes/Work",
+            isAvailable: false,
+            pathIsReachable: { _ in false }
+        )
+        #expect(Set(unavailable.map(\.id)) == [
+            "affected-current", "affected-retry-reachable", "affected-retry-unreachable"
+        ])
+
+        let recovered = ScanSchedulerPolicy.repositoriesNeedingPathRefresh(
+            repositories,
+            under: "/Volumes/Work",
+            isAvailable: true,
+            pathIsReachable: { $0 != "/Volumes/Work/retry-unreachable" }
+        )
+        #expect(Set(recovered.map(\.id)) == ["affected-retry-reachable"])
+    }
+
     private func scanConfig(maxConcurrentGitOps: Int) -> ScanConfig {
         ScanConfig(
             enabledBuiltInPaths: [],
@@ -688,6 +1056,63 @@ struct ScanPerformanceTests {
         )
     }
 
+    private func lifecycleSnapshot(
+        timestamp: String,
+        writtenAt: String,
+        storageRevision: UInt64
+    ) -> AppGroupData {
+        AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: timestamp,
+            writtenAt: writtenAt,
+            lastSuccessfulRefreshAt: timestamp,
+            scanSummary: ScanSummary(
+                totalRepositories: 1,
+                changedRepositories: 0,
+                totalChangedFiles: 0,
+                errorRepositories: 0
+            ),
+            repositories: [idleRepositorySnapshot(timestamp: timestamp)],
+            storageRevision: storageRevision
+        )
+    }
+
+    private func repositorySnapshot(
+        id: String,
+        path: String,
+        timestamp: String,
+        status: RepositoryStatus = .clean,
+        dataSource: RepositoryDataSource = .current
+    ) -> RepositorySnapshot {
+        RepositorySnapshot(
+            id: id,
+            name: id,
+            path: path,
+            branch: "main",
+            status: status,
+            modifiedFileCount: 0,
+            addedFileCount: 0,
+            deletedFileCount: 0,
+            untrackedFileCount: 0,
+            stagedFileCount: 0,
+            unstagedFileCount: 0,
+            conflictedFileCount: 0,
+            aheadCount: 0,
+            behindCount: 0,
+            hasUpstream: true,
+            changedFileCount: 0,
+            changedFilesPreview: [],
+            risk: .low,
+            lastScannedAt: timestamp,
+            dataSource: dataSource,
+            lastSuccessfulScanAt: dataSource == .current ? timestamp : nil,
+            lastChangedAt: timestamp,
+            lastCommitMetadataAvailable: true,
+            errorMessage: status == .error ? "读取超时" : nil,
+            isPinned: false
+        )
+    }
+
     private func resourceUsage() -> (cpuSeconds: Double, maxResidentBytes: Int64) {
         var usage = rusage()
         getrusage(RUSAGE_SELF, &usage)
@@ -802,6 +1227,36 @@ private actor UnifiedExecutionProbe {
             try? await Task.sleep(for: .milliseconds(10))
         }
         active -= 1
+    }
+}
+
+private actor PathRefreshCapacityProbe {
+    private let fastRepositoryID: String?
+    private var executions: [String] = []
+    private var active = 0
+    private var peakActive = 0
+
+    init(fastRepositoryID: String? = nil) {
+        self.fastRepositoryID = fastRepositoryID
+    }
+
+    var executionCount: Int { executions.count }
+    var activeCount: Int { active }
+    var peakActiveCount: Int { peakActive }
+
+    func execute(_ previous: RepositorySnapshot) async -> RepositorySnapshot? {
+        executions.append(previous.id)
+        if previous.id == fastRepositoryID {
+            return nil
+        }
+
+        active += 1
+        peakActive = max(peakActive, active)
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        active -= 1
+        return nil
     }
 }
 

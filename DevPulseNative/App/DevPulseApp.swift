@@ -56,6 +56,7 @@ struct DevPulseApp: App {
 
     private func openMainWindow() {
         launchAtLoginController.refreshStatus()
+        scheduler.handleLifecycleRefresh(.windowReopened)
 
         if let mainWindow {
             show(window: mainWindow)

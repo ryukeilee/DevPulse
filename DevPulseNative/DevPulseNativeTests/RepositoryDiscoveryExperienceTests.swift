@@ -428,7 +428,7 @@ struct RepositoryDiscoveryExperienceTests {
     }
 
     @MainActor
-    @Test func forcedIncompleteDiscoveryClearsFreshnessSoNextAutomaticScanForcesDiscovery() async throws {
+    @Test func forcedIncompleteDiscoveryKeepsKnownUnchangedScopeForTargetedRecovery() async throws {
         let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
         let archiveKey = "ignored_repositories_v1_json"
         let locationsKey = "scan_locations_v1_json"
@@ -487,12 +487,12 @@ struct RepositoryDiscoveryExperienceTests {
         scheduler.scanNow(forceRepositoryDiscovery: true)
         _ = await recorder.waitForCount(1)
         try await waitForSchedulerToFinish(scheduler)
-        #expect(defaults.object(forKey: discoveryAtKey) == nil)
+        #expect(defaults.object(forKey: discoveryAtKey) != nil)
 
         scheduler.scanNow()
         let requests = await recorder.waitForCount(2)
         #expect(requests.count == 2)
-        #expect(requests[1].forceRepositoryDiscovery)
+        #expect(!requests[1].forceRepositoryDiscovery)
     }
 
     @MainActor

@@ -37,6 +37,44 @@ struct CommitReadinessEngineTests {
         #expect(ScanSchedulerPolicy.startupRefreshDecision(snapshotIsFresh: true, currentRootsSignature: "A", lastDiscoveryRootsSignature: nil).forceRepositoryDiscovery)
         #expect(!ScanSchedulerPolicy.startupRefreshDecision(snapshotIsFresh: true, currentRootsSignature: "", lastDiscoveryRootsSignature: "").forceRepositoryDiscovery)
     }
+
+    @Test func lifecycleRefreshPolicyUsesSuccessfulWatermarkAndDegradedState() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        #expect(!ScanSchedulerPolicy.shouldRefreshForLifecycle(
+            lastSuccessfulRefreshAt: now.addingTimeInterval(-60),
+            refreshPhase: .success,
+            now: now
+        ))
+        #expect(ScanSchedulerPolicy.shouldRefreshForLifecycle(
+            lastSuccessfulRefreshAt: now.addingTimeInterval(-11 * 60),
+            refreshPhase: .success,
+            now: now
+        ))
+        #expect(ScanSchedulerPolicy.shouldRefreshForLifecycle(
+            lastSuccessfulRefreshAt: now,
+            refreshPhase: .degraded,
+            now: now
+        ))
+    }
+
+    @Test func incompleteRefreshPreservesOnlyKnownUnchangedDiscoveryScope() {
+        #expect(ScanSchedulerPolicy.shouldPreserveDiscoveryScopeAfterIncompleteRefresh(
+            knownRepositoryPaths: ["/Volumes/Work/repo"],
+            currentScanRootsSignature: "/Volumes/Work",
+            lastScanRootsSignature: "/Volumes/Work"
+        ))
+        #expect(!ScanSchedulerPolicy.shouldPreserveDiscoveryScopeAfterIncompleteRefresh(
+            knownRepositoryPaths: [],
+            currentScanRootsSignature: "/Volumes/Work",
+            lastScanRootsSignature: "/Volumes/Work"
+        ))
+        #expect(!ScanSchedulerPolicy.shouldPreserveDiscoveryScopeAfterIncompleteRefresh(
+            knownRepositoryPaths: ["/Volumes/Work/repo"],
+            currentScanRootsSignature: "/Volumes/New",
+            lastScanRootsSignature: "/Volumes/Work"
+        ))
+    }
+
     @Test func scanRefreshCoordinatorCoalescesBurstToLatestForcedRequest() {
         var coordinator = ScanRefreshCoordinator()
 
