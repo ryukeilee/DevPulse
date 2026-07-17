@@ -37,6 +37,10 @@ enum AppGroupStore {
         containerURL?.appendingPathComponent(snapshotFileName)
     }
 
+    static var backupURL: URL? {
+        sharedStore?.backupURL
+    }
+
     static var snapshotPath: String? {
         snapshotURL?.path
     }
@@ -92,62 +96,47 @@ enum AppGroupStore {
 
     // MARK: - Read
 
-    /// Read the current app group snapshot.
-    static func read() -> Result<AppGroupData, AppGroupStoreError> {
-        guard let url = snapshotURL else {
+    private static var sharedStore: SharedSnapshotStore? {
+        guard let containerURL else { return nil }
+        return SharedSnapshotStore(directoryURL: containerURL, fileName: snapshotFileName)
+    }
+
+    /// Read the current app group snapshot together with its recovery source.
+    static func readDetailed() -> Result<SharedSnapshotRead, AppGroupStoreError> {
+        guard let sharedStore else {
             return .failure(.appGroupUnavailable)
         }
+        return sharedStore.load()
+    }
 
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            return .failure(.snapshotMissing)
-        }
-
-        do {
-            let data = try Data(contentsOf: url)
-            do {
-                let decoded = try JSONDecoder().decode(AppGroupData.self, from: data)
-                guard decoded.schemaVersion == RepositorySnapshotSchema.version else {
-                    return .failure(.schemaVersionMismatch(
-                        expected: RepositorySnapshotSchema.version,
-                        actual: decoded.schemaVersion
-                    ))
-                }
-                return .success(decoded)
-            } catch {
-                return .failure(.decodeFailed(error.localizedDescription))
-            }
-        } catch {
-            return .failure(.readFailed(error.localizedDescription))
+    /// Read the current app group snapshot. Primary corruption transparently
+    /// falls back to the last verified backup, which is explicitly downgraded
+    /// by `SharedSnapshotStore` before being returned.
+    static func read() -> Result<AppGroupData, AppGroupStoreError> {
+        switch readDetailed() {
+        case .success(let read):
+            return .success(read.snapshot)
+        case .failure(let error):
+            return .failure(error)
         }
     }
 
     // MARK: - Write
 
-    /// Write a snapshot to the app group container and verify the round trip.
+    /// Commit a snapshot through the single atomic, recoverable writer.
     static func write(_ data: AppGroupData) -> Result<AppGroupData, AppGroupStoreError> {
-        guard let url = snapshotURL else {
+        guard let sharedStore else {
             return .failure(.appGroupUnavailable)
         }
+        return sharedStore.commit(data)
+    }
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-
-        do {
-            let json = try encoder.encode(data)
-            try json.write(to: url, options: .atomic)
-        } catch {
-            return .failure(.writeFailed(error.localizedDescription))
+    @discardableResult
+    static func cleanupTemporaryFiles() -> Result<Void, AppGroupStoreError> {
+        guard let sharedStore else {
+            return .failure(.appGroupUnavailable)
         }
-
-        switch read() {
-        case .success(let verified):
-            if verified == data {
-                return .success(verified)
-            }
-            return .failure(.verificationFailed("Read-back snapshot does not match the written payload."))
-        case .failure(let error):
-            return .failure(.verificationFailed(error.localizedDescription))
-        }
+        return sharedStore.cleanupTemporaryFiles()
     }
 
     /// Reload widget timelines after a successful write or manual refresh.

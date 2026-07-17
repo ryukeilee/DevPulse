@@ -2,10 +2,6 @@ import Foundation
 import SwiftUI
 import WidgetKit
 
-private enum WidgetSnapshotSchema {
-    static let version = RepositorySnapshotSchema.version
-}
-
 private enum WidgetSnapshotStore {
     static let appGroupIdentifier = SharedSnapshotLocation.appGroupIdentifier
     private static let snapshotFileName = SharedSnapshotLocation.fileName
@@ -17,34 +13,30 @@ private enum WidgetSnapshotStore {
             return .failure(.appGroupUnavailable)
         }
 
-        let snapshotURL = containerURL.appendingPathComponent(snapshotFileName)
-        guard FileManager.default.fileExists(atPath: snapshotURL.path) else {
-            return .failure(.snapshotMissing(path: snapshotURL.path))
-        }
-
-        do {
-            let data = try Data(contentsOf: snapshotURL)
-            do {
-                let snapshot = try JSONDecoder().decode(AppGroupData.self, from: data)
-                guard snapshot.schemaVersion == WidgetSnapshotSchema.version else {
-                    return .failure(.schemaMismatch(
-                        expected: WidgetSnapshotSchema.version,
-                        actual: snapshot.schemaVersion
-                    ))
-                }
-                // Match the App startup migration path so legacy schema-v1
-                // snapshots get inferred provenance and a safe summary before
-                // any Widget family renders them.
-                let normalized = RepositoryIdentity.normalize(snapshot)
-                return .success(RepositoryScope.filtering(
-                    normalized,
-                    excluding: ignoredRepositoryPaths()
-                ))
-            } catch {
-                return .failure(.decodeFailed(path: snapshotURL.path, reason: error.localizedDescription))
-            }
-        } catch {
-            return .failure(.readFailed(path: snapshotURL.path, reason: error.localizedDescription))
+        let snapshotStore = SharedSnapshotStore(
+            directoryURL: containerURL,
+            fileName: snapshotFileName
+        )
+        switch snapshotStore.load() {
+        case .success(let read):
+            // The shared loader owns schema migration, validation, backup
+            // recovery, and conservative provenance downgrade for both targets.
+            let normalized = RepositoryIdentity.normalize(read.snapshot)
+            return .success(RepositoryScope.filtering(
+                normalized,
+                excluding: ignoredRepositoryPaths()
+            ))
+        case .failure(.snapshotMissing):
+            return .failure(.snapshotMissing(path: snapshotStore.primaryURL.path))
+        case .failure(.schemaVersionMismatch(let expected, let actual)):
+            return .failure(.schemaMismatch(expected: expected, actual: actual))
+        case .failure(.readFailed(let reason)):
+            return .failure(.readFailed(path: snapshotStore.primaryURL.path, reason: reason))
+        case .failure(let error):
+            return .failure(.decodeFailed(
+                path: snapshotStore.primaryURL.path,
+                reason: error.localizedDescription
+            ))
         }
     }
 

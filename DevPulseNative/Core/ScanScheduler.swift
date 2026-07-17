@@ -1194,7 +1194,11 @@ final class ScanScheduler: ObservableObject {
                     recentActivityEvents: previousSnapshot.recentActivityEvents,
                     repositoryUnavailableSinceByPath: unavailableSinceByPath.isEmpty
                         ? nil
-                        : unavailableSinceByPath
+                        : unavailableSinceByPath,
+                    storageRevision: previousSnapshot.storageRevision,
+                    persistenceState: repositories.contains {
+                        $0.resolvedDataSource == .current && $0.status != .error
+                    } ? .committed : previousSnapshot.persistenceState
                 )
                 let recorded = self.recordActivityEvents(
                     previous: previousSnapshot,
@@ -1693,8 +1697,10 @@ final class ScanScheduler: ObservableObject {
 
     private func restorePersistedSnapshot() {
         syncStoreInspection()
-        switch AppGroupStore.read() {
-        case .success(let snapshot):
+        _ = AppGroupStore.cleanupTemporaryFiles()
+        switch AppGroupStore.readDetailed() {
+        case .success(let storedRead):
+            let snapshot = storedRead.snapshot
             let migration = RepositoryIdentityMigration.migrate(
                 snapshot: snapshot,
                 pinnedIDs: pinnedRepoIDs
@@ -1709,7 +1715,14 @@ final class ScanScheduler: ObservableObject {
             var restoredSnapshot = migratedPinnedSnapshot
             var sharedSnapshot = snapshot
             var startupWriteError: String?
-            if migration.changed || scopeChanged {
+            let storageSourceNeedsRewrite: Bool
+            switch storedRead.source {
+            case .primary:
+                storageSourceNeedsRewrite = false
+            case .migratedPrimary, .backup:
+                storageSourceNeedsRewrite = true
+            }
+            if migration.changed || scopeChanged || storageSourceNeedsRewrite {
                 requiresStartupScopeRefresh = true
                 let written = migratedPinnedSnapshot.withWrittenAt(
                     snapshot.writtenAt ?? DateFormatting.nowISO()
@@ -1732,7 +1745,10 @@ final class ScanScheduler: ObservableObject {
             diagnostics.lastSnapshotStoreTrigger = "startup"
             diagnostics.lastSnapshotStoreState = startupWriteError == nil ? .restored : .failed
             diagnostics.lastSnapshotStoreDetail = startupWriteError
-                ?? "启动时已恢复 \(restoredSnapshot.repositories.count) 个仓库的共享快照。"
+                ?? startupRestoreDetail(
+                    source: storedRead.source,
+                    repositoryCount: restoredSnapshot.repositories.count
+                )
             diagnostics.sharedDataSnapshot = sharedSnapshot
             diagnostics.snapshotDecodable = true
             let now = Date()
@@ -1796,6 +1812,20 @@ final class ScanScheduler: ObservableObject {
         }
     }
 
+    private func startupRestoreDetail(
+        source: SharedSnapshotReadSource,
+        repositoryCount: Int
+    ) -> String {
+        switch source {
+        case .primary:
+            return "启动时已恢复 \(repositoryCount) 个仓库的共享快照。"
+        case .migratedPrimary:
+            return "启动时已迁移旧版共享快照，并保守恢复 \(repositoryCount) 个仓库。"
+        case .backup:
+            return "主快照不可用，启动时已从最后验证备份恢复 \(repositoryCount) 个仓库。"
+        }
+    }
+
     private func syncSharedSnapshot(
         from snapshot: AppGroupData,
         previousSnapshot: AppGroupData? = nil,
@@ -1816,7 +1846,8 @@ final class ScanScheduler: ObservableObject {
             syncStoreInspection()
             appGroupAvailable = AppGroupStore.isAvailable
             diagnostics.lastRefreshCompletedAt = now
-            diagnostics.lastSharedWriteAt = now
+            diagnostics.lastSharedWriteAt = readBack.writtenAt
+                .flatMap(DateFormatting.date(from:)) ?? now
             diagnostics.lastGeneratedAt = readBack.generatedAt
             diagnostics.lastWrittenAt = readBack.writtenAt
             diagnostics.sharedDataWriteError = nil
@@ -1860,7 +1891,12 @@ final class ScanScheduler: ObservableObject {
         diagnostics.sharedDataSnapshot = verifiedSnapshot
         diagnostics.sharedDataReadError = nil
         setWidgetReadableSnapshot(verifiedSnapshot, readAt: diagnostics.sharedDataReadAt ?? Date())
-        validateConsistency(expected: snapshotToWrite, shared: verifiedSnapshot, widget: diagnostics.widgetSnapshot, reason: reason)
+        validateConsistency(
+            expected: verifiedSnapshot,
+            shared: verifiedSnapshot,
+            widget: diagnostics.widgetSnapshot,
+            reason: reason
+        )
         lastResult = applyPins(verifiedSnapshot)
         let reloadDecision = ScanSchedulerPolicy.widgetReloadDecision(
             previousSnapshot: previousSnapshot,
@@ -2069,7 +2105,9 @@ final class ScanScheduler: ObservableObject {
             scanSummary: retained.scanSummary,
             repositories: RepositorySorter.sort(retained.repositories),
             recentActivityEvents: retained.recentActivityEvents,
-            repositoryUnavailableSinceByPath: retained.repositoryUnavailableSinceByPath
+            repositoryUnavailableSinceByPath: retained.repositoryUnavailableSinceByPath,
+            storageRevision: retained.storageRevision,
+            persistenceState: retained.persistenceState
         )
         let pinnedRetained = applyPins(sortedRetained)
         lastResult = recordActivityEvents(
@@ -2408,7 +2446,9 @@ final class ScanScheduler: ObservableObject {
             scanSummary: migration.snapshot.scanSummary,
             repositories: repos,
             recentActivityEvents: migration.snapshot.recentActivityEvents,
-            repositoryUnavailableSinceByPath: migration.snapshot.repositoryUnavailableSinceByPath
+            repositoryUnavailableSinceByPath: migration.snapshot.repositoryUnavailableSinceByPath,
+            storageRevision: migration.snapshot.storageRevision,
+            persistenceState: migration.snapshot.persistenceState
         )
     }
 

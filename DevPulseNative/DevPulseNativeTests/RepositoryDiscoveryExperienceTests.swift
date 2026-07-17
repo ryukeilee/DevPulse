@@ -62,12 +62,11 @@ struct RepositoryDiscoveryExperienceTests {
         let discoveryKey = "last_repository_discovery_scan_roots"
         let oldLocations = defaults.data(forKey: locationsKey)
         let oldSignature = defaults.string(forKey: discoveryKey)
-        let previousSnapshot = try? AppGroupStore.read().get()
+        let previousSnapshot = isolateSharedSnapshot()
         defer {
             restore(oldLocations, forKey: locationsKey, in: defaults)
             if let oldSignature { defaults.set(oldSignature, forKey: discoveryKey) } else { defaults.removeObject(forKey: discoveryKey) }
-            if let previousSnapshot { _ = AppGroupStore.write(previousSnapshot) }
-            else if let url = AppGroupStore.snapshotURL { try? FileManager.default.removeItem(at: url) }
+            restoreSharedSnapshot(previousSnapshot)
         }
         defaults.set(try JSONEncoder().encode(ScanLocationConfiguration(enabledBuiltInPaths: [], customDirectories: [CustomScanDirectory(path: canonical)])), forKey: locationsKey)
         defaults.set(signature, forKey: discoveryKey)
@@ -90,18 +89,14 @@ struct RepositoryDiscoveryExperienceTests {
         let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
         let pinnedKey = "pinned_repo_ids"
         let previousPinned = defaults.stringArray(forKey: pinnedKey)
-        let previousSnapshot = try? AppGroupStore.read().get()
+        let previousSnapshot = isolateSharedSnapshot()
         defer {
             if let previousPinned {
                 defaults.set(previousPinned, forKey: pinnedKey)
             } else {
                 defaults.removeObject(forKey: pinnedKey)
             }
-            if let previousSnapshot {
-                _ = AppGroupStore.write(previousSnapshot)
-            } else if let url = AppGroupStore.snapshotURL {
-                try? FileManager.default.removeItem(at: url)
-            }
+            restoreSharedSnapshot(previousSnapshot)
         }
 
         let root = try temporaryDirectory(named: "legacy-pin-rebuild")
@@ -168,7 +163,7 @@ struct RepositoryDiscoveryExperienceTests {
         let legacyKey = "ignored_repository_paths"
         let previousArchive = defaults.data(forKey: archiveKey)
         let previousLegacy = defaults.stringArray(forKey: legacyKey)
-        let previousSnapshot = try? AppGroupStore.read().get()
+        let previousSnapshot = isolateSharedSnapshot()
         defer {
             restore(previousArchive, forKey: archiveKey, in: defaults)
             if let previousLegacy {
@@ -176,11 +171,7 @@ struct RepositoryDiscoveryExperienceTests {
             } else {
                 defaults.removeObject(forKey: legacyKey)
             }
-            if let previousSnapshot {
-                _ = AppGroupStore.write(previousSnapshot)
-            } else if let url = AppGroupStore.snapshotURL {
-                try? FileManager.default.removeItem(at: url)
-            }
+            restoreSharedSnapshot(previousSnapshot)
         }
 
         defaults.removeObject(forKey: archiveKey)
@@ -251,15 +242,11 @@ struct RepositoryDiscoveryExperienceTests {
         let locationsKey = "scan_locations_v1_json"
         let previousArchive = defaults.data(forKey: archiveKey)
         let previousLocations = defaults.data(forKey: locationsKey)
-        let previousSnapshot = try? AppGroupStore.read().get()
+        let previousSnapshot = isolateSharedSnapshot()
         defer {
             restore(previousArchive, forKey: archiveKey, in: defaults)
             restore(previousLocations, forKey: locationsKey, in: defaults)
-            if let previousSnapshot {
-                _ = AppGroupStore.write(previousSnapshot)
-            } else if let url = AppGroupStore.snapshotURL {
-                try? FileManager.default.removeItem(at: url)
-            }
+            restoreSharedSnapshot(previousSnapshot)
         }
 
         let root = try temporaryDirectory(named: "ignored-restore-request")
@@ -304,7 +291,7 @@ struct RepositoryDiscoveryExperienceTests {
         let previousLocations = defaults.data(forKey: locationsKey)
         let previousDiscovered = defaults.stringArray(forKey: discoveredKey)
         let previousPins = defaults.stringArray(forKey: pinnedKey)
-        let previousSnapshot = try? AppGroupStore.read().get()
+        let previousSnapshot = isolateSharedSnapshot()
         defer {
             restore(previousArchive, forKey: archiveKey, in: defaults)
             restore(previousLocations, forKey: locationsKey, in: defaults)
@@ -314,8 +301,7 @@ struct RepositoryDiscoveryExperienceTests {
             else { defaults.removeObject(forKey: discoveredKey) }
             if let previousPins { defaults.set(previousPins, forKey: pinnedKey) }
             else { defaults.removeObject(forKey: pinnedKey) }
-            if let previousSnapshot { _ = AppGroupStore.write(previousSnapshot) }
-            else if let url = AppGroupStore.snapshotURL { try? FileManager.default.removeItem(at: url) }
+            restoreSharedSnapshot(previousSnapshot)
         }
 
         let root = try temporaryDirectory(named: "ignore-immediate")
@@ -379,7 +365,7 @@ struct RepositoryDiscoveryExperienceTests {
         let previousLocations = defaults.data(forKey: locationsKey)
         let previousDiscovered = defaults.stringArray(forKey: discoveredKey)
         let previousPins = defaults.stringArray(forKey: pinnedKey)
-        let previousSnapshot = try? AppGroupStore.read().get()
+        let previousSnapshot = isolateSharedSnapshot()
         defer {
             restore(previousArchive, forKey: archiveKey, in: defaults)
             restore(previousLocations, forKey: locationsKey, in: defaults)
@@ -387,8 +373,7 @@ struct RepositoryDiscoveryExperienceTests {
             else { defaults.removeObject(forKey: discoveredKey) }
             if let previousPins { defaults.set(previousPins, forKey: pinnedKey) }
             else { defaults.removeObject(forKey: pinnedKey) }
-            if let previousSnapshot { _ = AppGroupStore.write(previousSnapshot) }
-            else if let url = AppGroupStore.snapshotURL { try? FileManager.default.removeItem(at: url) }
+            restoreSharedSnapshot(previousSnapshot)
         }
 
         let root = try temporaryDirectory(named: "failure-scope")
@@ -455,7 +440,7 @@ struct RepositoryDiscoveryExperienceTests {
         let previousDiscovered = defaults.stringArray(forKey: discoveredKey)
         let previousDiscoveryAt = defaults.object(forKey: discoveryAtKey)
         let previousSignature = defaults.string(forKey: discoverySignatureKey)
-        let previousSnapshot = try? AppGroupStore.read().get()
+        let previousSnapshot = isolateSharedSnapshot()
         defer {
             restore(previousArchive, forKey: archiveKey, in: defaults)
             restore(previousLocations, forKey: locationsKey, in: defaults)
@@ -465,8 +450,7 @@ struct RepositoryDiscoveryExperienceTests {
             else { defaults.removeObject(forKey: discoveryAtKey) }
             if let previousSignature { defaults.set(previousSignature, forKey: discoverySignatureKey) }
             else { defaults.removeObject(forKey: discoverySignatureKey) }
-            if let previousSnapshot { _ = AppGroupStore.write(previousSnapshot) }
-            else if let url = AppGroupStore.snapshotURL { try? FileManager.default.removeItem(at: url) }
+            restoreSharedSnapshot(previousSnapshot)
         }
 
         let root = try temporaryDirectory(named: "incomplete-discovery-retry")
@@ -518,15 +502,11 @@ struct RepositoryDiscoveryExperienceTests {
         let discoveryKey = "last_repository_discovery_scan_roots"
         let previousLocations = defaults.data(forKey: locationsKey)
         let previousDiscovery = defaults.string(forKey: discoveryKey)
-        let previousSnapshot = try? AppGroupStore.read().get()
+        let previousSnapshot = isolateSharedSnapshot()
         defer {
             restore(previousLocations, forKey: locationsKey, in: defaults)
             if let previousDiscovery { defaults.set(previousDiscovery, forKey: discoveryKey) } else { defaults.removeObject(forKey: discoveryKey) }
-            if let previousSnapshot {
-                _ = AppGroupStore.write(previousSnapshot)
-            } else if let url = AppGroupStore.snapshotURL {
-                try? FileManager.default.removeItem(at: url)
-            }
+            restoreSharedSnapshot(previousSnapshot)
         }
         let root = try temporaryDirectory(named: "startup-mismatch")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -691,7 +671,7 @@ struct RepositoryDiscoveryExperienceTests {
 
     @MainActor
     @Test func fullRefreshKeepsPreviousSnapshotVisibleWhileExecutionIsBlocked() async throws {
-        let previousSharedSnapshot = try? AppGroupStore.read().get()
+        let previousSharedSnapshot = isolateSharedSnapshot()
         defer { restoreSharedSnapshot(previousSharedSnapshot) }
 
         let oldTime = "2026-07-16T08:00:00Z"
@@ -734,7 +714,7 @@ struct RepositoryDiscoveryExperienceTests {
 
     @MainActor
     @Test func mixedRefreshIsDegradedWithoutAdvancingLastSuccessfulRefresh() async throws {
-        let previousSharedSnapshot = try? AppGroupStore.read().get()
+        let previousSharedSnapshot = isolateSharedSnapshot()
         defer { restoreSharedSnapshot(previousSharedSnapshot) }
 
         let successfulAt = "2026-07-16T08:00:00Z"
@@ -792,7 +772,7 @@ struct RepositoryDiscoveryExperienceTests {
 
     @MainActor
     @Test func repositoryRetryReplacesOnlyTargetAndClearsRetryState() async throws {
-        let previousSharedSnapshot = try? AppGroupStore.read().get()
+        let previousSharedSnapshot = isolateSharedSnapshot()
         defer { restoreSharedSnapshot(previousSharedSnapshot) }
 
         let successfulAt = "2026-07-16T08:00:00Z"
@@ -859,8 +839,61 @@ struct RepositoryDiscoveryExperienceTests {
     }
 
     @MainActor
+    @Test func repositoryRetryAfterBackupRecoveryCommitsAWidgetReadableSnapshot() async throws {
+        let previousSharedSnapshot = isolateSharedSnapshot()
+        defer { restoreSharedSnapshot(previousSharedSnapshot) }
+
+        let successfulAt = "2026-07-16T08:00:00Z"
+        let retriedAt = "2026-07-16T09:00:00Z"
+        let retained = refreshRepository(
+            id: "recovered",
+            name: "Recovered",
+            modified: 2,
+            scannedAt: successfulAt
+        ).retainingLastSuccessfulData(
+            attemptedAt: "2026-07-16T08:30:00Z",
+            errorMessage: "从备份恢复，等待重试"
+        )
+        let recoveredSnapshot = refreshSnapshot(
+            generatedAt: "2026-07-16T08:30:00Z",
+            lastSuccessfulRefreshAt: successfulAt,
+            repositories: [retained]
+        ).withPersistenceMetadata(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-07-16T08:30:00Z",
+            writtenAt: "2026-07-16T08:31:00Z",
+            lastSuccessfulRefreshAt: successfulAt,
+            storageRevision: 1,
+            persistenceState: .recovered
+        )
+        let retried = refreshRepository(
+            id: "recovered",
+            name: "Recovered",
+            modified: 4,
+            scannedAt: retriedAt
+        )
+        let scheduler = ScanScheduler(
+            commandMode: true,
+            repositoryRetryExecution: { _, _ in retried },
+            scanExecution: { _ in (.empty(), [], []) }
+        )
+        scheduler.lastResult = recoveredSnapshot
+        scheduler.refreshPhase = .failure
+
+        scheduler.retryRepository("recovered")
+        try await waitForRepositoryRetryToFinish(scheduler, repositoryID: "recovered")
+
+        #expect(scheduler.lastResult.persistenceState == .committed)
+        #expect(scheduler.sharedSnapshotSyncFailureMessage == nil)
+        let persisted = try #require(try? AppGroupStore.read().get())
+        #expect(persisted.persistenceState == .committed)
+        #expect(persisted.repositories.first?.resolvedDataSource == .current)
+        #expect(persisted.repositories.first?.modifiedFileCount == 4)
+    }
+
+    @MainActor
     @Test func invalidGeneratedAtDoesNotUseCurrentTimeAsLastScanAt() async throws {
-        let previousSharedSnapshot = try? AppGroupStore.read().get()
+        let previousSharedSnapshot = isolateSharedSnapshot()
         defer { restoreSharedSnapshot(previousSharedSnapshot) }
 
         let successfulAt = "2026-07-16T08:00:00Z"
@@ -1351,12 +1384,40 @@ struct RepositoryDiscoveryExperienceTests {
         }
     }
 
-    private func restoreSharedSnapshot(_ snapshot: AppGroupData?) {
-        if let snapshot {
-            _ = AppGroupStore.write(snapshot)
-        } else if let url = AppGroupStore.snapshotURL {
+    private struct SharedSnapshotArtifacts {
+        let primary: Data?
+        let backup: Data?
+    }
+
+    private func isolateSharedSnapshot() -> SharedSnapshotArtifacts {
+        let previous = SharedSnapshotArtifacts(
+            primary: AppGroupStore.snapshotURL.flatMap { try? Data(contentsOf: $0) },
+            backup: AppGroupStore.backupURL.flatMap { try? Data(contentsOf: $0) }
+        )
+        removeSharedSnapshotArtifacts()
+        return previous
+    }
+
+    private func restoreSharedSnapshot(_ artifacts: SharedSnapshotArtifacts) {
+        removeSharedSnapshotArtifacts()
+        restoreSharedSnapshotArtifact(artifacts.primary, at: AppGroupStore.snapshotURL)
+        restoreSharedSnapshotArtifact(artifacts.backup, at: AppGroupStore.backupURL)
+    }
+
+    private func restoreSharedSnapshotArtifact(_ data: Data?, at url: URL?) {
+        guard let url else { return }
+        if let data {
+            try? data.write(to: url, options: [.atomic])
+        } else {
             try? FileManager.default.removeItem(at: url)
         }
+    }
+
+    private func removeSharedSnapshotArtifacts() {
+        [AppGroupStore.snapshotURL, AppGroupStore.backupURL]
+            .compactMap { $0 }
+            .forEach { try? FileManager.default.removeItem(at: $0) }
+        _ = AppGroupStore.cleanupTemporaryFiles()
     }
 
     private func refreshRepository(

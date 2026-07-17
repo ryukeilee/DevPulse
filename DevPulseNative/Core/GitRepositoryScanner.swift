@@ -326,7 +326,9 @@ enum GitRepositoryScanner {
             repositories: sorted,
             repositoryUnavailableSinceByPath: mergeResult.unavailableSinceByPath.isEmpty
                 ? nil
-                : mergeResult.unavailableSinceByPath
+                : mergeResult.unavailableSinceByPath,
+            storageRevision: previous?.storageRevision ?? 0,
+            persistenceState: .committed
         )
 
         let retainedDiscoveryPaths = Array(Set(
@@ -401,7 +403,9 @@ enum GitRepositoryScanner {
                 repositories: sorted,
                 repositoryUnavailableSinceByPath: mergeResult.unavailableSinceByPath.isEmpty
                     ? nil
-                    : mergeResult.unavailableSinceByPath
+                    : mergeResult.unavailableSinceByPath,
+                storageRevision: previousSnapshot?.storageRevision ?? 0,
+                persistenceState: .committed
             ),
             warnings,
             Array(Set(

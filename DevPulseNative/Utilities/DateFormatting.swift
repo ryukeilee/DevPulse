@@ -45,7 +45,11 @@ enum DateFormatting {
 
     /// Current time as ISO-8601 string.
     static func nowISO() -> String {
-        ISO8601DateFormatter().string(from: Date())
+        isoString(from: Date())
+    }
+
+    static func isoString(from date: Date) -> String {
+        ISO8601DateFormatter().string(from: date)
     }
 
     /// Parse an ISO-8601 string into a Date when possible.

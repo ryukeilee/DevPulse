@@ -5,7 +5,18 @@ import Darwin
 // MARK: - Schema constants
 
 enum RepositorySnapshotSchema {
-    static let version = 1
+    static let version = 2
+    static let oldestMigratableVersion = 1
+}
+
+/// Describes how the persisted payload reached its current representation.
+/// Repository-level provenance still decides whether individual Git values are
+/// current; this state prevents a recovered or migrated container from being
+/// presented as a freshly confirmed snapshot before another successful scan.
+enum SharedSnapshotPersistenceState: String, Codable, Equatable {
+    case committed
+    case migrated
+    case recovered
 }
 
 /// Stable repository identity shared by the app, scheduler, and Widget.
@@ -184,7 +195,9 @@ enum RepositoryIdentity {
             scanSummary: summary,
             repositories: repositories,
             recentActivityEvents: recentActivityEvents,
-            repositoryUnavailableSinceByPath: unavailableSinceByPath.isEmpty ? nil : unavailableSinceByPath
+            repositoryUnavailableSinceByPath: unavailableSinceByPath.isEmpty ? nil : unavailableSinceByPath,
+            storageRevision: data.storageRevision,
+            persistenceState: data.persistenceState
         )
     }
 
@@ -277,7 +290,9 @@ enum RepositoryIdentityMigration {
                 return copy
             },
             recentActivityEvents: normalizedSnapshot.recentActivityEvents,
-            repositoryUnavailableSinceByPath: normalizedSnapshot.repositoryUnavailableSinceByPath
+            repositoryUnavailableSinceByPath: normalizedSnapshot.repositoryUnavailableSinceByPath,
+            storageRevision: normalizedSnapshot.storageRevision,
+            persistenceState: normalizedSnapshot.persistenceState
         )
 
         return RepositoryIdentityMigrationResult(
@@ -385,7 +400,9 @@ enum RepositoryScope {
             recentActivityEvents: data.recentActivityEvents?.filter {
                 repositoryIDs.contains($0.repositoryID)
             },
-            repositoryUnavailableSinceByPath: unavailability
+            repositoryUnavailableSinceByPath: unavailability,
+            storageRevision: data.storageRevision,
+            persistenceState: data.persistenceState
         )
         return RepositoryIdentity.normalize(filtered)
     }
@@ -1375,6 +1392,13 @@ struct AppGroupData: Codable, Equatable {
     /// repositories that aged out of every presentation, allowing a recovered
     /// path to return without periodically resurrecting an unreadable cache.
     let repositoryUnavailableSinceByPath: [String: String]?
+    /// Monotonic commit sequence assigned only by `SharedSnapshotStore`.
+    /// In-memory scan results inherit the latest committed value until the next
+    /// atomic store commit advances it.
+    let storageRevision: UInt64
+    /// File-level provenance. This is deliberately independent from each
+    /// repository's Git-data provenance.
+    let persistenceState: SharedSnapshotPersistenceState
 
     init(schemaVersion: Int,
          generatedAt: String,
@@ -1383,7 +1407,9 @@ struct AppGroupData: Codable, Equatable {
          scanSummary: ScanSummary,
          repositories: [RepositorySnapshot],
          recentActivityEvents: [ActivityEventSummary]? = nil,
-         repositoryUnavailableSinceByPath: [String: String]? = nil) {
+         repositoryUnavailableSinceByPath: [String: String]? = nil,
+         storageRevision: UInt64 = 0,
+         persistenceState: SharedSnapshotPersistenceState = .committed) {
         self.schemaVersion = schemaVersion
         self.generatedAt = generatedAt
         self.writtenAt = writtenAt
@@ -1392,6 +1418,82 @@ struct AppGroupData: Codable, Equatable {
         self.repositories = repositories
         self.recentActivityEvents = recentActivityEvents
         self.repositoryUnavailableSinceByPath = repositoryUnavailableSinceByPath
+        self.storageRevision = storageRevision
+        self.persistenceState = persistenceState
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        let storageRevision: UInt64
+        let persistenceState: SharedSnapshotPersistenceState
+        if schemaVersion >= RepositorySnapshotSchema.version {
+            storageRevision = try container.decode(UInt64.self, forKey: .storageRevision)
+            persistenceState = try container.decode(
+                SharedSnapshotPersistenceState.self,
+                forKey: .persistenceState
+            )
+        } else {
+            storageRevision = try container.decodeIfPresent(
+                UInt64.self,
+                forKey: .storageRevision
+            ) ?? 0
+            persistenceState = try container.decodeIfPresent(
+                SharedSnapshotPersistenceState.self,
+                forKey: .persistenceState
+            ) ?? .migrated
+        }
+        self.init(
+            schemaVersion: schemaVersion,
+            generatedAt: try container.decode(String.self, forKey: .generatedAt),
+            writtenAt: try container.decodeIfPresent(String.self, forKey: .writtenAt),
+            lastSuccessfulRefreshAt: try container.decodeIfPresent(
+                String.self,
+                forKey: .lastSuccessfulRefreshAt
+            ),
+            scanSummary: try container.decode(ScanSummary.self, forKey: .scanSummary),
+            repositories: try container.decode([RepositorySnapshot].self, forKey: .repositories),
+            recentActivityEvents: try container.decodeIfPresent(
+                [ActivityEventSummary].self,
+                forKey: .recentActivityEvents
+            ),
+            repositoryUnavailableSinceByPath: try container.decodeIfPresent(
+                [String: String].self,
+                forKey: .repositoryUnavailableSinceByPath
+            ),
+            storageRevision: storageRevision,
+            persistenceState: persistenceState
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(generatedAt, forKey: .generatedAt)
+        try container.encodeIfPresent(writtenAt, forKey: .writtenAt)
+        try container.encodeIfPresent(lastSuccessfulRefreshAt, forKey: .lastSuccessfulRefreshAt)
+        try container.encode(scanSummary, forKey: .scanSummary)
+        try container.encode(repositories, forKey: .repositories)
+        try container.encodeIfPresent(recentActivityEvents, forKey: .recentActivityEvents)
+        try container.encodeIfPresent(
+            repositoryUnavailableSinceByPath,
+            forKey: .repositoryUnavailableSinceByPath
+        )
+        try container.encode(storageRevision, forKey: .storageRevision)
+        try container.encode(persistenceState, forKey: .persistenceState)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case generatedAt
+        case writtenAt
+        case lastSuccessfulRefreshAt
+        case scanSummary
+        case repositories
+        case recentActivityEvents
+        case repositoryUnavailableSinceByPath
+        case storageRevision
+        case persistenceState
     }
 
     static func empty() -> AppGroupData {
@@ -1408,7 +1510,9 @@ struct AppGroupData: Codable, Equatable {
             ),
             repositories: [],
             recentActivityEvents: nil,
-            repositoryUnavailableSinceByPath: nil
+            repositoryUnavailableSinceByPath: nil,
+            storageRevision: 0,
+            persistenceState: .committed
         )
     }
 
@@ -1421,7 +1525,9 @@ struct AppGroupData: Codable, Equatable {
             scanSummary: scanSummary,
             repositories: repositories,
             recentActivityEvents: recentActivityEvents,
-            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath
+            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
+            storageRevision: storageRevision,
+            persistenceState: persistenceState
         )
     }
 
@@ -1434,7 +1540,9 @@ struct AppGroupData: Codable, Equatable {
             scanSummary: scanSummary,
             repositories: repositories,
             recentActivityEvents: recentActivityEvents,
-            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath
+            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
+            storageRevision: storageRevision,
+            persistenceState: persistenceState
         )
     }
 
@@ -1447,7 +1555,66 @@ struct AppGroupData: Codable, Equatable {
             scanSummary: scanSummary,
             repositories: repositories,
             recentActivityEvents: events,
-            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath
+            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
+            storageRevision: storageRevision,
+            persistenceState: persistenceState
+        )
+    }
+
+    func withPersistenceMetadata(
+        schemaVersion: Int,
+        generatedAt: String,
+        writtenAt: String?,
+        lastSuccessfulRefreshAt: String?,
+        storageRevision: UInt64,
+        persistenceState: SharedSnapshotPersistenceState
+    ) -> AppGroupData {
+        AppGroupData(
+            schemaVersion: schemaVersion,
+            generatedAt: generatedAt,
+            writtenAt: writtenAt,
+            lastSuccessfulRefreshAt: lastSuccessfulRefreshAt,
+            scanSummary: scanSummary,
+            repositories: repositories,
+            recentActivityEvents: recentActivityEvents,
+            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
+            storageRevision: storageRevision,
+            persistenceState: persistenceState
+        )
+    }
+
+    /// Mark every formerly-current repository as retained data when the file
+    /// itself came from migration or backup recovery. This keeps useful values
+    /// visible without claiming that a recovery operation performed a Git scan.
+    func downgradedForPersistenceRecovery(
+        reason: String,
+        state: SharedSnapshotPersistenceState
+    ) -> AppGroupData {
+        let downgradedRepositories = repositories.map { repository in
+            guard repository.resolvedDataSource == .current,
+                  repository.status != .error else {
+                return repository
+            }
+            return repository.retainingLastSuccessfulData(
+                attemptedAt: repository.lastScannedAt,
+                errorMessage: reason,
+                unavailableSince: repository.unavailableSince ?? generatedAt
+            )
+        }
+        return AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: generatedAt,
+            writtenAt: writtenAt,
+            lastSuccessfulRefreshAt: lastSuccessfulRefreshAt,
+            scanSummary: ScanSummary.build(
+                from: downgradedRepositories,
+                totalRepositories: max(scanSummary.totalRepositories, downgradedRepositories.count)
+            ),
+            repositories: downgradedRepositories,
+            recentActivityEvents: recentActivityEvents,
+            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
+            storageRevision: storageRevision,
+            persistenceState: state
         )
     }
 
@@ -1497,7 +1664,9 @@ struct AppGroupData: Codable, Equatable {
             ),
             repositories: retainedRepositories,
             recentActivityEvents: recentActivityEvents,
-            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath
+            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
+            storageRevision: storageRevision,
+            persistenceState: persistenceState
         )
     }
 }
@@ -1670,6 +1839,32 @@ enum RefreshStatusFormatter {
                 readError: readError,
                 missingReason: missingReason
             )
+        }
+
+        if snapshot.persistenceState != .committed {
+            let successfulRefreshDate = snapshot.lastSuccessfulRefreshAt
+                .flatMap(DateFormatting.date(from:))
+            let detail = successfulRefreshDate.map {
+                "上次完整成功：\(updateLabel(for: $0, now: now)) · 等待再次刷新确认"
+            } ?? "等待再次成功刷新确认"
+            switch snapshot.persistenceState {
+            case .committed:
+                break
+            case .migrated:
+                return SnapshotTrustAssessment(
+                    state: .failed,
+                    title: "旧版快照待确认",
+                    detail: detail,
+                    basis: "共享快照已完成兼容迁移，但迁移本身不证明仓库数据仍是当前状态。"
+                )
+            case .recovered:
+                return SnapshotTrustAssessment(
+                    state: .failed,
+                    title: "显示恢复数据",
+                    detail: detail,
+                    basis: "主快照不可用，当前使用最后一份通过校验的备份；恢复操作不等同于一次成功刷新。"
+                )
+            }
         }
 
         let unavailableRepositories = snapshot.repositories.filter {
@@ -3172,6 +3367,9 @@ enum AppGroupStoreError: LocalizedError, Equatable {
     case schemaVersionMismatch(expected: Int, actual: Int)
     case readFailed(String)
     case decodeFailed(String)
+    case invalidSnapshot(String)
+    case recoveryFailed(primary: String, backup: String)
+    case lockFailed(String)
     case writeFailed(String)
     case verificationFailed(String)
 
@@ -3187,6 +3385,12 @@ enum AppGroupStoreError: LocalizedError, Equatable {
             return "Failed to read shared snapshot: \(reason)"
         case .decodeFailed(let reason):
             return "Failed to decode shared snapshot: \(reason)"
+        case .invalidSnapshot(let reason):
+            return "Shared snapshot is incomplete or invalid: \(reason)"
+        case .recoveryFailed(let primary, let backup):
+            return "Shared snapshot recovery failed. Primary: \(primary) Backup: \(backup)"
+        case .lockFailed(let reason):
+            return "Failed to coordinate shared snapshot access: \(reason)"
         case .writeFailed(let reason):
             return "Failed to write shared snapshot: \(reason)"
         case .verificationFailed(let reason):
