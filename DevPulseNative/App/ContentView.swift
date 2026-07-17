@@ -153,6 +153,7 @@ struct StatusTab: View {
                     events: scheduler.activityEvents,
                     repositories: scheduler.lastResult.repositories,
                     lastScanAt: scheduler.lastSuccessfulRefreshAt,
+                    isScanning: scheduler.isScanning,
                     onRescan: scheduler.rescan
                 )
 

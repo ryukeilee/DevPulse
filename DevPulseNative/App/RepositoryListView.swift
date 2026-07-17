@@ -9,19 +9,39 @@ private enum RepositoryListMetrics {
 
 struct RepositoryListView: View {
     @EnvironmentObject var scheduler: ScanScheduler
+    private let preferencesStore: RepositoryListPreferencesStore
+    @State private var searchText: String
+    @State private var selectedFilter: RepositoryListFilter
     @State private var selectedRepository: RepositorySnapshot?
     @State private var pendingIgnoreRepository: RepositorySnapshot?
 
-    var body: some View {
-        VStack(spacing: 0) {
-            refreshHint
+    init(preferencesStore: RepositoryListPreferencesStore = RepositoryListPreferencesStore()) {
+        self.preferencesStore = preferencesStore
+        let preferences = preferencesStore.load()
+        _searchText = State(initialValue: preferences.searchText)
+        _selectedFilter = State(initialValue: preferences.filter)
+    }
 
-            if scheduler.lastResult.repositories.isEmpty {
+    var body: some View {
+        let allRepositories = scheduler.lastResult.repositories
+        let repositories = RepositoryListQuery.apply(
+            to: allRepositories,
+            searchText: searchText,
+            filter: selectedFilter
+        )
+
+        VStack(spacing: 0) {
+            refreshHint(displayedCount: repositories.count)
+            repositoryControls
+
+            if allRepositories.isEmpty {
                 emptyView
+            } else if repositories.isEmpty {
+                noMatchesView
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(scheduler.lastResult.repositories) { repo in
+                        ForEach(repositories) { repo in
                             HStack(alignment: .top, spacing: 0) {
                                 Button {
                                     selectedRepository = repo
@@ -61,7 +81,7 @@ struct RepositoryListView: View {
                                 .help("从扫描结果中忽略此仓库")
                             }
 
-                            if repo.id != scheduler.lastResult.repositories.last?.id {
+                            if repo.id != repositories.last?.id {
                                 Divider()
                                     .overlay(DevPulseVisualStyle.separator)
                                     .padding(.leading, RepositoryListMetrics.rowPadding)
@@ -89,6 +109,12 @@ struct RepositoryListView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
+        .onChange(of: searchText) { _, _ in
+            persistListPreferences()
+        }
+        .onChange(of: selectedFilter) { _, _ in
+            persistListPreferences()
+        }
         .sheet(item: $selectedRepository) { repository in
             RepositoryDetailView(repository: repository)
         }
@@ -105,6 +131,27 @@ struct RepositoryListView: View {
                 secondaryButton: .cancel(Text("取消"))
             )
         }
+    }
+
+    private var repositoryControls: some View {
+        VStack(spacing: 8) {
+            TextField("按项目名或路径搜索", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel("搜索项目名或路径")
+
+            Picker("项目筛选", selection: $selectedFilter) {
+                ForEach(RepositoryListFilter.allCases) { filter in
+                    Text(filter.title).tag(filter)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.small)
+            .accessibilityLabel("项目筛选")
+        }
+        .padding(.horizontal, RepositoryListMetrics.pageInset)
+        .padding(.top, 9)
+        .padding(.bottom, 1)
     }
 
     private func repositoryRetryButton(for repository: RepositorySnapshot) -> some View {
@@ -136,7 +183,7 @@ struct RepositoryListView: View {
     }
 
     @ViewBuilder
-    private var refreshHint: some View {
+    private func refreshHint(displayedCount: Int) -> some View {
         if scheduler.lastScanAt != nil || scheduler.refreshPhase != .idle {
             HStack(spacing: 7) {
                 if scheduler.refreshPhase == .refreshing {
@@ -162,7 +209,7 @@ struct RepositoryListView: View {
 
                 Spacer()
 
-                Text("\(scheduler.lastResult.repositories.count) 个仓库")
+                Text(repositoryCountLabel(displayedCount: displayedCount))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -176,6 +223,14 @@ struct RepositoryListView: View {
                     .joined(separator: "，")
             )
         }
+    }
+
+    private func repositoryCountLabel(displayedCount: Int) -> String {
+        let totalCount = scheduler.lastResult.repositories.count
+        guard displayedCount != totalCount else {
+            return "\(totalCount) 个仓库"
+        }
+        return "显示 \(displayedCount) / \(totalCount) 个仓库"
     }
 
     private var emptyView: some View {
@@ -203,6 +258,50 @@ struct RepositoryListView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var noMatchesView: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 32))
+                .foregroundStyle(.secondary)
+            Text("没有匹配的仓库")
+                .font(.body)
+                .foregroundStyle(.secondary)
+            Text(noMatchesDetail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 360)
+            Button("清除搜索和筛选") {
+                searchText = ""
+                selectedFilter = .all
+            }
+            .buttonStyle(.bordered)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var noMatchesDetail: String {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !query.isEmpty, selectedFilter != .all {
+            return "当前快照中没有名称或路径匹配“\(query)”且属于“\(selectedFilter.title)”的仓库。"
+        }
+        if !query.isEmpty {
+            return "当前快照中没有项目名或路径匹配“\(query)”的仓库。"
+        }
+        return "当前快照中没有属于“\(selectedFilter.title)”的仓库。"
+    }
+
+    private func persistListPreferences() {
+        preferencesStore.save(
+            RepositoryListPreferences(
+                searchText: searchText,
+                filter: selectedFilter
+            )
+        )
     }
 
     private var refreshHintTint: Color {

@@ -42,6 +42,7 @@
 		E8D49150B8C2B720B4AE3490 /* RepositoryListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5372E9A7A4D214017A6A3E05 /* RepositoryListView.swift */; };
 		E9D54589ABB2B3D1F51E2AD8 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 6C0803CED3ED0B599315D845 /* Assets.xcassets */; };
 		F3835F2463A794860CDCA8BF /* RepositoryDiscoveryExperienceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 087151EDA65E84F82D33C331 /* RepositoryDiscoveryExperienceTests.swift */; };
+		F9A1B2C3D4E5F60718293A4B /* ScanPerformanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9A1B2C3D4E5F60718293A4C /* ScanPerformanceTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -110,6 +111,7 @@
 		F0D43D894A359160BF2D1BED /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F57AB6845B384BF0D02696FE /* CommitReadinessEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommitReadinessEngine.swift; sourceTree = "<group>"; };
 		F8E4EE483D4ED7F6527C3076 /* DevPulse.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DevPulse.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F9A1B2C3D4E5F60718293A4C /* ScanPerformanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanPerformanceTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -205,6 +207,7 @@
 			children = (
 				6D38F00B429349F39831B2E7 /* ActivityEventTests.swift */,
 				048FC2CF2173C1D892EC77ED /* CommitReadinessEngineTests.swift */,
+				F9A1B2C3D4E5F60718293A4C /* ScanPerformanceTests.swift */,
 				6905C32690CB29628B456791 /* LaunchAtLoginControllerTests.swift */,
 				087151EDA65E84F82D33C331 /* RepositoryDiscoveryExperienceTests.swift */,
 			);
@@ -360,6 +363,7 @@
 				AC5843D6975B89D2C8ECDB28 /* CommitReadinessEngineTests.swift in Sources */,
 				820E27DB980988D1A11D34BA /* LaunchAtLoginControllerTests.swift in Sources */,
 				F3835F2463A794860CDCA8BF /* RepositoryDiscoveryExperienceTests.swift in Sources */,
+				F9A1B2C3D4E5F60718293A4B /* ScanPerformanceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

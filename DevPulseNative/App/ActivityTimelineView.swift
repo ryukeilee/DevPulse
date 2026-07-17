@@ -4,6 +4,7 @@ struct ActivityTimelineView: View {
     let events: [ActivityEvent]
     let repositories: [RepositorySnapshot]
     let lastScanAt: Date?
+    let isScanning: Bool
     let onRescan: () -> Void
 
     private var decisionsByRepositoryID: [String: RepositoryDecision] {
@@ -78,6 +79,7 @@ struct ActivityTimelineView: View {
             Button("Rescan Now", action: onRescan)
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .disabled(isScanning)
         }
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 // MARK: - Scan configuration
 
@@ -13,9 +14,10 @@ struct ScanConfig: Codable, Sendable {
     let gitCommandTimeout: TimeInterval
     /// Overall scan timeout in seconds.
     let scanTimeout: TimeInterval
-    /// Repos flagged slow are skipped for this many seconds.
+    /// Deprecated compatibility field retained for decoding stored settings.
+    /// Readable repositories are no longer skipped between full scans.
     let slowReposkipSeconds: TimeInterval
-    /// Above this repo count, only scan recently-active repos.
+    /// Deprecated compatibility field. Full scans still read every repository.
     let activeRepoThreshold: Int
 
     static let `default` = ScanConfig(
@@ -85,38 +87,6 @@ struct ScanConfig: Codable, Sendable {
     }
 }
 
-// MARK: - Slow repo tracker (actor for concurrency safety)
-
-private actor SlowRepoTracker {
-    private var repos: [String: Date] = [:]
-    private let defaultSkipSeconds: TimeInterval
-
-    init(skipSeconds: TimeInterval = 600) {
-        self.defaultSkipSeconds = skipSeconds
-    }
-
-    func filterActive(_ paths: [String]) -> (active: [String], skipped: [String]) {
-        let now = Date()
-        // Purge expired
-        repos = repos.filter { $0.value > now }
-
-        var active: [String] = []
-        var skipped: [String] = []
-        for path in paths {
-            if let skipUntil = repos[path], skipUntil > now {
-                skipped.append(path)
-            } else {
-                active.append(path)
-            }
-        }
-        return (active, skipped)
-    }
-
-    func markSlow(_ path: String, skipSeconds: TimeInterval) {
-        repos[path] = Date().addingTimeInterval(skipSeconds)
-    }
-}
-
 private actor RepositoryDiscoveryCache {
     struct Entry {
         let paths: [String]
@@ -156,9 +126,58 @@ private enum RepositoryPathAvailability: Equatable {
 private struct RepositoryDiscoveryResult {
     let readablePaths: [String]
     let unavailablePaths: [String]
+    let mode: DiscoveryMode
+    let isComplete: Bool
+
+    init(readablePaths: [String],
+         unavailablePaths: [String],
+         mode: DiscoveryMode = .walked,
+         isComplete: Bool = true) {
+        self.readablePaths = readablePaths
+        self.unavailablePaths = unavailablePaths
+        self.mode = mode
+        self.isComplete = isComplete
+    }
 
     var retainedPaths: [String] {
         Array(Set(readablePaths + unavailablePaths)).sorted()
+    }
+}
+
+private enum DiscoveryMode {
+    case empty
+    case reusedKnown
+    case reusedCache
+    case walked
+    case incomplete
+}
+
+private enum RepositoryReuseAttempt {
+    case reusable(RepositoryDiscoveryResult)
+    case invalidated
+}
+
+private struct DiscoveryTraversalState {
+    var isComplete = true
+    var wasCancelled = false
+    var timedOut = false
+
+    mutating func shouldStop(deadline: Date) -> Bool {
+        if Task.isCancelled {
+            isComplete = false
+            wasCancelled = true
+            return true
+        }
+        if Date() >= deadline {
+            isComplete = false
+            timedOut = true
+            return true
+        }
+        return false
+    }
+
+    mutating func markUnavailable() {
+        isComplete = false
     }
 }
 
@@ -176,9 +195,29 @@ private struct SnapshotReadResult: Sendable {
 // MARK: - Scanner
 
 enum GitRepositoryScanner {
-    private static let slowTracker = SlowRepoTracker()
+    typealias GitCommandRunner = @Sendable (
+        _ arguments: [String],
+        _ workingDirectory: String,
+        _ timeout: TimeInterval,
+        _ outputLimit: Int,
+        _ isCancelled: @escaping @Sendable () -> Bool
+    ) -> ProcessRunResult
+
     private static let discoveryCache = RepositoryDiscoveryCache()
     private static let discoveryCacheTTL: TimeInterval = 10 * 60
+    private static let discoveryRulesVersion = 2
+    private static let maximumConcurrentGitOps = 12
+    private static let logger = Logger(subsystem: "local.devpulse.app", category: "RepositoryScan")
+    static let defaultGitCommandRunner: GitCommandRunner = {
+        arguments, workingDirectory, timeout, outputLimit, isCancelled in
+        ProcessRunner.runDetailed(
+            arguments: arguments,
+            workingDirectory: workingDirectory,
+            timeout: timeout,
+            outputLimit: outputLimit,
+            isCancelled: isCancelled
+        )
+    }
     static let incompleteDiscoveryWarning = "Repository discovery incomplete: one or more configured paths could not be read."
 
     static func discoveryWasIncomplete(_ warnings: [String]) -> Bool {
@@ -194,8 +233,16 @@ enum GitRepositoryScanner {
                      knownRepositoryPaths: [String]? = nil,
                      ignoredRepositoryPaths: Set<String> = [],
                      forceRepositoryDiscovery: Bool = false,
-                     previousSnapshot: AppGroupData? = nil) async -> (data: AppGroupData, warnings: [String], discoveredRepositoryPaths: [String]) {
+                     previousSnapshot: AppGroupData? = nil,
+                     metrics: ScanMetricsCollector? = nil,
+                     gitCommandRunner: @escaping GitCommandRunner = defaultGitCommandRunner) async -> (data: AppGroupData, warnings: [String], discoveredRepositoryPaths: [String]) {
         let startTime = Date()
+        let collector = metrics ?? ScanMetricsCollector()
+        let scanToken = collector.beginScan()
+        defer {
+            collector.endScan(scanToken)
+            logScanSummary(collector.snapshot(), kind: "full")
+        }
         var warnings: [String] = []
         let previous = previousSnapshot ?? (try? AppGroupStore.read().get())
         let previousUnavailableSinceByPath = previous?.repositoryUnavailableSinceByPath ?? [:]
@@ -203,6 +250,7 @@ enum GitRepositoryScanner {
             + Array(previousUnavailableSinceByPath.keys)
 
         // Phase 1: discover all git repositories
+        let discoveryStartedAt = ProcessInfo.processInfo.systemUptime
         let discovery = await discoverRepositories(
             config: config,
             scanRoots: scanRoots,
@@ -210,13 +258,20 @@ enum GitRepositoryScanner {
             previousRepositoryPaths: previousRepositoryPaths,
             ignoredRepositoryPaths: ignoredRepositoryPaths,
             forceRefresh: forceRepositoryDiscovery,
+            overallDeadline: startTime.addingTimeInterval(config.scanTimeout),
             warnings: &warnings
+        )
+        collector.recordDiscovery(
+            mode: repositoryDiscoveryMode(discovery.mode),
+            elapsed: ProcessInfo.processInfo.systemUptime - discoveryStartedAt,
+            discoveredRepositoryCount: discovery.retainedPaths.count
         )
         if Task.isCancelled {
             return partialResult(
                 discovery: discovery,
                 snapshots: [],
                 previousSnapshot: previous,
+                metrics: collector,
                 warnings: &warnings
             )
         }
@@ -227,7 +282,9 @@ enum GitRepositoryScanner {
             warnings: &warnings,
             overallDeadline: startTime.addingTimeInterval(config.scanTimeout),
             previousSnapshots: previous?.repositories ?? [],
-            previousUnavailableSinceByPath: previousUnavailableSinceByPath
+            previousUnavailableSinceByPath: previousUnavailableSinceByPath,
+            metrics: collector,
+            gitCommandRunner: gitCommandRunner
         )
         if Task.isCancelled {
             warnings.append("Scan cancelled; returning the completed portion with prior snapshots retained.")
@@ -235,6 +292,7 @@ enum GitRepositoryScanner {
                 discovery: discovery,
                 snapshots: snapshots,
                 previousSnapshot: previous,
+                metrics: collector,
                 warnings: &warnings
             )
         }
@@ -248,6 +306,9 @@ enum GitRepositoryScanner {
 
         // Phase 3: sort
         let sorted = RepositorySorter.sort(mergeResult.snapshots)
+        collector.recordReusedRepositorySnapshot(
+            count: sorted.filter { $0.resolvedDataSource == RepositoryDataSource.lastSuccessful }.count
+        )
 
         // Phase 4: build a summary from current observations only. Retained
         // values remain available for context but never count as current work.
@@ -279,8 +340,16 @@ enum GitRepositoryScanner {
     /// retained/unknown snapshot; `nil` is reserved for cancellation.
     static func retryRepository(
         config: ScanConfig = .default,
-        previousSnapshot: RepositorySnapshot
+        previousSnapshot: RepositorySnapshot,
+        metrics: ScanMetricsCollector? = nil,
+        gitCommandRunner: GitCommandRunner = defaultGitCommandRunner
     ) async -> RepositorySnapshot? {
+        let collector = metrics ?? ScanMetricsCollector()
+        let scanToken = collector.beginScan(isFullScan: false)
+        defer {
+            collector.endScan(scanToken)
+            logScanSummary(collector.snapshot(), kind: "retry")
+        }
         guard !Task.isCancelled else { return nil }
 
         let previous = RepositoryIdentity.normalize(previousSnapshot)
@@ -289,10 +358,15 @@ enum GitRepositoryScanner {
             config: config,
             overallDeadline: Date().addingTimeInterval(config.scanTimeout),
             previousSnapshot: previous,
-            unavailableSince: previous.unavailableSince
+            unavailableSince: previous.unavailableSince,
+            metrics: collector,
+            gitCommandRunner: gitCommandRunner
         )
 
         guard !Task.isCancelled else { return nil }
+        if let snapshot, snapshot.resolvedDataSource == .lastSuccessful {
+            collector.recordReusedRepositorySnapshot()
+        }
         return snapshot
     }
 
@@ -300,6 +374,7 @@ enum GitRepositoryScanner {
         discovery: RepositoryDiscoveryResult,
         snapshots: [RepositorySnapshot],
         previousSnapshot: AppGroupData?,
+        metrics: ScanMetricsCollector,
         warnings: inout [String]
     ) -> (data: AppGroupData, warnings: [String], discoveredRepositoryPaths: [String]) {
         let mergeResult = mergeSnapshots(
@@ -309,6 +384,9 @@ enum GitRepositoryScanner {
             previousUnavailableSinceByPath: previousSnapshot?.repositoryUnavailableSinceByPath ?? [:]
         )
         let sorted = RepositorySorter.sort(mergeResult.snapshots)
+        metrics.recordReusedRepositorySnapshot(
+            count: sorted.filter { $0.resolvedDataSource == RepositoryDataSource.lastSuccessful }.count
+        )
         let summary = ScanSummary.build(
             from: sorted,
             totalRepositories: sorted.count
@@ -340,15 +418,17 @@ enum GitRepositoryScanner {
                                              previousRepositoryPaths: [String],
                                              ignoredRepositoryPaths: Set<String>,
                                              forceRefresh: Bool,
+                                             overallDeadline: Date,
                                              warnings: inout [String]) async -> RepositoryDiscoveryResult {
         var discovered = Set<String>()
         var unavailablePrefixes = Set<String>()
+        var traversalState = DiscoveryTraversalState()
         let allPaths = scanRoots ?? Array(config.enabledBuiltInPaths) + config.customPaths
         let normalizedRoots = Array(Set(allPaths.map {
             ScanLocationProvider.canonicalExistingFilePath($0, resolveBuiltIn: true)
         })).sorted()
         let ignoredPaths = RepositoryScope.canonicalPathSet(ignoredRepositoryPaths)
-        let cacheKey = discoveryCacheKey(for: normalizedRoots)
+        let cacheKey = discoveryCacheKey(for: normalizedRoots, maxDepth: config.maxDepth)
         let knownCandidates = Array(Set((knownRepositoryPaths ?? []) + previousRepositoryPaths))
 
         guard !normalizedRoots.isEmpty else {
@@ -356,37 +436,61 @@ enum GitRepositoryScanner {
             if scanRoots == nil {
                 warnings.append("No scan roots configured. Add a directory in Settings.")
             }
-            return RepositoryDiscoveryResult(readablePaths: [], unavailablePaths: [])
+            return RepositoryDiscoveryResult(
+                readablePaths: [],
+                unavailablePaths: [],
+                mode: .empty
+            )
         }
 
-        if !forceRefresh,
-           let reusedPaths = reusableKnownRepositoryPaths(
-               knownCandidates,
-               limitedTo: normalizedRoots,
-               excluding: ignoredPaths
-           ) {
-            if !reusedPaths.unavailablePaths.isEmpty {
-                warnings.append(incompleteDiscoveryWarning)
+        if !forceRefresh {
+            switch reusableKnownRepositoryPaths(
+                knownCandidates,
+                limitedTo: normalizedRoots,
+                excluding: ignoredPaths,
+                overallDeadline: overallDeadline,
+                successMode: .reusedKnown
+            ) {
+            case .reusable(let reusedPaths):
+                if !reusedPaths.isComplete {
+                    appendDiscoveryInterruptionWarning(
+                        for: reusedPaths,
+                        overallDeadline: overallDeadline,
+                        warnings: &warnings
+                    )
+                }
+                return reusedPaths
+            case .invalidated:
+                break
             }
-            return reusedPaths
         }
 
         if forceRefresh {
             await discoveryCache.removeValue(for: cacheKey)
-        } else if let cached = await discoveryCache.cachedPaths(for: cacheKey),
-                  let reusableCached = reusableKnownRepositoryPaths(
-                    cached,
-                    limitedTo: normalizedRoots,
-                    excluding: ignoredPaths
-                  ) {
-            if !reusableCached.unavailablePaths.isEmpty {
-                warnings.append(incompleteDiscoveryWarning)
+        } else if let cached = await discoveryCache.cachedPaths(for: cacheKey) {
+            switch reusableKnownRepositoryPaths(
+                cached,
+                limitedTo: normalizedRoots,
+                excluding: ignoredPaths,
+                overallDeadline: overallDeadline,
+                successMode: .reusedCache
+            ) {
+            case .reusable(let reusableCached):
+                if !reusableCached.isComplete {
+                    appendDiscoveryInterruptionWarning(
+                        for: reusableCached,
+                        overallDeadline: overallDeadline,
+                        warnings: &warnings
+                    )
+                }
+                return reusableCached
+            case .invalidated:
+                break
             }
-            return reusableCached
         }
 
         for root in normalizedRoots {
-            if Task.isCancelled { break }
+            if traversalState.shouldStop(deadline: overallDeadline) { break }
             switch directoryAvailability(at: root) {
             case .repository:
                 walkDirectory(
@@ -395,51 +499,74 @@ enum GitRepositoryScanner {
                     ignoredPaths: ignoredPaths,
                     discovered: &discovered,
                     unavailablePrefixes: &unavailablePrefixes,
+                    overallDeadline: overallDeadline,
+                    traversalState: &traversalState,
                     warnings: &warnings
                 )
             case .unavailable:
                 unavailablePrefixes.insert(root)
+                traversalState.markUnavailable()
                 warnings.append("Scan root unavailable: \(root)")
             case .missing, .notRepository:
+                unavailablePrefixes.insert(root)
+                traversalState.markUnavailable()
                 warnings.append("Scan root unavailable: \(root)")
             }
         }
+        _ = traversalState.shouldStop(deadline: overallDeadline)
 
-        if !unavailablePrefixes.isEmpty {
+        if !traversalState.isComplete || !unavailablePrefixes.isEmpty {
             warnings.append(incompleteDiscoveryWarning)
+        }
+        if traversalState.timedOut {
+            warnings.append("Repository discovery timeout reached; partial results were retained.")
+        } else if traversalState.wasCancelled {
+            warnings.append("Repository discovery cancelled; partial results were retained.")
         }
 
         if discovered.isEmpty {
-            if !allPaths.isEmpty && unavailablePrefixes.isEmpty {
+            if !allPaths.isEmpty && traversalState.isComplete && unavailablePrefixes.isEmpty {
                 warnings.append("No Git repositories discovered in the configured scan roots.")
             }
         }
 
         let sorted = Array(discovered).sorted()
-        await discoveryCache.store(paths: sorted, for: cacheKey, ttl: discoveryCacheTTL)
+        if traversalState.isComplete && unavailablePrefixes.isEmpty {
+            await discoveryCache.store(paths: sorted, for: cacheKey, ttl: discoveryCacheTTL)
+        }
         let unavailablePaths = knownCandidates
             .map(RepositoryIdentity.canonicalPath)
             .filter { path in
                 !RepositoryScope.contains(path, in: ignoredPaths)
                     && normalizedRoots.contains { RepositoryIdentity.isSameOrDescendantPath(path, of: $0) }
-                    && unavailablePrefixes.contains { RepositoryIdentity.isSameOrDescendantPath(path, of: $0) }
+                    && (!traversalState.isComplete
+                        || unavailablePrefixes.contains { RepositoryIdentity.isSameOrDescendantPath(path, of: $0) })
+                    && !discovered.contains(path)
             }
         return RepositoryDiscoveryResult(
             readablePaths: sorted,
-            unavailablePaths: Array(Set(unavailablePaths)).sorted()
+            unavailablePaths: Array(Set(unavailablePaths)).sorted(),
+            mode: traversalState.isComplete ? .walked : .incomplete,
+            isComplete: traversalState.isComplete
         )
     }
 
     private static func reusableKnownRepositoryPaths(
         _ knownRepositoryPaths: [String],
         limitedTo scanRoots: [String],
-        excluding ignoredPaths: Set<String>
-    ) -> RepositoryDiscoveryResult? {
+        excluding ignoredPaths: Set<String>,
+        overallDeadline: Date,
+        successMode: DiscoveryMode
+    ) -> RepositoryReuseAttempt {
         let normalizedRoots = scanRoots.map {
             ScanLocationProvider.canonicalExistingFilePath($0, resolveBuiltIn: true)
         }
         guard !normalizedRoots.isEmpty else {
-            return RepositoryDiscoveryResult(readablePaths: [], unavailablePaths: [])
+            return .reusable(RepositoryDiscoveryResult(
+                readablePaths: [],
+                unavailablePaths: [],
+                mode: .empty
+            ))
         }
 
         let candidates = Array(Set(knownRepositoryPaths.map(RepositoryIdentity.canonicalPath)))
@@ -447,11 +574,20 @@ enum GitRepositoryScanner {
                 !RepositoryScope.contains(path, in: ignoredPaths)
                     && normalizedRoots.contains { RepositoryIdentity.isSameOrDescendantPath(path, of: $0) }
             }
-        guard !candidates.isEmpty else { return nil }
+        guard !candidates.isEmpty else { return .invalidated }
 
         var readable: [String] = []
         var unavailable: [String] = []
-        for path in candidates {
+        for (index, path) in candidates.enumerated() {
+            if Task.isCancelled || Date() >= overallDeadline {
+                unavailable.append(contentsOf: candidates[index...])
+                return .reusable(RepositoryDiscoveryResult(
+                    readablePaths: Array(Set(readable)).sorted(),
+                    unavailablePaths: Array(Set(unavailable)).sorted(),
+                    mode: .incomplete,
+                    isComplete: false
+                ))
+            }
             switch repositoryAvailability(at: path) {
             case .repository:
                 readable.append(path)
@@ -460,15 +596,27 @@ enum GitRepositoryScanner {
             case .missing, .notRepository:
                 // A definitive disappearance invalidates the whole reuse set
                 // so a move or replacement can be discovered immediately.
-                return nil
+                return .invalidated
             }
         }
 
-        guard !readable.isEmpty || !unavailable.isEmpty else { return nil }
-        return RepositoryDiscoveryResult(
+        if Task.isCancelled || Date() >= overallDeadline {
+            return .reusable(RepositoryDiscoveryResult(
+                readablePaths: Array(Set(readable)).sorted(),
+                unavailablePaths: Array(Set(unavailable)).sorted(),
+                mode: .incomplete,
+                isComplete: false
+            ))
+        }
+
+        guard !readable.isEmpty || !unavailable.isEmpty else { return .invalidated }
+        let complete = unavailable.isEmpty
+        return .reusable(RepositoryDiscoveryResult(
             readablePaths: Array(Set(readable)).sorted(),
-            unavailablePaths: Array(Set(unavailable)).sorted()
-        )
+            unavailablePaths: Array(Set(unavailable)).sorted(),
+            mode: complete ? successMode : .incomplete,
+            isComplete: complete
+        ))
     }
 
     private static func walkDirectory(_ directory: String,
@@ -477,8 +625,10 @@ enum GitRepositoryScanner {
                                       ignoredPaths: Set<String>,
                                       discovered: inout Set<String>,
                                       unavailablePrefixes: inout Set<String>,
+                                      overallDeadline: Date,
+                                      traversalState: inout DiscoveryTraversalState,
                                       warnings: inout [String]) {
-        guard !Task.isCancelled else { return }
+        guard !traversalState.shouldStop(deadline: overallDeadline) else { return }
         guard depth <= config.maxDepth else { return }
 
         let directory = ScanLocationProvider.canonicalExistingFilePath(directory, resolveBuiltIn: true)
@@ -495,6 +645,7 @@ enum GitRepositoryScanner {
             return
         case .unavailable:
             unavailablePrefixes.insert(directory)
+            traversalState.markUnavailable()
             warnings.append("Repository path unavailable: \(directory)")
             return
         case .missing:
@@ -514,13 +665,14 @@ enum GitRepositoryScanner {
         } catch {
             if !isMissingFileError(error) {
                 unavailablePrefixes.insert(directory)
+                traversalState.markUnavailable()
                 warnings.append("Repository directory unavailable: \(directory)")
             }
             return
         }
 
         for entryURL in entries {
-            if Task.isCancelled { return }
+            if traversalState.shouldStop(deadline: overallDeadline) { return }
             let fullPath = ScanLocationProvider.canonicalExistingFilePath(entryURL.path, resolveBuiltIn: true)
             let entryName = entryURL.lastPathComponent
 
@@ -533,6 +685,7 @@ enum GitRepositoryScanner {
             } catch {
                 if !isMissingFileError(error) {
                     unavailablePrefixes.insert(fullPath)
+                    traversalState.markUnavailable()
                 }
                 continue
             }
@@ -544,6 +697,8 @@ enum GitRepositoryScanner {
                           ignoredPaths: ignoredPaths,
                           discovered: &discovered,
                           unavailablePrefixes: &unavailablePrefixes,
+                          overallDeadline: overallDeadline,
+                          traversalState: &traversalState,
                           warnings: &warnings)
         }
     }
@@ -600,7 +755,9 @@ enum GitRepositoryScanner {
                                              warnings: inout [String],
                                              overallDeadline: Date,
                                              previousSnapshots: [RepositorySnapshot],
-                                             previousUnavailableSinceByPath: [String: String]) async -> [RepositorySnapshot] {
+                                             previousUnavailableSinceByPath: [String: String],
+                                             metrics: ScanMetricsCollector,
+                                             gitCommandRunner: @escaping GitCommandRunner) async -> [RepositorySnapshot] {
         guard !paths.isEmpty else { return [] }
 
         var previousByPath: [String: RepositorySnapshot] = [:]
@@ -616,33 +773,16 @@ enum GitRepositoryScanner {
         }
         var resultsByIndex: [Int: SnapshotReadResult] = [:]
 
-        // Filter out slow repos
-        let (activePaths, skippedPaths) = await filterSlowRepos(paths)
-        for skipped in skippedPaths {
-            let index = paths.firstIndex(of: skipped) ?? 0
-            let canonicalPath = RepositoryIdentity.canonicalPath(skipped)
-            let previous = previousByPath[canonicalPath]
-            let fallback = failedSnapshot(
-                for: canonicalPath,
-                previousSnapshot: previous,
-                unavailableSince: previousUnavailableSinceByPath[canonicalPath],
-                errorMessage: "扫描已跳过"
-            )
-            resultsByIndex[index] = SnapshotReadResult(
-                index: index,
-                snapshot: fallback,
-                elapsed: 0
-            )
-            warnings.append(
-                previous == nil
-                    ? "扫描已跳过：\(skipped)"
-                    : "扫描已跳过：保留 \((skipped as NSString).lastPathComponent) 的上次结果"
-            )
-        }
+        // Preserve each repository's original index so task completion never
+        // performs an O(n) lookup in the full path list.
+        let indexedPaths = Array(paths.enumerated())
 
         // Keep at most maxConcurrentGitOps read tasks in flight. Each task
         // invokes one Git command at a time, so this is also the process cap.
-        let concurrency = max(1, config.maxConcurrentGitOps)
+        let concurrency = min(
+            maximumConcurrentGitOps,
+            max(1, config.maxConcurrentGitOps)
+        )
         var nextIndex = 0
         var timedOut = false
         var cancelled = false
@@ -655,9 +795,8 @@ enum GitRepositoryScanner {
             }
 
             func addNextTask() {
-                guard nextIndex < activePaths.count else { return }
-                let index = nextIndex
-                let path = activePaths[index]
+                guard nextIndex < indexedPaths.count else { return }
+                let (originalIndex, path) = indexedPaths[nextIndex]
                 let canonicalPath = RepositoryIdentity.canonicalPath(path)
                 let previousSnapshot = previousByPath[canonicalPath]
                 let unavailableSince = previousUnavailableSinceByPath[canonicalPath]
@@ -672,19 +811,21 @@ enum GitRepositoryScanner {
                         config: config,
                         overallDeadline: overallDeadline,
                         previousSnapshot: previousSnapshot,
-                        unavailableSince: unavailableSince
+                        unavailableSince: unavailableSince,
+                        metrics: metrics,
+                        gitCommandRunner: gitCommandRunner
                     ) else {
                         return nil
                     }
                     return SnapshotReadResult(
-                        index: paths.firstIndex(of: path) ?? index,
+                        index: originalIndex,
                         snapshot: snapshot,
                         elapsed: Date().timeIntervalSince(startedAt)
                     )
                 }
             }
 
-            for _ in 0..<min(concurrency, activePaths.count) {
+            for _ in 0..<min(concurrency, indexedPaths.count) {
                 addNextTask()
             }
 
@@ -724,7 +865,6 @@ enum GitRepositoryScanner {
         for (index, path) in paths.enumerated() {
             if let result = resultsByIndex[index] {
                 if result.elapsed > 3.0 {
-                    await trackSlowRepo(path, skipSeconds: config.slowReposkipSeconds)
                     warnings.append("Slow repo: \(result.snapshot.name) (\(String(format: "%.1f", result.elapsed))s)")
                 }
                 results.append(result.snapshot)
@@ -754,23 +894,15 @@ enum GitRepositoryScanner {
         return results
     }
 
-    // MARK: - Slow repo tracking
-
-    private static func filterSlowRepos(_ paths: [String]) async -> (active: [String], skipped: [String]) {
-        await slowTracker.filterActive(paths)
-    }
-
-    private static func trackSlowRepo(_ path: String, skipSeconds: TimeInterval) async {
-        await slowTracker.markSlow(path, skipSeconds: skipSeconds)
-    }
-
     // MARK: - Single snapshot
 
     private static func readSingleSnapshot(repoPath: String,
                                            config: ScanConfig,
                                            overallDeadline: Date? = nil,
                                            previousSnapshot: RepositorySnapshot? = nil,
-                                           unavailableSince: String? = nil) -> RepositorySnapshot? {
+                                           unavailableSince: String? = nil,
+                                           metrics: ScanMetricsCollector,
+                                           gitCommandRunner: GitCommandRunner) -> RepositorySnapshot? {
         let repoPath = RepositoryIdentity.canonicalPath(repoPath)
         let name = (repoPath as NSString).lastPathComponent
         let id = RepositoryIdentity.id(for: repoPath)
@@ -781,19 +913,29 @@ enum GitRepositoryScanner {
         }
 
         guard !Task.isCancelled else { return nil }
+        metrics.recordRepositoryRead()
 
-        guard let statusOutput = ProcessRunner.run(
-            arguments: ["status", "--short", "--branch"],
+        let statusResult = runGitCommand(
+            arguments: ["status", "--porcelain=v2", "--branch"],
             workingDirectory: repoPath,
             timeout: commandTimeout(),
+            kind: .status,
+            metrics: metrics,
+            gitCommandRunner: gitCommandRunner,
             isCancelled: cancellationCheck
-        ) else {
-            guard !Task.isCancelled else { return nil }
+        )
+        let statusOutput: String
+        switch statusResult {
+        case .success(let output):
+            statusOutput = output
+        case .cancelled:
+            return nil
+        case .nonZero, .timeout, .launch, .unavailable, .outputLimit:
             return failedSnapshot(
                 for: repoPath,
                 previousSnapshot: previousSnapshot,
                 unavailableSince: unavailableSince,
-                errorMessage: "读取失败"
+                errorMessage: statusFailureMessage(statusResult)
             )
         }
 
@@ -806,27 +948,74 @@ enum GitRepositoryScanner {
         let status: RepositoryStatus = changedCount > 0 ? .changed : .clean
         let risk = RiskHintEngine.assess(changedFiles: changedFiles)
 
-        let commitOutput = ProcessRunner.run(
-            arguments: ["log", "-1", "--pretty=%H%x00%cI%x00%s"],
-            workingDirectory: repoPath,
-            timeout: commandTimeout(),
-            isCancelled: cancellationCheck
-        )
-        let commitMetadata = GitStatusParser.parseLastCommitMetadata(commitOutput)
-        let hasNoCommits = statusOutput.contains("No commits yet on ")
+        let hasNoCommits = branchMetadata.hasNoCommits
+            || statusOutput.contains("No commits yet on ")
             || statusOutput.contains("Initial commit on ")
-        let lastCommitMetadataAvailable = commitMetadata != nil || hasNoCommits
-        let lastCommitAt = commitMetadata?.committedAt
-            ?? (hasNoCommits ? nil : previousSnapshot?.lastChangedAt)
-        let lastCommitID = commitMetadata?.commitID
-            ?? (hasNoCommits ? nil : previousSnapshot?.lastCommitID)
-        let lastCommitSummary = commitMetadata?.summary
-            ?? (hasNoCommits ? nil : previousSnapshot?.lastCommitSummary)
+        let canReuseCommitMetadata = branchMetadata.headOID != nil
+            && branchMetadata.headOID == previousSnapshot?.lastCommitID
+            && previousSnapshot?.lastCommitMetadataAvailable == true
+
+        let commitMetadata: GitStatusParser.LastCommitMetadata?
+        let lastCommitMetadataAvailable: Bool
+        if hasNoCommits {
+            commitMetadata = nil
+            lastCommitMetadataAvailable = true
+        } else if canReuseCommitMetadata {
+            commitMetadata = GitStatusParser.LastCommitMetadata(
+                commitID: previousSnapshot?.lastCommitID,
+                committedAt: previousSnapshot?.lastChangedAt,
+                summary: previousSnapshot?.lastCommitSummary
+            )
+            lastCommitMetadataAvailable = true
+        } else {
+            let logResult = runGitCommand(
+                arguments: ["log", "-1", "--pretty=%H%x00%cI%x00%s"],
+                workingDirectory: repoPath,
+                timeout: commandTimeout(),
+                kind: .log,
+                metrics: metrics,
+                gitCommandRunner: gitCommandRunner,
+                isCancelled: cancellationCheck
+            )
+            switch logResult {
+            case .success(let output):
+                commitMetadata = GitStatusParser.parseLastCommitMetadata(output)
+                lastCommitMetadataAvailable = commitMetadata != nil
+            case .cancelled:
+                return nil
+            case .nonZero, .timeout, .launch, .unavailable, .outputLimit:
+                commitMetadata = nil
+                lastCommitMetadataAvailable = false
+            }
+        }
+
+        let lastCommitAt: String?
+        let lastCommitID: String?
+        let lastCommitSummary: String?
+        if hasNoCommits {
+            lastCommitAt = nil
+            lastCommitID = nil
+            lastCommitSummary = nil
+        } else if lastCommitMetadataAvailable {
+            lastCommitAt = commitMetadata?.committedAt
+            lastCommitID = commitMetadata?.commitID
+            lastCommitSummary = commitMetadata?.summary
+        } else {
+            // Status already proved that HEAD differs, so reusing the old
+            // commit time/summary would present stale metadata as current.
+            // Keep the new OID from porcelain v2 and mark the descriptive
+            // fields unavailable until a later retry succeeds.
+            lastCommitAt = nil
+            lastCommitID = branchMetadata.headOID
+            lastCommitSummary = nil
+        }
 
         guard !Task.isCancelled else { return nil }
 
         // Preview capped at 5
-        let preview = Array(changedFiles.prefix(config.changedPreviewLimit))
+        let preview = Array(changedFiles.prefix(config.changedPreviewLimit)).map {
+            ($0 as NSString).lastPathComponent
+        }
         let aheadCount = branchMetadata.hasUpstream ? branchMetadata.aheadCount : nil
         let behindCount = branchMetadata.hasUpstream ? branchMetadata.behindCount : nil
         let scannedAt = DateFormatting.nowISO()
@@ -1043,7 +1232,106 @@ enum GitRepositoryScanner {
 
     // MARK: - Helpers
 
-    private static func discoveryCacheKey(for roots: [String]) -> String {
-        roots.sorted().joined(separator: "\n")
+    private static func runGitCommand(
+        arguments: [String],
+        workingDirectory: String,
+        timeout: TimeInterval,
+        kind: GitCommandKind,
+        metrics: ScanMetricsCollector,
+        gitCommandRunner: GitCommandRunner,
+        isCancelled: @escaping @Sendable () -> Bool
+    ) -> ProcessRunResult {
+        let token = metrics.recordGitCommandStart(kind: kind)
+        let result = gitCommandRunner(
+            arguments,
+            workingDirectory,
+            timeout,
+            ProcessRunner.defaultOutputLimit,
+            isCancelled
+        )
+        metrics.recordGitCommandFinish(token, result: result)
+        return result
+    }
+
+    private static func statusFailureMessage(_ result: ProcessRunResult) -> String {
+        switch result {
+        case .timeout:
+            return "读取超时"
+        case .outputLimit:
+            return "状态输出过大"
+        case .cancelled:
+            return "扫描已取消"
+        case .success, .nonZero, .launch, .unavailable:
+            return "读取失败"
+        }
+    }
+
+    private static func appendDiscoveryInterruptionWarning(
+        for result: RepositoryDiscoveryResult,
+        overallDeadline: Date,
+        warnings: inout [String]
+    ) {
+        guard !result.isComplete else { return }
+        warnings.append(incompleteDiscoveryWarning)
+        if Task.isCancelled {
+            warnings.append("Repository discovery cancelled; partial results were retained.")
+        } else if Date() >= overallDeadline {
+            warnings.append("Repository discovery timeout reached; partial results were retained.")
+        }
+    }
+
+    private static func repositoryDiscoveryMode(_ mode: DiscoveryMode) -> RepositoryDiscoveryMode {
+        switch mode {
+        case .empty: return .empty
+        case .reusedKnown: return .reusedKnown
+        case .reusedCache: return .reusedCache
+        case .walked: return .walked
+        case .incomplete: return .incomplete
+        }
+    }
+
+    private static func logScanSummary(_ metrics: ScanMetrics, kind: String) {
+        let successfulGitCommands = max(
+            0,
+            metrics.gitCommandCount
+                - metrics.gitTimeoutCount
+                - metrics.gitCancellationCount
+                - metrics.gitFailureCount
+        )
+        let summary = String(
+            format: "scan kind=%@ elapsed_ms=%.0f discovery=%@ discovery_ms=%.0f repos=%d reads=%d reused=%d git_total=%d git_status=%d git_log=%d git_success=%d git_timeout=%d git_cancelled=%d git_failure=%d git_peak=%d full_scan_peak=%d",
+            kind,
+            metrics.elapsed * 1_000,
+            discoveryModeName(metrics.discoveryMode),
+            metrics.discoveryElapsed * 1_000,
+            metrics.discoveredRepositoryCount,
+            metrics.repositoryReadCount,
+            metrics.reusedRepositorySnapshotCount,
+            metrics.gitCommandCount,
+            metrics.gitStatusCommandCount,
+            metrics.gitLogCommandCount,
+            successfulGitCommands,
+            metrics.gitTimeoutCount,
+            metrics.gitCancellationCount,
+            metrics.gitFailureCount,
+            metrics.peakConcurrentGitCommandCount,
+            metrics.peakConcurrentFullScanCount
+        )
+        logger.info("\(summary, privacy: .public)")
+    }
+
+    private static func discoveryModeName(_ mode: RepositoryDiscoveryMode) -> String {
+        switch mode {
+        case .empty: return "empty"
+        case .reusedKnown: return "reused_known"
+        case .reusedCache: return "reused_cache"
+        case .walked: return "walked"
+        case .incomplete: return "incomplete"
+        }
+    }
+
+    private static func discoveryCacheKey(for roots: [String], maxDepth: Int) -> String {
+        (["rules=\(discoveryRulesVersion)", "maxDepth=\(maxDepth)"] + roots.sorted())
+            .joined(separator: "\n")
     }
 }

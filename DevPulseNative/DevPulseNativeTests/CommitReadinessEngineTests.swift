@@ -1479,6 +1479,143 @@ struct CommitReadinessEngineTests {
         #expect(sorted.map(\.name) == ["pinned", "error", "ahead", "changed", "behind", "clean"])
     }
 
+    @Test func repositoryListQuerySearchesNamesAndPathsFromSnapshots() {
+        let repositories = [
+            snapshot(
+                id: "path-match",
+                name: "Workspace",
+                path: "/Users/test/Client/DevPulse",
+                modified: 0,
+                status: .clean
+            ),
+            snapshot(
+                id: "name-match",
+                name: "CaféKit",
+                path: "/Users/test/Libraries/CafeKit",
+                modified: 0,
+                status: .clean,
+                isPinned: true
+            ),
+            snapshot(id: "other", name: "Other", modified: 0, status: .clean)
+        ]
+
+        let nameMatches = RepositoryListQuery.apply(
+            to: repositories,
+            searchText: "  cafe  ",
+            filter: .all
+        )
+        let pathMatches = RepositoryListQuery.apply(
+            to: repositories,
+            searchText: "/CLIENT/devpulse",
+            filter: .all
+        )
+        let noMatches = RepositoryListQuery.apply(
+            to: repositories,
+            searchText: "missing",
+            filter: .all
+        )
+
+        #expect(nameMatches.map(\.id) == ["name-match"])
+        #expect(pathMatches.map(\.id) == ["path-match"])
+        #expect(noMatches.isEmpty)
+    }
+
+    @Test func repositoryListFiltersUseCanonicalSnapshotSemantics() {
+        let clean = snapshot(
+            id: "clean",
+            name: "clean",
+            modified: 0,
+            ahead: 0,
+            behind: 0,
+            hasUpstream: true,
+            status: .clean
+        )
+        let noUpstream = snapshot(
+            id: "no-upstream",
+            name: "no-upstream",
+            modified: 0,
+            ahead: 0,
+            behind: 0,
+            hasUpstream: false,
+            status: .clean
+        )
+        let changed = snapshot(
+            id: "changed",
+            name: "changed",
+            modified: 2,
+            ahead: 0,
+            behind: 0,
+            hasUpstream: true
+        )
+        let ahead = snapshot(
+            id: "ahead",
+            name: "ahead",
+            modified: 0,
+            ahead: 2,
+            behind: 0,
+            hasUpstream: true,
+            status: .clean
+        )
+        let retained = snapshot(
+            id: "retained",
+            name: "retained",
+            modified: 3,
+            dataSource: .lastSuccessful,
+            lastSuccessfulScanAt: "2026-06-18T00:00:00Z",
+            errorMessage: "读取超时"
+        )
+        let repositories = [clean, noUpstream, changed, ahead, retained]
+
+        func ids(for filter: RepositoryListFilter) -> Set<String> {
+            Set(RepositoryListQuery.apply(
+                to: repositories,
+                searchText: "",
+                filter: filter
+            ).map(\.id))
+        }
+
+        #expect(ids(for: .all) == ["clean", "no-upstream", "changed", "ahead", "retained"])
+        #expect(ids(for: .needsAttention) == ["changed", "ahead", "retained"])
+        #expect(ids(for: .localChanges) == ["changed"])
+        #expect(ids(for: .unsynchronized) == ["no-upstream", "ahead"])
+        #expect(ids(for: .errors) == ["retained"])
+    }
+
+    @Test func repositoryListPreferencesRoundTripAndRecoverFromInvalidData() throws {
+        let suiteName = "DevPulseTests.RepositoryListPreferences.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let store = RepositoryListPreferencesStore(defaults: defaults)
+        #expect(store.load() == .defaultValue)
+
+        let expected = RepositoryListPreferences(
+            searchText: "client/repository",
+            filter: .unsynchronized
+        )
+        store.save(expected)
+
+        let rebuiltStore = RepositoryListPreferencesStore(defaults: defaults)
+        #expect(rebuiltStore.load() == expected)
+
+        defaults.set(
+            Data("not-json".utf8),
+            forKey: RepositoryListPreferencesStore.storageKey
+        )
+        #expect(rebuiltStore.load() == .defaultValue)
+
+        defaults.set(
+            try JSONEncoder().encode(RepositoryListPreferences(
+                version: RepositoryListPreferences.currentVersion + 1,
+                searchText: "future",
+                filter: .errors
+            )),
+            forKey: RepositoryListPreferencesStore.storageKey
+        )
+        #expect(rebuiltStore.load() == .defaultValue)
+    }
+
     @Test func overviewFocusPrioritizesWidgetTrustErrors() {
         var diagnostics = DiagnosticsSnapshot()
         diagnostics.scanRoots = ["/tmp/projects"]
