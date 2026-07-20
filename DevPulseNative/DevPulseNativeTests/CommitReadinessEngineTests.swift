@@ -2179,6 +2179,74 @@ struct CommitReadinessEngineTests {
         }
     }
 
+    @Test func repositoryDetailSelectionResolvesTheLatestTrustedSnapshotAfterRefreshOrRetry() {
+        let selected = snapshot(
+            id: "before-refresh",
+            name: "Project",
+            path: "/tmp/devpulse-detail-refresh/Project",
+            modified: 1,
+            lastScannedAt: "2026-07-15T10:00:00Z"
+        )
+        let refreshed = snapshot(
+            id: selected.id,
+            name: "Project",
+            path: selected.path,
+            modified: 4,
+            lastScannedAt: "2026-07-15T10:05:00Z"
+        )
+
+        let resolved = RepositoryDetailSnapshotResolver.resolve(
+            selection: RepositoryDetailSelection(repository: selected),
+            repositories: [refreshed]
+        )
+
+        #expect(resolved?.modifiedFileCount == 4)
+        #expect(resolved?.lastScannedAt == "2026-07-15T10:05:00Z")
+    }
+
+    @Test func repositoryDetailSelectionFollowsIdentityMigrationByCanonicalPath() {
+        let legacy = snapshot(
+            id: "legacy-id",
+            name: "Project",
+            path: "/tmp/devpulse-detail-migration/Project"
+        )
+        let migrated = snapshot(
+            id: "repo-v1-migrated",
+            name: "Project",
+            path: legacy.path,
+            modified: 2
+        )
+        let selection = RepositoryDetailSelection(repository: legacy)
+
+        #expect(
+            RepositoryDetailSnapshotResolver.resolve(
+                selection: selection,
+                repositories: [migrated]
+            )?.id == migrated.id
+        )
+        #expect(
+            RepositoryDetailSnapshotResolver.currentSelection(
+                for: selection,
+                repositories: [migrated]
+            ) == RepositoryDetailSelection(repository: migrated)
+        )
+    }
+
+    @Test func repositoryDetailSelectionSafelyClearsWhenRepositoryDisappears() {
+        let selected = snapshot(
+            id: "removed",
+            name: "Project",
+            path: "/tmp/devpulse-detail-removed/Project"
+        )
+
+        #expect(
+            RepositoryDetailSnapshotResolver.currentSelection(
+                for: RepositoryDetailSelection(repository: selected),
+                repositories: []
+            ) == nil
+        )
+    }
+
     @Test func cleanRepositoryIsClean() {
         let result = CommitReadinessEngine.assess(snapshot: snapshot(status: .clean))
 

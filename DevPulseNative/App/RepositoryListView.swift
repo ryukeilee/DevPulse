@@ -7,12 +7,45 @@ private enum RepositoryListMetrics {
     static let groupCornerRadius = DevPulseVisualStyle.sectionCornerRadius
 }
 
+/// A detail sheet stores an identity reference rather than a frozen payload.
+/// Its contents are always resolved from the scheduler's trusted snapshot.
+struct RepositoryDetailSelection: Identifiable, Equatable {
+    let id: String
+    let path: String
+
+    init(repository: RepositorySnapshot) {
+        id = repository.id
+        path = RepositoryIdentity.canonicalPath(repository.path)
+    }
+}
+
+enum RepositoryDetailSnapshotResolver {
+    static func resolve(
+        selection: RepositoryDetailSelection,
+        repositories: [RepositorySnapshot]
+    ) -> RepositorySnapshot? {
+        let selectedPath = RepositoryIdentity.canonicalPath(selection.path)
+        return repositories.first {
+            RepositoryIdentity.canonicalPath($0.path) == selectedPath
+        }
+    }
+
+    /// Safely follow an ID migration through the canonical repository path.
+    /// A missing repository returns nil so callers cannot retain stale details.
+    static func currentSelection(
+        for selection: RepositoryDetailSelection,
+        repositories: [RepositorySnapshot]
+    ) -> RepositoryDetailSelection? {
+        resolve(selection: selection, repositories: repositories).map(RepositoryDetailSelection.init)
+    }
+}
+
 struct RepositoryListView: View {
     @EnvironmentObject var scheduler: ScanScheduler
     private let preferencesStore: RepositoryListPreferencesStore
     @State private var searchText: String
     @State private var selectedFilter: RepositoryListFilter
-    @State private var selectedRepository: RepositorySnapshot?
+    @State private var selectedRepository: RepositoryDetailSelection?
     @State private var pendingIgnoreRepository: RepositorySnapshot?
 
     init(preferencesStore: RepositoryListPreferencesStore = RepositoryListPreferencesStore()) {
@@ -44,7 +77,7 @@ struct RepositoryListView: View {
                         ForEach(repositories) { repo in
                             HStack(alignment: .top, spacing: 0) {
                                 Button {
-                                    selectedRepository = repo
+                                    selectedRepository = RepositoryDetailSelection(repository: repo)
                                 } label: {
                                     RepositoryRow(repo: repo)
                                 }
@@ -115,8 +148,15 @@ struct RepositoryListView: View {
         .onChange(of: selectedFilter) { _, _ in
             persistListPreferences()
         }
-        .sheet(item: $selectedRepository) { repository in
-            RepositoryDetailView(repository: repository)
+        .onChange(of: scheduler.lastResult.repositories) { _, repositories in
+            guard let selectedRepository else { return }
+            self.selectedRepository = RepositoryDetailSnapshotResolver.currentSelection(
+                for: selectedRepository,
+                repositories: repositories
+            )
+        }
+        .sheet(item: $selectedRepository) { selection in
+            RepositoryDetailView(selection: selection)
         }
         .alert(item: $pendingIgnoreRepository) { repository in
             Alert(
