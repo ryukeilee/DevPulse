@@ -2127,6 +2127,13 @@ final class ScanScheduler: ObservableObject {
 
             let pinned = applyPins(restoredSnapshot)
             lastResult = pinned
+            if pinned.repositories.contains(where: { $0.workspaceKind == nil }) {
+                // Snapshots written before workspace classification existed
+                // need one prompt refresh. The scanner can then inspect the
+                // known repositories and discover registered linked
+                // worktrees without waiting for the normal discovery TTL.
+                requiresStartupScopeRefresh = true
+            }
             diagnostics.lastSnapshotStoreTrigger = "startup"
             diagnostics.lastSnapshotStoreState = startupWriteError == nil ? .restored : .failed
             diagnostics.lastSnapshotStoreDetail = startupWriteError

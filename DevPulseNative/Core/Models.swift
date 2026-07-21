@@ -109,6 +109,7 @@ enum RepositoryIdentity {
             id: id(for: path),
             name: snapshot.name,
             path: path,
+            workspaceKind: snapshot.workspaceKind,
             branch: snapshot.branch,
             status: snapshot.status,
             modifiedFileCount: snapshot.modifiedFileCount,
@@ -203,11 +204,11 @@ enum RepositoryIdentity {
 
     private static func mergeDuplicate(_ lhs: RepositorySnapshot,
                                        _ rhs: RepositorySnapshot) -> RepositorySnapshot {
-        guard !lhs.isPinned || rhs.isPinned else { return lhs }
         return RepositorySnapshot(
             id: lhs.id,
             name: lhs.name,
             path: lhs.path,
+            workspaceKind: lhs.workspaceKind ?? rhs.workspaceKind,
             branch: lhs.branch,
             status: lhs.status,
             modifiedFileCount: lhs.modifiedFileCount,
@@ -233,7 +234,7 @@ enum RepositoryIdentity {
             lastActivityAt: lhs.lastActivityAt,
             unavailableSince: lhs.unavailableSince,
             errorMessage: lhs.errorMessage,
-            isPinned: true
+            isPinned: lhs.isPinned || rhs.isPinned
         )
     }
 }
@@ -251,13 +252,20 @@ enum RepositoryIdentityMigration {
     static func migrate(snapshot: AppGroupData,
                         pinnedIDs: Set<String>) -> RepositoryIdentityMigrationResult {
         var pathsByLegacyID: [String: Set<String>] = [:]
-        var pinsFromSnapshot: Set<String> = []
         for repository in snapshot.repositories {
             let path = RepositoryIdentity.canonicalPath(repository.path)
             pathsByLegacyID[repository.id, default: []].insert(path)
-            if repository.isPinned {
-                pinsFromSnapshot.insert(RepositoryIdentity.id(for: path))
-            }
+        }
+
+        // A legacy ID that points at multiple working trees cannot tell us
+        // which one the user meant to pin. Older snapshots may have copied
+        // the same `isPinned` value onto every colliding row, so only trust a
+        // row-level pin when that legacy ID resolves to exactly one path.
+        var pinsFromSnapshot: Set<String> = []
+        for repository in snapshot.repositories where repository.isPinned {
+            let path = RepositoryIdentity.canonicalPath(repository.path)
+            guard pathsByLegacyID[repository.id]?.count == 1 else { continue }
+            pinsFromSnapshot.insert(RepositoryIdentity.id(for: path))
         }
 
         var migratedPins = pinsFromSnapshot
@@ -438,6 +446,33 @@ enum RepositoryStatus: String, Codable {
     case error = "error"
 }
 
+/// Describes the working-tree role represented by one repository snapshot.
+///
+/// Identity remains based on the canonical working-tree path. Multiple
+/// worktrees can share Git object storage while still having independent
+/// branches, local changes, pins, and ignore state.
+enum RepositoryWorkspaceKind: String, Codable, Equatable, Sendable {
+    case standalone
+    case mainWorktree
+    case linkedWorktree
+
+    var displayName: String {
+        switch self {
+        case .standalone: return "普通仓库"
+        case .mainWorktree: return "主工作区"
+        case .linkedWorktree: return "Linked worktree"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .standalone: return "shippingbox"
+        case .mainWorktree: return "square.stack.3d.up"
+        case .linkedWorktree: return "arrow.triangle.branch"
+        }
+    }
+}
+
 /// Describes whether repository values came from the latest scan attempt.
 ///
 /// The persisted property is optional on `RepositorySnapshot` so schema-v1
@@ -475,6 +510,7 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
     let id: String
     let name: String
     let path: String
+    let workspaceKind: RepositoryWorkspaceKind?
     let branch: String
     let status: RepositoryStatus
     let modifiedFileCount: Int
@@ -505,6 +541,7 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
     init(id: String,
          name: String,
          path: String,
+         workspaceKind: RepositoryWorkspaceKind? = nil,
          branch: String,
          status: RepositoryStatus,
          modifiedFileCount: Int,
@@ -534,6 +571,7 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
         self.id = id
         self.name = name
         self.path = path
+        self.workspaceKind = workspaceKind
         self.branch = branch
         self.status = status
         self.modifiedFileCount = modifiedFileCount
@@ -569,6 +607,7 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
         lhs.id == rhs.id
             && lhs.name == rhs.name
             && lhs.path == rhs.path
+            && lhs.workspaceKind == rhs.workspaceKind
             && lhs.branch == rhs.branch
             && lhs.status == rhs.status
             && lhs.modifiedFileCount == rhs.modifiedFileCount
@@ -678,7 +717,8 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
     func retainingLastSuccessfulData(
         attemptedAt: String,
         errorMessage: String,
-        unavailableSince fallbackUnavailableSince: String? = nil
+        unavailableSince fallbackUnavailableSince: String? = nil,
+        workspaceKind overrideWorkspaceKind: RepositoryWorkspaceKind? = nil
     ) -> RepositorySnapshot {
         let successfulAt = resolvedLastSuccessfulScanAt
         let retainedSource: RepositoryDataSource = successfulAt == nil
@@ -689,6 +729,7 @@ struct RepositorySnapshot: Codable, Identifiable, Equatable {
             id: id,
             name: name,
             path: path,
+            workspaceKind: overrideWorkspaceKind ?? workspaceKind,
             branch: branch,
             status: .error,
             modifiedFileCount: modifiedFileCount,

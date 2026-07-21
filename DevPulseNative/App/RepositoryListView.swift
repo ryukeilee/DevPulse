@@ -380,6 +380,20 @@ struct RepositoryRow: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
 
+                    if let workspaceKind = repo.workspaceKind {
+                        Text(workspaceKind.displayName)
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(Color.secondary.opacity(0.1))
+                            )
+                            .fixedSize()
+                            .accessibilityLabel("工作区类型：\(workspaceKind.displayName)")
+                    }
+
                     if repo.isPinned {
                         Image(systemName: "pin.fill")
                             .font(.caption2.weight(.semibold))

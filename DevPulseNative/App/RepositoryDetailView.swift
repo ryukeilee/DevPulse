@@ -350,6 +350,13 @@ struct RepositoryDetailView: View {
 
     private var overviewSection: some View {
         detailCard(title: "仓库状态") {
+            if let workspaceKind = activeRepository.workspaceKind {
+                detailRow(
+                    title: "工作区",
+                    value: workspaceKind.displayName,
+                    systemImage: workspaceKind.systemImage
+                )
+            }
             detailRow(title: "当前分支", value: presentation.branch, systemImage: "arrow.triangle.branch")
             detailRow(title: "最近提交", value: presentation.latestCommit, systemImage: "clock")
             detailRow(title: "同步状态", value: presentation.synchronization, systemImage: "arrow.up.arrow.down")
