@@ -2179,6 +2179,74 @@ struct CommitReadinessEngineTests {
         }
     }
 
+    @Test func repositoryDetailSelectionResolvesTheLatestTrustedSnapshotAfterRefreshOrRetry() {
+        let selected = snapshot(
+            id: "before-refresh",
+            name: "Project",
+            path: "/tmp/devpulse-detail-refresh/Project",
+            modified: 1,
+            lastScannedAt: "2026-07-15T10:00:00Z"
+        )
+        let refreshed = snapshot(
+            id: selected.id,
+            name: "Project",
+            path: selected.path,
+            modified: 4,
+            lastScannedAt: "2026-07-15T10:05:00Z"
+        )
+
+        let resolved = RepositoryDetailSnapshotResolver.resolve(
+            selection: RepositoryDetailSelection(repository: selected),
+            repositories: [refreshed]
+        )
+
+        #expect(resolved?.modifiedFileCount == 4)
+        #expect(resolved?.lastScannedAt == "2026-07-15T10:05:00Z")
+    }
+
+    @Test func repositoryDetailSelectionFollowsIdentityMigrationByCanonicalPath() {
+        let legacy = snapshot(
+            id: "legacy-id",
+            name: "Project",
+            path: "/tmp/devpulse-detail-migration/Project"
+        )
+        let migrated = snapshot(
+            id: "repo-v1-migrated",
+            name: "Project",
+            path: legacy.path,
+            modified: 2
+        )
+        let selection = RepositoryDetailSelection(repository: legacy)
+
+        #expect(
+            RepositoryDetailSnapshotResolver.resolve(
+                selection: selection,
+                repositories: [migrated]
+            )?.id == migrated.id
+        )
+        #expect(
+            RepositoryDetailSnapshotResolver.currentSelection(
+                for: selection,
+                repositories: [migrated]
+            ) == RepositoryDetailSelection(repository: migrated)
+        )
+    }
+
+    @Test func repositoryDetailSelectionSafelyClearsWhenRepositoryDisappears() {
+        let selected = snapshot(
+            id: "removed",
+            name: "Project",
+            path: "/tmp/devpulse-detail-removed/Project"
+        )
+
+        #expect(
+            RepositoryDetailSnapshotResolver.currentSelection(
+                for: RepositoryDetailSelection(repository: selected),
+                repositories: []
+            ) == nil
+        )
+    }
+
     @Test func cleanRepositoryIsClean() {
         let result = CommitReadinessEngine.assess(snapshot: snapshot(status: .clean))
 
@@ -2572,6 +2640,297 @@ struct CommitReadinessEngineTests {
         #expect(refreshedRepo.changedFileCount == 1)
     }
 
+    @Test func gitWorktreeListParserHandlesNULTerminatedPathsAndBareRepositories() {
+        let output = [
+            "worktree /tmp/Main Project",
+            "HEAD 0123456789abcdef",
+            "branch refs/heads/main",
+            "",
+            "worktree /tmp/任务 worktree",
+            "HEAD fedcba9876543210",
+            "detached",
+            "locked managed by tool",
+            "",
+            "worktree /tmp/project.git",
+            "bare",
+            ""
+        ].joined(separator: "\0")
+
+        #expect(GitWorktreeListParser.parse(output) == [
+            GitWorktreeListRecord(path: "/tmp/Main Project", isBare: false),
+            GitWorktreeListRecord(path: "/tmp/任务 worktree", isBare: false),
+            GitWorktreeListRecord(path: "/tmp/project.git", isBare: true)
+        ])
+        #expect(GitWorktreeListParser.parse("HEAD without a worktree record\0").isEmpty)
+    }
+
+    @Test func gitScannerDiscoversClassifiesAndScopesHiddenLinkedWorktreeIndependently() async throws {
+        let root = try temporaryDirectory(named: "scanner-linked-worktree")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let externalRoot = try temporaryDirectory(named: "scanner-external-worktree")
+        defer { try? FileManager.default.removeItem(at: externalRoot) }
+        let main = root.appendingPathComponent("Project")
+        let linkedParent = main.appendingPathComponent(".codex/worktrees")
+        let linked = linkedParent.appendingPathComponent("task one")
+        let externalLinked = externalRoot.appendingPathComponent("outside task")
+        try createCommittedRepository(at: main)
+        try ".codex/\n".write(
+            to: main.appendingPathComponent(".git/info/exclude"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try FileManager.default.createDirectory(at: linkedParent, withIntermediateDirectories: true)
+        try runGit(
+            ["worktree", "add", "-b", "codex/task-\(UUID().uuidString)", linked.path],
+            in: main
+        )
+        try runGit(
+            ["worktree", "add", "-b", "codex/outside-\(UUID().uuidString)", externalLinked.path],
+            in: main
+        )
+        try "linked only\n".write(
+            to: linked.appendingPathComponent("linked-only.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let canonicalMain = RepositoryIdentity.canonicalPath(main.path)
+        let canonicalLinked = RepositoryIdentity.canonicalPath(linked.path)
+        let canonicalExternalLinked = RepositoryIdentity.canonicalPath(externalLinked.path)
+        let legacyMain = snapshot(
+            id: RepositoryIdentity.id(for: canonicalMain),
+            name: "Project",
+            path: canonicalMain,
+            status: .clean
+        )
+        let legacySnapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-07-21T00:00:00Z",
+            writtenAt: "2026-07-21T00:00:00Z",
+            scanSummary: ScanSummary.build(from: [legacyMain]),
+            repositories: [legacyMain]
+        )
+        let upgradedKnownScope = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            knownRepositoryPaths: [canonicalMain],
+            previousSnapshot: legacySnapshot
+        )
+        #expect(
+            Set(upgradedKnownScope.data.repositories.map(\.path))
+                == Set([canonicalMain, canonicalLinked])
+        )
+        #expect(
+            upgradedKnownScope.data.repositories.first(where: { $0.path == canonicalMain })?.workspaceKind
+                == .mainWorktree
+        )
+        #expect(
+            upgradedKnownScope.data.repositories.first(where: { $0.path == canonicalLinked })?.workspaceKind
+                == .linkedWorktree
+        )
+
+        let baseline = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true,
+            previousSnapshot: upgradedKnownScope.data
+        )
+        let mainSnapshot = try #require(
+            baseline.data.repositories.first(where: { $0.path == canonicalMain })
+        )
+        let linkedSnapshot = try #require(
+            baseline.data.repositories.first(where: { $0.path == canonicalLinked })
+        )
+
+        #expect(baseline.data.repositories.count == 2)
+        #expect(Set(baseline.discoveredRepositoryPaths) == [canonicalMain, canonicalLinked])
+        #expect(!baseline.discoveredRepositoryPaths.contains(canonicalExternalLinked))
+        #expect(mainSnapshot.workspaceKind == .mainWorktree)
+        #expect(linkedSnapshot.workspaceKind == .linkedWorktree)
+        #expect(mainSnapshot.status == .clean)
+        #expect(linkedSnapshot.status == .changed)
+        #expect(mainSnapshot.id != linkedSnapshot.id)
+        #expect(mainSnapshot.id == RepositoryIdentity.id(for: canonicalMain))
+        #expect(linkedSnapshot.id == RepositoryIdentity.id(for: canonicalLinked))
+
+        let externalOnly = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [externalRoot.path],
+            forceRepositoryDiscovery: true
+        )
+        #expect(externalOnly.data.repositories.map(\.path) == [canonicalExternalLinked])
+        #expect(externalOnly.data.repositories.first?.workspaceKind == .linkedWorktree)
+
+        let pinnedMain = RepositoryIdentityMigration.migrate(
+            snapshot: baseline.data,
+            pinnedIDs: [mainSnapshot.id]
+        )
+        #expect(
+            pinnedMain.snapshot.repositories.first(where: { $0.path == canonicalMain })?.isPinned == true
+        )
+        #expect(
+            pinnedMain.snapshot.repositories.first(where: { $0.path == canonicalLinked })?.isPinned == false
+        )
+
+        let ignoredMain = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            ignoredRepositoryPaths: [canonicalMain],
+            forceRepositoryDiscovery: true,
+            previousSnapshot: baseline.data
+        )
+        #expect(ignoredMain.data.repositories.map(\.path) == [canonicalLinked])
+        #expect(ignoredMain.data.repositories.first?.workspaceKind == .linkedWorktree)
+
+        let ignoredLinked = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            ignoredRepositoryPaths: [canonicalLinked],
+            forceRepositoryDiscovery: true,
+            previousSnapshot: baseline.data
+        )
+        #expect(ignoredLinked.data.repositories.map(\.path) == [canonicalMain])
+        #expect(ignoredLinked.data.repositories.first?.workspaceKind == .mainWorktree)
+    }
+
+    @Test func gitScannerKeepsReadableRepositoryWhenWorktreeMetadataTimesOut() async throws {
+        let root = try temporaryDirectory(named: "scanner-worktree-timeout")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("separate-git-dir-repository")
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        try "gitdir: /tmp/unreadable-git-dir\n".write(
+            to: repository.appendingPathComponent(".git"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let metrics = ScanMetricsCollector()
+
+        let result = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true,
+            metrics: metrics,
+            gitCommandRunner: { arguments, _, _, _, _ in
+                switch arguments.first {
+                case "worktree":
+                    return .timeout
+                case "status":
+                    return .success(output: "# branch.oid (initial)\n# branch.head main")
+                default:
+                    Issue.record("Unexpected Git command: \(arguments)")
+                    return .nonZero(exitCode: 1)
+                }
+            }
+        )
+
+        #expect(result.data.repositories.count == 1)
+        #expect(result.data.repositories.first?.resolvedDataSource == .current)
+        #expect(result.data.repositories.first?.workspaceKind == nil)
+        #expect(result.warnings.contains(GitRepositoryScanner.incompleteWorktreeDiscoveryWarning))
+        #expect(GitRepositoryScanner.discoveryWasIncomplete(result.warnings))
+        #expect(metrics.snapshot().gitStatusCommandCount == 1)
+        #expect(metrics.snapshot().gitTimeoutCount == 1)
+    }
+
+    @Test func worktreeMetadataBudgetPreservesStatusReadsAcrossManyTimeouts() async throws {
+        let root = try temporaryDirectory(named: "scanner-worktree-timeout-budget")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repositoryCount = 12
+        for index in 0..<repositoryCount {
+            let repository = root.appendingPathComponent("repo-\(index)")
+            try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+            try "gitdir: /tmp/unreadable-git-dir-\(index)\n".write(
+                to: repository.appendingPathComponent(".git"),
+                atomically: true,
+                encoding: .utf8
+            )
+        }
+        let config = ScanConfig(
+            enabledBuiltInPaths: [],
+            customPaths: [],
+            maxDepth: 2,
+            changedPreviewLimit: 5,
+            maxConcurrentGitOps: 4,
+            gitCommandTimeout: 0.1,
+            scanTimeout: 1,
+            slowReposkipSeconds: 60,
+            activeRepoThreshold: 30
+        )
+        let metrics = ScanMetricsCollector()
+
+        let result = await GitRepositoryScanner.scan(
+            config: config,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true,
+            metrics: metrics,
+            gitCommandRunner: { arguments, _, timeout, _, _ in
+                switch arguments.first {
+                case "worktree":
+                    Thread.sleep(forTimeInterval: max(0, timeout))
+                    return .timeout
+                case "status":
+                    return .success(output: "# branch.oid (initial)\n# branch.head main")
+                default:
+                    Issue.record("Unexpected Git command: \(arguments)")
+                    return .nonZero(exitCode: 1)
+                }
+            }
+        )
+        let snapshot = metrics.snapshot()
+
+        #expect(result.data.repositories.count == repositoryCount)
+        #expect(result.data.repositories.allSatisfy { $0.resolvedDataSource == .current })
+        #expect(snapshot.gitStatusCommandCount == repositoryCount)
+        #expect(snapshot.gitTimeoutCount < repositoryCount)
+        #expect(GitRepositoryScanner.discoveryWasIncomplete(result.warnings))
+    }
+
+    @Test func gitScannerDetectsFirstLinkedWorktreeDuringKnownPathRefresh() async throws {
+        let root = try temporaryDirectory(named: "scanner-worktree-topology-change")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let main = root.appendingPathComponent("Project")
+        let linkedParent = main.appendingPathComponent(".codex/worktrees")
+        let linked = linkedParent.appendingPathComponent("new task")
+        try createCommittedRepository(at: main)
+        try ".codex/\n".write(
+            to: main.appendingPathComponent(".git/info/exclude"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let standalone = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true
+        )
+        #expect(standalone.data.repositories.count == 1)
+        #expect(standalone.data.repositories.first?.workspaceKind == .standalone)
+
+        try FileManager.default.createDirectory(at: linkedParent, withIntermediateDirectories: true)
+        try runGit(
+            ["worktree", "add", "-b", "codex/new-\(UUID().uuidString)", linked.path],
+            in: main
+        )
+        let refreshed = await GitRepositoryScanner.scan(
+            config: testScanConfig,
+            scanRoots: [root.path],
+            knownRepositoryPaths: standalone.discoveredRepositoryPaths,
+            previousSnapshot: standalone.data
+        )
+        let canonicalMain = RepositoryIdentity.canonicalPath(main.path)
+        let canonicalLinked = RepositoryIdentity.canonicalPath(linked.path)
+
+        #expect(Set(refreshed.data.repositories.map(\.path)) == Set([canonicalMain, canonicalLinked]))
+        #expect(
+            refreshed.data.repositories.first(where: { $0.path == canonicalMain })?.workspaceKind
+                == .mainWorktree
+        )
+        #expect(
+            refreshed.data.repositories.first(where: { $0.path == canonicalLinked })?.workspaceKind
+                == .linkedWorktree
+        )
+    }
+
     @Test func gitScannerDeduplicatesSymlinkRootsAndKeepsIdentityAcrossRescan() async throws {
         let root = try temporaryDirectory(named: "scanner-identity-symlink")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -2615,6 +2974,8 @@ struct CommitReadinessEngineTests {
 
         #expect(first.data.repositories.count == 1)
         #expect(second.data.repositories.count == 1)
+        #expect(firstRepo.workspaceKind == .standalone)
+        #expect(secondRepo.workspaceKind == .standalone)
         #expect(firstRepo.path == RepositoryIdentity.canonicalPath(repository.path))
         #expect(secondRepo.path == firstRepo.path)
         #expect(secondRepo.id == firstRepo.id)
@@ -3515,6 +3876,29 @@ struct CommitReadinessEngineTests {
         #expect(RepositoryIdentity.id(for: alias.path) == RepositoryIdentity.id(for: repository.path))
     }
 
+    @Test func repositoryIdentityDeduplicationDoesNotInventAPinForUnpinnedAliases() throws {
+        let root = try temporaryDirectory(named: "identity-unpinned-alias")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repository")
+        let alias = root.appendingPathComponent("alias")
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: repository)
+        let repositories = [
+            snapshot(id: "legacy-a", name: "repository", path: repository.path),
+            snapshot(id: "legacy-b", name: "alias", path: alias.path)
+        ]
+        let normalized = RepositoryIdentity.normalize(AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-07-21T00:00:00Z",
+            writtenAt: "2026-07-21T00:00:00Z",
+            scanSummary: ScanSummary.build(from: repositories),
+            repositories: repositories
+        ))
+
+        #expect(normalized.repositories.count == 1)
+        #expect(normalized.repositories.first?.isPinned == false)
+    }
+
     @Test func repositoryIdentityLegacyContainerMigrationRequiresComponentBoundary() {
         let home = ScanLocationProvider.resolvedUserHomeDirectory()
         let suffix = "/DevPulseTests-boundary-\(UUID().uuidString)"
@@ -3574,8 +3958,67 @@ struct CommitReadinessEngineTests {
         #expect(migration.snapshot.repositories.first(where: { $0.id == safeID })?.isPinned == true)
     }
 
+    @Test func repositoryIdentityMigrationDoesNotExpandAmbiguousSnapshotPinsAcrossWorktrees() throws {
+        let root = try temporaryDirectory(named: "identity-ambiguous-worktrees")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let main = root.appendingPathComponent("main")
+        let linked = root.appendingPathComponent("linked")
+        try FileManager.default.createDirectory(at: main, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: linked, withIntermediateDirectories: true)
+
+        let legacyID = "legacy-colliding-worktree-id"
+        let repositories = [
+            snapshot(id: legacyID, name: "main", path: main.path, isPinned: true),
+            snapshot(id: legacyID, name: "linked", path: linked.path, isPinned: true)
+        ]
+        let data = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-07-21T00:00:00Z",
+            writtenAt: "2026-07-21T00:00:00Z",
+            scanSummary: ScanSummary.build(from: repositories),
+            repositories: repositories
+        )
+
+        let migration = RepositoryIdentityMigration.migrate(
+            snapshot: data,
+            pinnedIDs: [legacyID]
+        )
+        let mainID = RepositoryIdentity.id(for: main.path)
+        let linkedID = RepositoryIdentity.id(for: linked.path)
+
+        #expect(migration.pinnedIDs.contains(legacyID))
+        #expect(!migration.pinnedIDs.contains(mainID))
+        #expect(!migration.pinnedIDs.contains(linkedID))
+        #expect(migration.snapshot.repositories.allSatisfy { !$0.isPinned })
+    }
+
+    @Test func repositoryWorkspaceKindSurvivesFailureRetentionAndSupportsTopologyUpgrade() {
+        let linked = snapshot(
+            name: "linked",
+            workspaceKind: .linkedWorktree,
+            dataSource: .current,
+            lastSuccessfulScanAt: "2026-07-21T00:00:00Z"
+        )
+        let retained = linked.retainingLastSuccessfulData(
+            attemptedAt: "2026-07-21T00:05:00Z",
+            errorMessage: "读取失败"
+        )
+        let upgraded = snapshot(name: "legacy-main").retainingLastSuccessfulData(
+            attemptedAt: "2026-07-21T00:05:00Z",
+            errorMessage: "读取失败",
+            workspaceKind: .mainWorktree
+        )
+
+        #expect(retained.workspaceKind == .linkedWorktree)
+        #expect(upgraded.workspaceKind == .mainWorktree)
+    }
+
     @Test func repositoryIdentityRoundTripsThroughWidgetSnapshotCodable() throws {
-        let repository = snapshot(id: "legacy", name: "widget-repo")
+        let repository = snapshot(
+            id: "legacy",
+            name: "widget-repo",
+            workspaceKind: .linkedWorktree
+        )
         let data = AppGroupData(
             schemaVersion: RepositorySnapshotSchema.version,
             generatedAt: "2026-07-12T00:00:00Z",
@@ -3590,6 +4033,7 @@ struct CommitReadinessEngineTests {
         #expect(decoded.repositories.count == 1)
         #expect(decoded.repositories[0].id == RepositoryIdentity.id(for: decoded.repositories[0].path))
         #expect(decoded.repositories[0].path == RepositoryIdentity.canonicalPath(repository.path))
+        #expect(decoded.repositories[0].workspaceKind == .linkedWorktree)
         #expect(decoded.lastSuccessfulRefreshAt == "2026-07-12T00:00:00Z")
     }
 
@@ -3597,6 +4041,7 @@ struct CommitReadinessEngineTests {
         id: String = "repo-1",
         name: String = "repo-1",
         path: String? = nil,
+        workspaceKind: RepositoryWorkspaceKind? = nil,
         modified: Int = 0,
         added: Int = 0,
         deleted: Int = 0,
@@ -3625,6 +4070,7 @@ struct CommitReadinessEngineTests {
             id: id,
             name: name,
             path: path ?? "/tmp/\(name)",
+            workspaceKind: workspaceKind,
             branch: branch,
             status: status,
             modifiedFileCount: modified,

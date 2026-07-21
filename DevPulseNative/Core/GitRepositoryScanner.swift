@@ -123,20 +123,64 @@ private enum RepositoryPathAvailability: Equatable {
     case unavailable
 }
 
+struct GitWorktreeListRecord: Equatable {
+    let path: String
+    let isBare: Bool
+}
+
+enum GitWorktreeListParser {
+    /// Parse `git worktree list --porcelain -z` without inspecting working-tree
+    /// files. Newline-delimited porcelain is accepted for focused tests and
+    /// compatibility, but production requests NUL-delimited output so paths
+    /// containing whitespace remain unambiguous.
+    static func parse(_ output: String) -> [GitWorktreeListRecord] {
+        let fields: [String]
+        if output.contains("\0") {
+            fields = output.components(separatedBy: "\0")
+        } else {
+            fields = output.components(separatedBy: .newlines)
+        }
+
+        var records: [GitWorktreeListRecord] = []
+        var currentPath: String?
+        var currentIsBare = false
+
+        func appendCurrentRecord() {
+            guard let currentPath, !currentPath.isEmpty else { return }
+            records.append(GitWorktreeListRecord(path: currentPath, isBare: currentIsBare))
+        }
+
+        for field in fields {
+            if field.hasPrefix("worktree ") {
+                appendCurrentRecord()
+                currentPath = String(field.dropFirst("worktree ".count))
+                currentIsBare = false
+            } else if field == "bare" {
+                currentIsBare = true
+            }
+        }
+        appendCurrentRecord()
+        return records
+    }
+}
+
 private struct RepositoryDiscoveryResult {
     let readablePaths: [String]
     let unavailablePaths: [String]
     let mode: DiscoveryMode
     let isComplete: Bool
+    let workspaceKindsByPath: [String: RepositoryWorkspaceKind]
 
     init(readablePaths: [String],
          unavailablePaths: [String],
          mode: DiscoveryMode = .walked,
-         isComplete: Bool = true) {
+         isComplete: Bool = true,
+         workspaceKindsByPath: [String: RepositoryWorkspaceKind] = [:]) {
         self.readablePaths = readablePaths
         self.unavailablePaths = unavailablePaths
         self.mode = mode
         self.isComplete = isComplete
+        self.workspaceKindsByPath = workspaceKindsByPath
     }
 
     var retainedPaths: [String] {
@@ -205,7 +249,9 @@ enum GitRepositoryScanner {
 
     private static let discoveryCache = RepositoryDiscoveryCache()
     private static let discoveryCacheTTL: TimeInterval = 10 * 60
-    private static let discoveryRulesVersion = 2
+    private static let discoveryRulesVersion = 3
+    private static let maximumWorktreeDiscoveryBudget: TimeInterval = 5
+    private static let worktreeDiscoveryBudgetFraction = 0.2
     private static let maximumConcurrentGitOps = 12
     private static let logger = Logger(subsystem: "local.devpulse.app", category: "RepositoryScan")
     static let defaultGitCommandRunner: GitCommandRunner = {
@@ -219,6 +265,7 @@ enum GitRepositoryScanner {
         )
     }
     static let incompleteDiscoveryWarning = "Repository discovery incomplete: one or more configured paths could not be read."
+    static let incompleteWorktreeDiscoveryWarning = "Linked worktree discovery was incomplete; affected worktrees will be retried."
 
     static func discoveryWasIncomplete(_ warnings: [String]) -> Bool {
         warnings.contains(incompleteDiscoveryWarning)
@@ -248,6 +295,13 @@ enum GitRepositoryScanner {
         let previousUnavailableSinceByPath = previous?.repositoryUnavailableSinceByPath ?? [:]
         let previousRepositoryPaths = (previous?.repositories.map(\.path) ?? [])
             + Array(previousUnavailableSinceByPath.keys)
+        var previousWorkspaceKindsByPath: [String: RepositoryWorkspaceKind] = [:]
+        for repository in previous?.repositories ?? [] {
+            guard let workspaceKind = repository.workspaceKind else { continue }
+            previousWorkspaceKindsByPath[
+                RepositoryIdentity.canonicalPath(repository.path)
+            ] = workspaceKind
+        }
 
         // Phase 1: discover all git repositories
         let discoveryStartedAt = ProcessInfo.processInfo.systemUptime
@@ -256,9 +310,12 @@ enum GitRepositoryScanner {
             scanRoots: scanRoots,
             knownRepositoryPaths: knownRepositoryPaths,
             previousRepositoryPaths: previousRepositoryPaths,
+            previousWorkspaceKindsByPath: previousWorkspaceKindsByPath,
             ignoredRepositoryPaths: ignoredRepositoryPaths,
             forceRefresh: forceRepositoryDiscovery,
             overallDeadline: startTime.addingTimeInterval(config.scanTimeout),
+            metrics: collector,
+            gitCommandRunner: gitCommandRunner,
             warnings: &warnings
         )
         collector.recordDiscovery(
@@ -283,6 +340,7 @@ enum GitRepositoryScanner {
             overallDeadline: startTime.addingTimeInterval(config.scanTimeout),
             previousSnapshots: previous?.repositories ?? [],
             previousUnavailableSinceByPath: previousUnavailableSinceByPath,
+            workspaceKindsByPath: discovery.workspaceKindsByPath,
             metrics: collector,
             gitCommandRunner: gitCommandRunner
         )
@@ -420,9 +478,12 @@ enum GitRepositoryScanner {
                                              scanRoots: [String]?,
                                              knownRepositoryPaths: [String]?,
                                              previousRepositoryPaths: [String],
+                                             previousWorkspaceKindsByPath: [String: RepositoryWorkspaceKind],
                                              ignoredRepositoryPaths: Set<String>,
                                              forceRefresh: Bool,
                                              overallDeadline: Date,
+                                             metrics: ScanMetricsCollector,
+                                             gitCommandRunner: @escaping GitCommandRunner,
                                              warnings: inout [String]) async -> RepositoryDiscoveryResult {
         var discovered = Set<String>()
         var unavailablePrefixes = Set<String>()
@@ -456,14 +517,29 @@ enum GitRepositoryScanner {
                 successMode: .reusedKnown
             ) {
             case .reusable(let reusedPaths):
-                if !reusedPaths.isComplete {
+                let enriched = enrichWorktreeDiscovery(
+                    reusedPaths,
+                    scanRoots: normalizedRoots,
+                    ignoredPaths: ignoredPaths,
+                    previousWorkspaceKindsByPath: previousWorkspaceKindsByPath,
+                    inspectTopology: shouldInspectWorktreeTopology(
+                        paths: reusedPaths.readablePaths,
+                        previousWorkspaceKindsByPath: previousWorkspaceKindsByPath
+                    ),
+                    config: config,
+                    overallDeadline: overallDeadline,
+                    metrics: metrics,
+                    gitCommandRunner: gitCommandRunner,
+                    warnings: &warnings
+                )
+                if !enriched.isComplete {
                     appendDiscoveryInterruptionWarning(
-                        for: reusedPaths,
+                        for: enriched,
                         overallDeadline: overallDeadline,
                         warnings: &warnings
                     )
                 }
-                return reusedPaths
+                return enriched
             case .invalidated:
                 break
             }
@@ -480,14 +556,29 @@ enum GitRepositoryScanner {
                 successMode: .reusedCache
             ) {
             case .reusable(let reusableCached):
-                if !reusableCached.isComplete {
+                let enriched = enrichWorktreeDiscovery(
+                    reusableCached,
+                    scanRoots: normalizedRoots,
+                    ignoredPaths: ignoredPaths,
+                    previousWorkspaceKindsByPath: previousWorkspaceKindsByPath,
+                    inspectTopology: shouldInspectWorktreeTopology(
+                        paths: reusableCached.readablePaths,
+                        previousWorkspaceKindsByPath: previousWorkspaceKindsByPath
+                    ),
+                    config: config,
+                    overallDeadline: overallDeadline,
+                    metrics: metrics,
+                    gitCommandRunner: gitCommandRunner,
+                    warnings: &warnings
+                )
+                if !enriched.isComplete {
                     appendDiscoveryInterruptionWarning(
-                        for: reusableCached,
+                        for: enriched,
                         overallDeadline: overallDeadline,
                         warnings: &warnings
                     )
                 }
-                return reusableCached
+                return enriched
             case .invalidated:
                 break
             }
@@ -519,25 +610,6 @@ enum GitRepositoryScanner {
         }
         _ = traversalState.shouldStop(deadline: overallDeadline)
 
-        if !traversalState.isComplete || !unavailablePrefixes.isEmpty {
-            warnings.append(incompleteDiscoveryWarning)
-        }
-        if traversalState.timedOut {
-            warnings.append("Repository discovery timeout reached; partial results were retained.")
-        } else if traversalState.wasCancelled {
-            warnings.append("Repository discovery cancelled; partial results were retained.")
-        }
-
-        if discovered.isEmpty {
-            if !allPaths.isEmpty && traversalState.isComplete && unavailablePrefixes.isEmpty {
-                warnings.append("No Git repositories discovered in the configured scan roots.")
-            }
-        }
-
-        let sorted = Array(discovered).sorted()
-        if traversalState.isComplete && unavailablePrefixes.isEmpty {
-            await discoveryCache.store(paths: sorted, for: cacheKey, ttl: discoveryCacheTTL)
-        }
         let unavailablePaths = knownCandidates
             .map(RepositoryIdentity.canonicalPath)
             .filter { path in
@@ -547,12 +619,248 @@ enum GitRepositoryScanner {
                         || unavailablePrefixes.contains { RepositoryIdentity.isSameOrDescendantPath(path, of: $0) })
                     && !discovered.contains(path)
             }
-        return RepositoryDiscoveryResult(
-            readablePaths: sorted,
+        let walked = RepositoryDiscoveryResult(
+            readablePaths: Array(discovered).sorted(),
             unavailablePaths: Array(Set(unavailablePaths)).sorted(),
             mode: traversalState.isComplete ? .walked : .incomplete,
             isComplete: traversalState.isComplete
         )
+        let enriched = enrichWorktreeDiscovery(
+            walked,
+            scanRoots: normalizedRoots,
+            ignoredPaths: ignoredPaths,
+            previousWorkspaceKindsByPath: previousWorkspaceKindsByPath,
+            inspectTopology: true,
+            config: config,
+            overallDeadline: overallDeadline,
+            metrics: metrics,
+            gitCommandRunner: gitCommandRunner,
+            warnings: &warnings
+        )
+
+        if !enriched.isComplete || !unavailablePrefixes.isEmpty {
+            if !warnings.contains(incompleteDiscoveryWarning) {
+                warnings.append(incompleteDiscoveryWarning)
+            }
+        }
+        if traversalState.timedOut {
+            warnings.append("Repository discovery timeout reached; partial results were retained.")
+        } else if traversalState.wasCancelled {
+            warnings.append("Repository discovery cancelled; partial results were retained.")
+        }
+
+        if enriched.readablePaths.isEmpty,
+           !allPaths.isEmpty,
+           enriched.isComplete,
+           unavailablePrefixes.isEmpty {
+            warnings.append("No Git repositories discovered in the configured scan roots.")
+        }
+
+        if enriched.isComplete && unavailablePrefixes.isEmpty {
+            await discoveryCache.store(
+                paths: enriched.readablePaths,
+                for: cacheKey,
+                ttl: discoveryCacheTTL
+            )
+        }
+        return enriched
+    }
+
+    private static func shouldInspectWorktreeTopology(
+        paths: [String],
+        previousWorkspaceKindsByPath: [String: RepositoryWorkspaceKind]
+    ) -> Bool {
+        paths.contains { rawPath in
+            let path = RepositoryIdentity.canonicalPath(rawPath)
+            switch previousWorkspaceKindsByPath[path] {
+            case nil, .mainWorktree, .linkedWorktree:
+                return true
+            case .standalone:
+                // Registering the first linked worktree creates Git's
+                // worktrees metadata directory. Checking that filesystem bit
+                // keeps ordinary repositories at zero extra Git commands
+                // while letting the next status refresh discover the new
+                // workspace immediately.
+                return requiresWorktreeList(at: path)
+            }
+        }
+    }
+
+    private static func enrichWorktreeDiscovery(
+        _ discovery: RepositoryDiscoveryResult,
+        scanRoots: [String],
+        ignoredPaths: Set<String>,
+        previousWorkspaceKindsByPath: [String: RepositoryWorkspaceKind],
+        inspectTopology: Bool,
+        config: ScanConfig,
+        overallDeadline: Date,
+        metrics: ScanMetricsCollector,
+        gitCommandRunner: @escaping GitCommandRunner,
+        warnings: inout [String]
+    ) -> RepositoryDiscoveryResult {
+        var readablePaths = Set(discovery.readablePaths.map(RepositoryIdentity.canonicalPath))
+        var unavailablePaths = Set(discovery.unavailablePaths.map(RepositoryIdentity.canonicalPath))
+        var workspaceKindsByPath: [String: RepositoryWorkspaceKind] = [:]
+        for path in readablePaths {
+            if let previousKind = previousWorkspaceKindsByPath[path] {
+                workspaceKindsByPath[path] = previousKind
+            }
+        }
+
+        guard inspectTopology else {
+            return RepositoryDiscoveryResult(
+                readablePaths: Array(readablePaths).sorted(),
+                unavailablePaths: Array(unavailablePaths).sorted(),
+                mode: discovery.mode,
+                isComplete: discovery.isComplete,
+                workspaceKindsByPath: workspaceKindsByPath
+            )
+        }
+
+        let ignoredTopologySeeds = ignoredPaths.filter { path in
+            scanRoots.contains { RepositoryIdentity.isSameOrDescendantPath(path, of: $0) }
+                && repositoryAvailability(at: path) == .repository
+        }
+        let seeds = Array(readablePaths.union(ignoredTopologySeeds)).sorted()
+        let topologyStartedAt = Date()
+        let topologyBudget = min(
+            maximumWorktreeDiscoveryBudget,
+            max(0, overallDeadline.timeIntervalSince(topologyStartedAt))
+                * worktreeDiscoveryBudgetFraction
+        )
+        let topologyDeadline = min(
+            overallDeadline,
+            topologyStartedAt.addingTimeInterval(topologyBudget)
+        )
+        var coveredPaths = Set<String>()
+        var topologyIncomplete = false
+
+        for seed in seeds {
+            if coveredPaths.contains(seed) { continue }
+            guard !Task.isCancelled, Date() < topologyDeadline else {
+                topologyIncomplete = true
+                break
+            }
+
+            guard requiresWorktreeList(at: seed) else {
+                coveredPaths.insert(seed)
+                if !RepositoryScope.contains(seed, in: ignoredPaths) {
+                    workspaceKindsByPath[seed] = .standalone
+                }
+                continue
+            }
+
+            let remaining = min(
+                config.gitCommandTimeout,
+                max(0, topologyDeadline.timeIntervalSinceNow)
+            )
+            guard remaining > 0 else {
+                topologyIncomplete = true
+                break
+            }
+
+            let result = runGitCommand(
+                arguments: ["worktree", "list", "--porcelain", "-z"],
+                workingDirectory: seed,
+                timeout: remaining,
+                kind: .other,
+                metrics: metrics,
+                gitCommandRunner: gitCommandRunner,
+                isCancelled: { Task.isCancelled }
+            )
+            guard case .success(let output) = result,
+                  let topology = parsedWorktreeTopology(output, containing: seed) else {
+                topologyIncomplete = true
+                continue
+            }
+
+            coveredPaths.formUnion(topology.kindsByPath.keys)
+            for (path, kind) in topology.kindsByPath {
+                guard scanRoots.contains(where: {
+                    RepositoryIdentity.isSameOrDescendantPath(path, of: $0)
+                }),
+                !RepositoryScope.contains(path, in: ignoredPaths),
+                repositoryAvailability(at: path) == .repository else { continue }
+
+                readablePaths.insert(path)
+                unavailablePaths.remove(path)
+                workspaceKindsByPath[path] = kind
+            }
+        }
+
+        if topologyIncomplete,
+           !warnings.contains(incompleteWorktreeDiscoveryWarning) {
+            warnings.append(incompleteWorktreeDiscoveryWarning)
+        }
+
+        let isComplete = discovery.isComplete && !topologyIncomplete
+        return RepositoryDiscoveryResult(
+            readablePaths: Array(readablePaths).sorted(),
+            unavailablePaths: Array(unavailablePaths.subtracting(readablePaths)).sorted(),
+            mode: isComplete ? discovery.mode : .incomplete,
+            isComplete: isComplete,
+            workspaceKindsByPath: workspaceKindsByPath
+        )
+    }
+
+    private static func requiresWorktreeList(at repositoryPath: String) -> Bool {
+        let gitPath = (repositoryPath as NSString).appendingPathComponent(".git")
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: gitPath)
+            guard attributes[.type] as? FileAttributeType == .typeDirectory else {
+                // Linked worktrees and repositories created with
+                // `--separate-git-dir` both use a .git file. Let Git itself
+                // distinguish them instead of guessing from file type.
+                return true
+            }
+
+            let registrationsPath = (gitPath as NSString).appendingPathComponent("worktrees")
+            do {
+                let attributes = try FileManager.default.attributesOfItem(atPath: registrationsPath)
+                guard attributes[.type] as? FileAttributeType == .typeDirectory else {
+                    return true
+                }
+                return !(try FileManager.default.contentsOfDirectory(atPath: registrationsPath)).isEmpty
+            } catch {
+                return !isMissingFileError(error)
+            }
+        } catch {
+            return true
+        }
+    }
+
+    private static func parsedWorktreeTopology(
+        _ output: String,
+        containing seed: String
+    ) -> (kindsByPath: [String: RepositoryWorkspaceKind], mainPath: String?)? {
+        let records = GitWorktreeListParser.parse(output)
+        guard !records.isEmpty else { return nil }
+
+        var seenPaths = Set<String>()
+        var normalized: [GitWorktreeListRecord] = []
+        for record in records {
+            guard record.path.hasPrefix("/") else { return nil }
+            let path = RepositoryIdentity.canonicalPath(record.path)
+            guard seenPaths.insert(path).inserted else { continue }
+            normalized.append(GitWorktreeListRecord(path: path, isBare: record.isBare))
+        }
+
+        let workingTrees = normalized.filter { !$0.isBare }
+        let canonicalSeed = RepositoryIdentity.canonicalPath(seed)
+        guard workingTrees.contains(where: { $0.path == canonicalSeed }) else { return nil }
+
+        let mainPath = normalized.first?.isBare == false ? normalized.first?.path : nil
+        var kindsByPath: [String: RepositoryWorkspaceKind] = [:]
+        for record in workingTrees {
+            if workingTrees.count == 1, mainPath != nil {
+                kindsByPath[record.path] = .standalone
+            } else if record.path == mainPath {
+                kindsByPath[record.path] = .mainWorktree
+            } else {
+                kindsByPath[record.path] = .linkedWorktree
+            }
+        }
+        return (kindsByPath, mainPath)
     }
 
     private static func reusableKnownRepositoryPaths(
@@ -760,6 +1068,7 @@ enum GitRepositoryScanner {
                                              overallDeadline: Date,
                                              previousSnapshots: [RepositorySnapshot],
                                              previousUnavailableSinceByPath: [String: String],
+                                             workspaceKindsByPath: [String: RepositoryWorkspaceKind],
                                              metrics: ScanMetricsCollector,
                                              gitCommandRunner: @escaping GitCommandRunner) async -> [RepositorySnapshot] {
         guard !paths.isEmpty else { return [] }
@@ -804,6 +1113,8 @@ enum GitRepositoryScanner {
                 let canonicalPath = RepositoryIdentity.canonicalPath(path)
                 let previousSnapshot = previousByPath[canonicalPath]
                 let unavailableSince = previousUnavailableSinceByPath[canonicalPath]
+                let workspaceKind = workspaceKindsByPath[canonicalPath]
+                    ?? previousSnapshot?.workspaceKind
                 nextIndex += 1
                 group.addTask {
                     guard !Task.isCancelled else { return nil }
@@ -816,6 +1127,7 @@ enum GitRepositoryScanner {
                         overallDeadline: overallDeadline,
                         previousSnapshot: previousSnapshot,
                         unavailableSince: unavailableSince,
+                        workspaceKind: workspaceKind,
                         metrics: metrics,
                         gitCommandRunner: gitCommandRunner
                     ) else {
@@ -885,6 +1197,9 @@ enum GitRepositoryScanner {
                     unavailableSince: previousUnavailableSinceByPath[
                         RepositoryIdentity.canonicalPath(path)
                     ],
+                    workspaceKind: workspaceKindsByPath[
+                        RepositoryIdentity.canonicalPath(path)
+                    ],
                     errorMessage: message
                 )
             )
@@ -905,6 +1220,7 @@ enum GitRepositoryScanner {
                                            overallDeadline: Date? = nil,
                                            previousSnapshot: RepositorySnapshot? = nil,
                                            unavailableSince: String? = nil,
+                                           workspaceKind: RepositoryWorkspaceKind? = nil,
                                            metrics: ScanMetricsCollector,
                                            gitCommandRunner: GitCommandRunner) -> RepositorySnapshot? {
         let repoPath = RepositoryIdentity.canonicalPath(repoPath)
@@ -939,6 +1255,7 @@ enum GitRepositoryScanner {
                 for: repoPath,
                 previousSnapshot: previousSnapshot,
                 unavailableSince: unavailableSince,
+                workspaceKind: workspaceKind,
                 errorMessage: statusFailureMessage(statusResult)
             )
         }
@@ -1028,6 +1345,7 @@ enum GitRepositoryScanner {
             id: id,
             name: name,
             path: repoPath,
+            workspaceKind: workspaceKind ?? previousSnapshot?.workspaceKind,
             branch: branchMetadata.branch,
             status: status,
             modifiedFileCount: summary.modified,
@@ -1065,6 +1383,7 @@ enum GitRepositoryScanner {
     private static func failedSnapshot(for path: String,
                                        previousSnapshot: RepositorySnapshot?,
                                        unavailableSince: String? = nil,
+                                       workspaceKind: RepositoryWorkspaceKind? = nil,
                                        errorMessage: String) -> RepositorySnapshot {
         let path = RepositoryIdentity.canonicalPath(path)
         let previous = previousSnapshot.map(RepositoryIdentity.normalize)
@@ -1073,13 +1392,15 @@ enum GitRepositoryScanner {
             return previous.retainingLastSuccessfulData(
                 attemptedAt: attemptedAt,
                 errorMessage: errorMessage,
-                unavailableSince: unavailableSince
+                unavailableSince: unavailableSince,
+                workspaceKind: workspaceKind
             )
         }
         return RepositorySnapshot(
             id: RepositoryIdentity.id(for: path),
             name: (path as NSString).lastPathComponent,
             path: path,
+            workspaceKind: workspaceKind,
             branch: "unknown",
             status: .error,
             modifiedFileCount: 0,
@@ -1192,6 +1513,7 @@ enum GitRepositoryScanner {
                 for: normalizedPath,
                 previousSnapshot: previousByPath[normalizedPath],
                 unavailableSince: unavailableSinceByPath[normalizedPath],
+                workspaceKind: discovery.workspaceKindsByPath[normalizedPath],
                 errorMessage: "本轮未完成扫描"
             )
         }

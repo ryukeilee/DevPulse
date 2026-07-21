@@ -166,6 +166,26 @@ struct SharedSnapshotStoreTests {
         #expect(read.snapshot.repositories.first?.resolvedDataSource != .current)
     }
 
+    @Test func currentSchemaSnapshotWithoutWorkspaceKindRemainsReadable() throws {
+        let directory = try temporaryDirectory()
+        defer { removeTemporaryDirectory(directory) }
+
+        let snapshot = fixture(label: "pre-worktree-kind", timestamp: "2026-07-18T09:00:00Z")
+        let snapshotStore = store(in: directory, now: date("2026-07-18T10:00:00Z"))
+        let committed = try requireSuccess(snapshotStore.commit(snapshot))
+        var object = try jsonObject(from: committed)
+        var repositories = try #require(object["repositories"] as? [[String: Any]])
+        repositories[0].removeValue(forKey: "workspaceKind")
+        object["repositories"] = repositories
+        let bytes = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        try bytes.write(to: snapshotStore.primaryURL)
+
+        let read = try requireSuccess(snapshotStore.load())
+        #expect(read.source == .primary)
+        #expect(read.snapshot.schemaVersion == RepositorySnapshotSchema.version)
+        #expect(read.snapshot.repositories.first?.workspaceKind == nil)
+    }
+
     @Test func structurallyInvalidSchemaV1CannotBeMigratedAsTrustedData() throws {
         let directory = try temporaryDirectory()
         defer { removeTemporaryDirectory(directory) }

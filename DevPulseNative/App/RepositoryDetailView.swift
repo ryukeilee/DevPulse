@@ -208,16 +208,38 @@ enum RepositoryExternalOpener {
 }
 
 struct RepositoryDetailView: View {
-    let repository: RepositorySnapshot
+    let selection: RepositoryDetailSelection
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var scheduler: ScanScheduler
     @State private var isConfirmingIgnore = false
 
+    private var repository: RepositorySnapshot? {
+        RepositoryDetailSnapshotResolver.resolve(
+            selection: selection,
+            repositories: scheduler.lastResult.repositories
+        )
+    }
+
+    private var activeRepository: RepositorySnapshot {
+        guard let repository else {
+            preconditionFailure("Repository detail rendered without a trusted snapshot.")
+        }
+        return repository
+    }
+
     private var presentation: RepositoryDetailPresentation {
-        RepositoryDetailPresentationBuilder.build(snapshot: repository)
+        RepositoryDetailPresentationBuilder.build(snapshot: activeRepository)
     }
 
     var body: some View {
+        if repository != nil {
+            detailContent
+        } else {
+            unavailableDetail
+        }
+    }
+
+    private var detailContent: some View {
         VStack(spacing: 0) {
             header
 
@@ -243,9 +265,9 @@ struct RepositoryDetailView: View {
         }
         .frame(minWidth: 540, idealWidth: 580, minHeight: 560, idealHeight: 660)
         .background(Color(nsColor: .windowBackgroundColor))
-        .alert("忽略 \(repository.name)？", isPresented: $isConfirmingIgnore) {
+        .alert("忽略 \(activeRepository.name)？", isPresented: $isConfirmingIgnore) {
             Button("忽略", role: .destructive) {
-                scheduler.ignoreRepository(path: repository.path)
+                scheduler.ignoreRepository(path: activeRepository.path)
                 dismiss()
             }
             Button("取消", role: .cancel) {}
@@ -254,10 +276,30 @@ struct RepositoryDetailView: View {
         }
     }
 
+    private var unavailableDetail: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "questionmark.folder")
+                .font(.system(size: 32))
+                .foregroundStyle(.secondary)
+            Text("仓库已不在当前可信快照中")
+                .font(.headline)
+            Text("详情不会继续显示旧状态；请返回列表后重新选择仓库。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 340)
+            Button("关闭") { dismiss() }
+                .keyboardShortcut(.cancelAction)
+        }
+        .frame(minWidth: 420, idealWidth: 460, minHeight: 280, idealHeight: 300)
+        .padding(24)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
     private var header: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(repository.name)
+                Text(activeRepository.name)
                     .font(.title3.weight(.semibold))
                     .lineLimit(1)
                 Text("只读仓库详情")
@@ -308,6 +350,13 @@ struct RepositoryDetailView: View {
 
     private var overviewSection: some View {
         detailCard(title: "仓库状态") {
+            if let workspaceKind = activeRepository.workspaceKind {
+                detailRow(
+                    title: "工作区",
+                    value: workspaceKind.displayName,
+                    systemImage: workspaceKind.systemImage
+                )
+            }
             detailRow(title: "当前分支", value: presentation.branch, systemImage: "arrow.triangle.branch")
             detailRow(title: "最近提交", value: presentation.latestCommit, systemImage: "clock")
             detailRow(title: "同步状态", value: presentation.synchronization, systemImage: "arrow.up.arrow.down")
@@ -361,7 +410,7 @@ struct RepositoryDetailView: View {
     }
 
     private var recentEvents: [ActivityEvent] {
-        scheduler.activityEvents.filter { $0.repositoryID == repository.id }
+        scheduler.activityEvents.filter { $0.repositoryID == activeRepository.id }
     }
 
     private var changedFilesSection: some View {
@@ -408,7 +457,7 @@ struct RepositoryDetailView: View {
                 Button {
                     RepositoryExternalOpener.open(
                         action: action,
-                        repositoryPath: repository.path
+                        repositoryPath: activeRepository.path
                     )
                 } label: {
                     Label(action.title, systemImage: action.systemImage)
@@ -456,7 +505,7 @@ struct RepositoryDetailView: View {
         switch presentation.dataSource.source {
         case .unknown: return "当前没有可信的文件名预览"
         case .current, .lastSuccessful:
-            return repository.changedFileCount == 0 ? "没有本地变更文件" : "文件名预览不可用"
+            return activeRepository.changedFileCount == 0 ? "没有本地变更文件" : "文件名预览不可用"
         }
     }
 
