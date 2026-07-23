@@ -25,7 +25,7 @@ struct ScanConfig: Codable, Sendable {
         customPaths: [],
         maxDepth: 4,
         changedPreviewLimit: 5,
-        maxConcurrentGitOps: 6,
+        maxConcurrentGitOps: 10,
         gitCommandTimeout: 5.0,
         scanTimeout: 60.0,
         slowReposkipSeconds: 600.0,
@@ -228,6 +228,37 @@ private struct DiscoveryTraversalState {
 private struct RepositoryMergeResult {
     let snapshots: [RepositorySnapshot]
     let unavailableSinceByPath: [String: String]
+}
+
+/// Result from a parallel subdirectory walk.
+private struct WalkResult: Sendable {
+    let discovered: Set<String>
+    let unavailablePrefixes: Set<String>
+    let warnings: [String]
+    let isComplete: Bool
+
+    static func empty() -> WalkResult {
+        WalkResult(discovered: [], unavailablePrefixes: [], warnings: [], isComplete: true)
+    }
+
+    static func merge(_ results: [WalkResult]) -> WalkResult {
+        var discovered = Set<String>()
+        var unavailablePrefixes = Set<String>()
+        var warnings: [String] = []
+        var isComplete = true
+        for r in results {
+            discovered.formUnion(r.discovered)
+            unavailablePrefixes.formUnion(r.unavailablePrefixes)
+            warnings.append(contentsOf: r.warnings)
+            if !r.isComplete { isComplete = false }
+        }
+        return WalkResult(
+            discovered: discovered,
+            unavailablePrefixes: unavailablePrefixes,
+            warnings: warnings,
+            isComplete: isComplete
+        )
+    }
 }
 
 private struct SnapshotReadResult: Sendable {
@@ -1073,8 +1104,10 @@ enum GitRepositoryScanner {
             return
         }
 
+        // Collect subdirectories first, then walk them in parallel.
+        var subdirectories: [String] = []
         for entryURL in entries {
-            if traversalState.shouldStop(deadline: overallDeadline) { return }
+            if Date() >= overallDeadline || Task.isCancelled { break }
             let fullPath = ScanLocationProvider.canonicalExistingFilePath(entryURL.path, resolveBuiltIn: true)
             let entryName = entryURL.lastPathComponent
 
@@ -1092,16 +1125,55 @@ enum GitRepositoryScanner {
                 continue
             }
             guard isDirectory else { continue }
+            subdirectories.append(fullPath)
+        }
 
-            await walkDirectory(fullPath,
-                                config: config,
-                                depth: depth + 1,
-                                ignoredPaths: ignoredPaths,
-                                discovered: &discovered,
-                                unavailablePrefixes: &unavailablePrefixes,
-                                overallDeadline: overallDeadline,
-                                traversalState: &traversalState,
-                                warnings: &warnings)
+        if !subdirectories.isEmpty {
+            let results = await withTaskGroup(of: WalkResult.self) { group in
+                for subdir in subdirectories {
+                    group.addTask {
+                        var localDiscovered = Set<String>()
+                        var localUnavailable = Set<String>()
+                        var localWarnings: [String] = []
+                        var localTraversal = DiscoveryTraversalState()
+
+                        await walkDirectory(subdir,
+                                            config: config,
+                                            depth: depth + 1,
+                                            ignoredPaths: ignoredPaths,
+                                            discovered: &localDiscovered,
+                                            unavailablePrefixes: &localUnavailable,
+                                            overallDeadline: overallDeadline,
+                                            traversalState: &localTraversal,
+                                            warnings: &localWarnings)
+
+                        return WalkResult(
+                            discovered: localDiscovered,
+                            unavailablePrefixes: localUnavailable,
+                            warnings: localWarnings,
+                            isComplete: !localTraversal.wasCancelled && !localTraversal.timedOut
+                        )
+                    }
+                }
+
+                var merged = WalkResult.empty()
+                for await result in group {
+                    merged = WalkResult(
+                        discovered: merged.discovered.union(result.discovered),
+                        unavailablePrefixes: merged.unavailablePrefixes.union(result.unavailablePrefixes),
+                        warnings: merged.warnings + result.warnings,
+                        isComplete: merged.isComplete && result.isComplete
+                    )
+                }
+                return merged
+            }
+
+            discovered.formUnion(results.discovered)
+            unavailablePrefixes.formUnion(results.unavailablePrefixes)
+            warnings.append(contentsOf: results.warnings)
+            if !results.isComplete {
+                traversalState.markUnavailable()
+            }
         }
     }
 
