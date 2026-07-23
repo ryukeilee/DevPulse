@@ -5,8 +5,10 @@ import Darwin
 // MARK: - Schema constants
 
 enum RepositorySnapshotSchema {
-    static let version = 2
+    static let version = 3
     static let oldestMigratableVersion = 1
+
+    static let v3HistoryVersionKey = "historySchemaVersion"
 }
 
 /// Describes how the persisted payload reached its current representation.
@@ -1428,6 +1430,10 @@ struct AppGroupData: Codable, Equatable {
     let repositories: [RepositorySnapshot]
     /// Small Widget-facing projection only. The full local event history is
     /// persisted separately and is never embedded in the shared snapshot.
+    /// Schema version of the persisted history store (present on v3+).
+    let historySchemaVersion: Int?
+    /// Whether history recording is enabled for this snapshot generation.
+    let historyRecordingEnabled: Bool?
     let recentActivityEvents: [ActivityEventSummary]?
     /// Hidden discovery tombstones. They keep the first-unavailable time for
     /// repositories that aged out of every presentation, allowing a recovered
@@ -1445,6 +1451,8 @@ struct AppGroupData: Codable, Equatable {
          generatedAt: String,
          writtenAt: String?,
          lastSuccessfulRefreshAt: String? = nil,
+         historySchemaVersion: Int? = nil,
+         historyRecordingEnabled: Bool? = nil,
          scanSummary: ScanSummary,
          repositories: [RepositorySnapshot],
          recentActivityEvents: [ActivityEventSummary]? = nil,
@@ -1455,6 +1463,8 @@ struct AppGroupData: Codable, Equatable {
         self.generatedAt = generatedAt
         self.writtenAt = writtenAt
         self.lastSuccessfulRefreshAt = lastSuccessfulRefreshAt
+        self.historySchemaVersion = historySchemaVersion
+        self.historyRecordingEnabled = historyRecordingEnabled
         self.scanSummary = scanSummary
         self.repositories = repositories
         self.recentActivityEvents = recentActivityEvents
@@ -1484,6 +1494,14 @@ struct AppGroupData: Codable, Equatable {
                 forKey: .persistenceState
             ) ?? .migrated
         }
+        let historySchemaVersion = try container.decodeIfPresent(
+            Int.self,
+            forKey: .historySchemaVersion
+        )
+        let historyRecordingEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .historyRecordingEnabled
+        )
         self.init(
             schemaVersion: schemaVersion,
             generatedAt: try container.decode(String.self, forKey: .generatedAt),
@@ -1492,6 +1510,8 @@ struct AppGroupData: Codable, Equatable {
                 String.self,
                 forKey: .lastSuccessfulRefreshAt
             ),
+            historySchemaVersion: historySchemaVersion,
+            historyRecordingEnabled: historyRecordingEnabled,
             scanSummary: try container.decode(ScanSummary.self, forKey: .scanSummary),
             repositories: try container.decode([RepositorySnapshot].self, forKey: .repositories),
             recentActivityEvents: try container.decodeIfPresent(
@@ -1513,6 +1533,8 @@ struct AppGroupData: Codable, Equatable {
         try container.encode(generatedAt, forKey: .generatedAt)
         try container.encodeIfPresent(writtenAt, forKey: .writtenAt)
         try container.encodeIfPresent(lastSuccessfulRefreshAt, forKey: .lastSuccessfulRefreshAt)
+        try container.encodeIfPresent(historySchemaVersion, forKey: .historySchemaVersion)
+        try container.encodeIfPresent(historyRecordingEnabled, forKey: .historyRecordingEnabled)
         try container.encode(scanSummary, forKey: .scanSummary)
         try container.encode(repositories, forKey: .repositories)
         try container.encodeIfPresent(recentActivityEvents, forKey: .recentActivityEvents)
@@ -1535,6 +1557,8 @@ struct AppGroupData: Codable, Equatable {
         case repositoryUnavailableSinceByPath
         case storageRevision
         case persistenceState
+        case historySchemaVersion
+        case historyRecordingEnabled
     }
 
     static func empty() -> AppGroupData {
@@ -1543,6 +1567,8 @@ struct AppGroupData: Codable, Equatable {
             generatedAt: ISO8601DateFormatter().string(from: Date()),
             writtenAt: nil,
             lastSuccessfulRefreshAt: nil,
+            historySchemaVersion: nil,
+            historyRecordingEnabled: nil,
             scanSummary: ScanSummary(
                 totalRepositories: 0,
                 changedRepositories: 0,
@@ -1563,6 +1589,8 @@ struct AppGroupData: Codable, Equatable {
             generatedAt: generatedAt,
             writtenAt: writtenAt,
             lastSuccessfulRefreshAt: lastSuccessfulRefreshAt,
+            historySchemaVersion: historySchemaVersion,
+            historyRecordingEnabled: historyRecordingEnabled,
             scanSummary: scanSummary,
             repositories: repositories,
             recentActivityEvents: recentActivityEvents,
@@ -1578,6 +1606,8 @@ struct AppGroupData: Codable, Equatable {
             generatedAt: generatedAt,
             writtenAt: writtenAt,
             lastSuccessfulRefreshAt: timestamp,
+            historySchemaVersion: historySchemaVersion,
+            historyRecordingEnabled: historyRecordingEnabled,
             scanSummary: scanSummary,
             repositories: repositories,
             recentActivityEvents: recentActivityEvents,
@@ -1593,9 +1623,31 @@ struct AppGroupData: Codable, Equatable {
             generatedAt: generatedAt,
             writtenAt: writtenAt,
             lastSuccessfulRefreshAt: lastSuccessfulRefreshAt,
+            historySchemaVersion: historySchemaVersion,
+            historyRecordingEnabled: historyRecordingEnabled,
             scanSummary: scanSummary,
             repositories: repositories,
             recentActivityEvents: events,
+            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
+            storageRevision: storageRevision,
+            persistenceState: persistenceState
+        )
+    }
+
+    func withHistoryMetadata(
+        historySchemaVersion: Int?,
+        historyRecordingEnabled: Bool?
+    ) -> AppGroupData {
+        AppGroupData(
+            schemaVersion: self.schemaVersion,
+            generatedAt: generatedAt,
+            writtenAt: writtenAt,
+            lastSuccessfulRefreshAt: lastSuccessfulRefreshAt,
+            historySchemaVersion: historySchemaVersion,
+            historyRecordingEnabled: historyRecordingEnabled,
+            scanSummary: scanSummary,
+            repositories: repositories,
+            recentActivityEvents: recentActivityEvents,
             repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
             storageRevision: storageRevision,
             persistenceState: persistenceState
@@ -1615,6 +1667,8 @@ struct AppGroupData: Codable, Equatable {
             generatedAt: generatedAt,
             writtenAt: writtenAt,
             lastSuccessfulRefreshAt: lastSuccessfulRefreshAt,
+            historySchemaVersion: historySchemaVersion,
+            historyRecordingEnabled: historyRecordingEnabled,
             scanSummary: scanSummary,
             repositories: repositories,
             recentActivityEvents: recentActivityEvents,
@@ -1647,6 +1701,8 @@ struct AppGroupData: Codable, Equatable {
             generatedAt: generatedAt,
             writtenAt: writtenAt,
             lastSuccessfulRefreshAt: lastSuccessfulRefreshAt,
+            historySchemaVersion: historySchemaVersion,
+            historyRecordingEnabled: historyRecordingEnabled,
             scanSummary: ScanSummary.build(
                 from: downgradedRepositories,
                 totalRepositories: max(scanSummary.totalRepositories, downgradedRepositories.count)
@@ -1699,6 +1755,8 @@ struct AppGroupData: Codable, Equatable {
             generatedAt: generatedAt,
             writtenAt: writtenAt,
             lastSuccessfulRefreshAt: lastSuccessfulRefreshAt,
+            historySchemaVersion: historySchemaVersion,
+            historyRecordingEnabled: historyRecordingEnabled,
             scanSummary: ScanSummary.build(
                 from: retainedRepositories,
                 totalRepositories: max(scanSummary.totalRepositories, retainedRepositories.count)

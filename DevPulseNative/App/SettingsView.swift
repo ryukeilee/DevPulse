@@ -386,6 +386,7 @@ struct SettingsView: View {
                     diagnosticsScanRootsSection
                     diagnosticsRepositoriesSection
                     diagnosticsEventsSection
+                    diagnosticsHistorySection
                 }
                 .padding(.top, 8)
             }
@@ -1908,6 +1909,75 @@ struct SettingsView: View {
         default:
             return (URL(fileURLWithPath: path).lastPathComponent, compactHomeRelativePath(path))
         }
+    }
+
+    @ViewBuilder
+    private var diagnosticsHistorySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("历史记录诊断")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                if let diagnostics = scheduler.historyDiagnostics {
+                    Text("\(diagnostics.currentEntryCount) 条记录")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            if let diagnostics = scheduler.historyDiagnostics {
+                VStack(alignment: .leading, spacing: 6) {
+                    diagnosticsHistoryRow(title: "累计写入", value: "\(diagnostics.totalEntriesWritten)")
+                    diagnosticsHistoryRow(title: "去重跳过", value: "\(diagnostics.totalDedupSkipped)")
+                    diagnosticsHistoryRow(title: "累计压缩", value: "\(diagnostics.totalCompactionRuns) 次")
+                    diagnosticsHistoryRow(title: "累计清理", value: "\(diagnostics.totalEntriesPurged)")
+                    if diagnostics.lastCompactionDurationMs > 0 {
+                        diagnosticsHistoryRow(title: "最近压缩耗时", value: String(format: "%.1f ms", diagnostics.lastCompactionDurationMs))
+                    }
+                    if diagnostics.storageFileSizeBytes > 0 {
+                        diagnosticsHistoryRow(title: "存储文件大小", value: formatBytes(diagnostics.storageFileSizeBytes))
+                    }
+                    diagnosticsHistoryRow(title: "仓库数", value: "\(diagnostics.totalRepositoryCount)")
+                }
+                .padding(8)
+                .settingsInnerSurface()
+            } else {
+                Text("历史记录存储尚未初始化。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            if scheduler.historyStore != nil {
+                Button("立即压缩历史记录") {
+                    Task { @MainActor in
+                        scheduler.historyStore?.compact()
+                    }
+                }
+                .buttonStyle(SettingsCompactButtonStyle())
+                .disabled(scheduler.isScanning)
+            }
+        }
+        .padding(10)
+        .settingsInnerSurface()
+    }
+
+    private func diagnosticsHistoryRow(title: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .frame(width: 110, alignment: .leading)
+            Text(value)
+                .font(.caption.weight(.semibold))
+        }
+    }
+
+    private func formatBytes(_ bytes: Int) -> String {
+        let kb = Double(bytes) / 1024.0
+        if kb < 1 { return "\(bytes) B" }
+        if kb < 1024 { return String(format: "%.1f KB", kb) }
+        let mb = kb / 1024.0
+        return String(format: "%.1f MB", mb)
     }
 
     private func compactHomeRelativePath(_ path: String) -> String {

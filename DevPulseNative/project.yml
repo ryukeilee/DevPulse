@@ -62,6 +62,7 @@ targets:
       - path: Core/CommitReadinessBadge.swift
       - path: Core/ActivityEvent.swift
       - path: Core/Models.swift
+      - path: Core/SharedSnapshotStore.swift
       - path: Utilities/DateFormatting.swift
     settings:
       base:

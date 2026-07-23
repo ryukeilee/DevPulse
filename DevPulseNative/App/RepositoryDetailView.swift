@@ -251,6 +251,7 @@ struct RepositoryDetailView: View {
                     trustNotice
                     overviewSection
                     recentActivitySection
+                    healthSection
                     localChangesSection
                     changedFilesSection
                     nextActionSection
@@ -392,6 +393,114 @@ struct RepositoryDetailView: View {
         }
     }
 
+    private var healthSection: some View {
+        detailCard(title: "健康趋势") {
+            if let assessment = healthAssessment {
+                if assessment.hasSufficientHistory {
+                    HStack(spacing: 8) {
+                        Image(systemName: healthIcon(for: assessment.overallRisk))
+                            .foregroundStyle(healthTint(for: assessment.overallRisk))
+                        Text(assessment.summary)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(assessment.signals.count) 个信号")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if !assessment.signals.isEmpty {
+                        ForEach(Array(assessment.signals.prefix(3))) { signal in
+                            HStack(spacing: 6) {
+                                Image(systemName: signal.systemImage)
+                                    .font(.caption)
+                                    .foregroundStyle(healthTint(for: signal.level))
+                                Text(signal.title)
+                                    .font(.caption)
+                                    .lineLimit(1)
+                                Spacer()
+                                Text(signal.currentValue)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                } else {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chart.bar.xaxis")
+                            .foregroundStyle(.tertiary)
+                        Text(assessment.primaryExplanation)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Button(action: { showTrendSheet = true }) {
+                    Label("查看完整趋势", systemImage: "chart.xyaxis.line")
+                        .font(.caption)
+                }
+                .buttonStyle(.link)
+                .sheet(isPresented: $showTrendSheet) {
+                    if let historyStore = scheduler.historyStore {
+                        RepositoryTrendSheet(
+                            repositoryID: activeRepository.id,
+                            repositoryName: activeRepository.name,
+                            historyStore: historyStore
+                        )
+                    }
+                }
+            } else if isHealthLoading {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("正在加载趋势数据…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                HStack(spacing: 6) {
+                    Image(systemName: "chart.bar.xaxis")
+                        .foregroundStyle(.tertiary)
+                    Text("扫描积累后将自动显示趋势")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .onAppear(perform: loadHealthAssessment)
+    }
+
+    private func loadHealthAssessment() {
+        guard scheduler.historyStore != nil else { return }
+        isHealthLoading = true
+        Task {
+            let assessment = await scheduler.healthAssessment(
+                for: activeRepository.id,
+                repositoryName: activeRepository.name
+            )
+            await MainActor.run {
+                self.healthAssessment = assessment
+                self.isHealthLoading = false
+            }
+        }
+    }
+
+    private func healthIcon(for risk: RiskLevel) -> String {
+        switch risk {
+        case .high: return "exclamationmark.triangle.fill"
+        case .medium: return "exclamationmark.circle"
+        case .low: return "checkmark.circle"
+        }
+    }
+
+    private func healthTint(for risk: RiskLevel) -> Color {
+        switch risk {
+        case .high: return .red
+        case .medium: return .orange
+        case .low: return .green
+        }
+    }
+
     private var recentActivitySection: some View {
         detailCard(title: "近期活动") {
             if recentEvents.isEmpty {
@@ -408,6 +517,10 @@ struct RepositoryDetailView: View {
             }
         }
     }
+
+    @State private var healthAssessment: RepositoryHealthAssessment?
+    @State private var isHealthLoading = false
+    @State private var showTrendSheet = false
 
     private var recentEvents: [ActivityEvent] {
         scheduler.activityEvents.filter { $0.repositoryID == activeRepository.id }

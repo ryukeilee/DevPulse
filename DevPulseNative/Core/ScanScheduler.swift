@@ -70,6 +70,7 @@ struct ScanExecutionRequest: Sendable {
     let previousSnapshot: AppGroupData?
     let source: ScanRefreshSource
     let metrics: ScanMetricsCollector
+    let progressHandler: (@Sendable (RefreshProgress) -> Void)?
 
     init(config: ScanConfig,
          roots: [String],
@@ -79,7 +80,8 @@ struct ScanExecutionRequest: Sendable {
          forceRepositoryDiscovery: Bool,
          previousSnapshot: AppGroupData? = nil,
          source: ScanRefreshSource = .manual,
-         metrics: ScanMetricsCollector = ScanMetricsCollector()) {
+         metrics: ScanMetricsCollector = ScanMetricsCollector(),
+         progressHandler: (@Sendable (RefreshProgress) -> Void)? = nil) {
         self.config = config
         self.roots = roots
         self.rootsSignature = rootsSignature
@@ -89,6 +91,7 @@ struct ScanExecutionRequest: Sendable {
         self.previousSnapshot = previousSnapshot
         self.source = source
         self.metrics = metrics
+        self.progressHandler = progressHandler
     }
 }
 typealias ScanExecution = @Sendable (ScanExecutionRequest) async -> (data: AppGroupData, warnings: [String], discoveredRepositoryPaths: [String])
@@ -712,8 +715,30 @@ final class ScanScheduler: ObservableObject {
     @Published private(set) var ignoredRepositories: [IgnoredRepository] = []
     @Published private(set) var retryingRepositoryIDs: Set<String> = []
     @Published private(set) var lastScanMetrics: ScanMetrics?
+    @Published private(set) var lastRefreshDiagnostics: RefreshDiagnostics?
     @Published var scanIntervalSeconds: TimeInterval = 300
     @Published var powerState: String = "normal"
+
+    /// Helper to compute a health assessment from history store data.
+    func healthAssessment(for repositoryID: String,
+                          repositoryName: String) async -> RepositoryHealthAssessment? {
+        guard let historyStore else { return nil }
+        switch historyStore.load(for: repositoryID) {
+        case .success(let entries):
+            return RepositoryHealthEngine.assess(
+                repositoryID: repositoryID,
+                repositoryName: repositoryName,
+                entries: entries
+            )
+        case .failure:
+            return nil
+        }
+    }
+
+    var historyDiagnostics: HistoryDiagnosticsSnapshot? {
+        historyStore?.diagnosticsSnapshot()
+    }
+    @Published private(set) var currentProgress: RefreshProgress?
 
     private var backgroundTimer: Timer?
     private var consecutiveNoChanges = 0
@@ -754,6 +779,7 @@ final class ScanScheduler: ObservableObject {
     private var repositoryRetryDrainGeneration = 0
     private var repositoryRetryDrainWaiters: [CheckedContinuation<Void, Never>] = []
     private let activityEventStore: ActivityEventStore?
+    let historyStore: RepositoryHistoryStore?
     private var configLoadedFromPersistence = false
     private var activityRepositoryIDMigrations: [String: String] = [:]
     private var requiresStartupScopeRefresh = false
@@ -802,16 +828,29 @@ final class ScanScheduler: ObservableObject {
 
     init(commandMode: Bool = false,
          activityEventStore: ActivityEventStore? = nil,
+         historyStore: RepositoryHistoryStore? = nil,
          scanExecution: @escaping ScanExecution = { request in
-        await GitRepositoryScanner.scan(
+        let engine = RefreshEngine()
+
+        // Forward progress reports if a handler is set
+        if let handler = request.progressHandler {
+            Task {
+                for await progress in engine.progress {
+                    handler(progress)
+                }
+            }
+        }
+
+        let result = await engine.execute(
             config: request.config,
             scanRoots: request.roots,
             knownRepositoryPaths: request.knownRepositoryPaths,
             ignoredRepositoryPaths: request.ignoredRepositoryPaths,
             forceRepositoryDiscovery: request.forceRepositoryDiscovery,
             previousSnapshot: request.previousSnapshot,
-            metrics: request.metrics
+            source: request.source
         )
+        return (data: result.data, warnings: result.warnings, discoveredRepositoryPaths: result.discoveredRepositoryPaths)
     }) {
         self.scanExecution = scanExecution
         self.repositoryRetryExecution = { config, previousSnapshot in
@@ -821,6 +860,7 @@ final class ScanScheduler: ObservableObject {
             )
         }
         self.activityEventStore = commandMode ? nil : activityEventStore
+        self.historyStore = commandMode ? nil : (historyStore ?? RepositoryHistoryStore.live())
         if commandMode {
             appGroupAvailable = AppGroupStore.isAvailable
             gitAvailable = ProcessRunner.isGitAvailable()
@@ -1266,6 +1306,11 @@ final class ScanScheduler: ObservableObject {
             )
 
             // 3. Run the actual scan (all I/O happens through the scanner inside).
+            let progressHandler: (@Sendable (RefreshProgress) -> Void)? = { [weak scheduler = self] progress in
+                Task { @MainActor in
+                    scheduler?.currentProgress = progress
+                }
+            }
             let requestObj = ScanExecutionRequest(
                 config: executionConfig,
                 roots: resolvedRoots.roots,
@@ -1275,7 +1320,8 @@ final class ScanScheduler: ObservableObject {
                 forceRepositoryDiscovery: shouldRediscover,
                 previousSnapshot: previousSnapshot,
                 source: request.source,
-                metrics: metricsCollector
+                metrics: metricsCollector,
+                progressHandler: progressHandler
             )
             let result = await execution(requestObj)
             let wasCancelled = Task.isCancelled
@@ -1292,6 +1338,7 @@ final class ScanScheduler: ObservableObject {
 
                 if wasCancelled {
                     self.isScanning = false
+                    self.currentProgress = nil
                     self.refreshPhase = .idle
                     self.refreshFailureMessage = nil
                     self.recordEvent(.scanFailed, "Scan cancelled by a newer refresh request")
@@ -1311,6 +1358,7 @@ final class ScanScheduler: ObservableObject {
                     )
 
                     self.isScanning = false
+                    self.currentProgress = nil
                     self.refreshPhase = .failure
                     self.refreshFailureMessage = failureMessage
                     self.scanRootAccessWarning = resolvedRoots.warning
@@ -1368,9 +1416,12 @@ final class ScanScheduler: ObservableObject {
                 if hadChanges {
                     self.lastResult = recorded
                 }
+                // Record repository state history in background
+                self.recordHistoryFromSnapshot(recorded)
                 self.lastScanAt = completedAt
                 self.diagnostics.lastScanAt = self.lastScanAt
                 self.isScanning = false
+                self.currentProgress = nil
                 self.refreshPhase = isDegraded ? .degraded : .success
                 self.refreshFailureMessage = nil
                 self.scanRootAccessWarning = resolvedRoots.warning
@@ -2189,6 +2240,75 @@ final class ScanScheduler: ObservableObject {
         )
     }
 
+    /// Record repository state history points into the history store.
+    /// Runs asynchronously on a utility queue to avoid blocking the main thread.
+    private func recordHistoryFromSnapshot(_ snapshot: AppGroupData) {
+        guard let historyStore else { return }
+        let recordedAt = snapshot.generatedAt
+        let repositories = snapshot.repositories
+
+        Task.detached(priority: .utility) { @Sendable [weak self] in
+            let loadResult = historyStore.load()
+            let previousStates: [String: HistoryStatePoint]
+            switch loadResult {
+            case .success(let entries):
+                var latest: [String: RepositoryHistoryEntry] = [:]
+                for entry in entries {
+                    if let existing = latest[entry.repositoryID] {
+                        if entry.recordedAt > existing.recordedAt {
+                            latest[entry.repositoryID] = entry
+                        }
+                    } else {
+                        latest[entry.repositoryID] = entry
+                    }
+                }
+                previousStates = latest.mapValues(\.state)
+            case .failure:
+                previousStates = [:]
+            }
+
+            var historyEntries: [RepositoryHistoryEntry] = []
+
+            for repo in repositories {
+                let point = HistoryStatePoint(snapshot: repo)
+                let previousPoint = previousStates[repo.id]
+                let previousDS = previousPoint?.dataSource
+                let kind = HistoryEntryKindClassifier.classify(
+                    previous: previousPoint,
+                    current: point,
+                    lastDataSource: previousDS,
+                    currentDataSource: point.dataSource
+                )
+
+                let entry = RepositoryHistoryEntry(
+                    repositoryID: repo.id,
+                    recordedAt: recordedAt,
+                    kind: kind,
+                    state: point
+                )
+                historyEntries.append(entry)
+            }
+
+            guard !historyEntries.isEmpty else { return }
+
+            switch historyStore.record(entries: historyEntries) {
+            case .success(let added):
+                if added > 0 {
+                    _ = added
+                    // Non-blocking background compaction if nearing limit
+                    let currentCount = historyStore.count()
+                    if currentCount > 8000 {
+                        historyStore.compact()
+                    }
+                    // Non-blocking background note — diagnostics available via scheduler.historyDiagnostics
+                    _ = historyStore.diagnosticsSnapshot()
+                }
+            case .failure:
+                break
+            }
+        }
+    }
+
     private func restorePersistedSnapshot() {
         syncStoreInspection()
         _ = AppGroupStore.cleanupTemporaryFiles()
@@ -2641,6 +2761,7 @@ final class ScanScheduler: ObservableObject {
         persistRepositoryTrustFailure shouldPersistRepositoryTrustFailure: Bool = false
     ) {
         isScanning = false
+        currentProgress = nil
         refreshPhase = .failure
         refreshFailureMessage = message
         diagnostics.lastRefreshCompletedAt = Date()
