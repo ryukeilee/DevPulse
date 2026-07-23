@@ -739,6 +739,11 @@ final class ScanScheduler: ObservableObject {
         historyStore?.diagnosticsSnapshot()
     }
     @Published private(set) var currentProgress: RefreshProgress?
+    @Published var workspaces: [Workspace] = []
+    @Published var workspaceAggregations: [String: WorkspaceAggregation] = [:]
+    @Published private(set) var workspaceSuggestionCandidates: [WorkspaceAutoSuggestCandidate] = []
+    private let workspaceStore: WorkspaceStore
+    private let workspaceAggregationCache: WorkspaceAggregationCache
 
     private var backgroundTimer: Timer?
     private var consecutiveNoChanges = 0
@@ -780,6 +785,7 @@ final class ScanScheduler: ObservableObject {
     private var repositoryRetryDrainWaiters: [CheckedContinuation<Void, Never>] = []
     private let activityEventStore: ActivityEventStore?
     let historyStore: RepositoryHistoryStore?
+    private var workspaceLoadingAttempted = false
     private var configLoadedFromPersistence = false
     private var activityRepositoryIDMigrations: [String: String] = [:]
     private var requiresStartupScopeRefresh = false
@@ -795,6 +801,216 @@ final class ScanScheduler: ObservableObject {
     private let lastRepositoryDiscoveryScanRootsKey = "last_repository_discovery_scan_roots"
     private let ignoredRepositoriesKey = "ignored_repositories_v1_json"
     private let legacyIgnoredRepositoryPathsKey = "ignored_repository_paths"
+
+    // MARK: - Workspace management
+
+    func loadWorkspaces() {
+        guard !workspaceLoadingAttempted else { return }
+        workspaceLoadingAttempted = true
+        switch workspaceStore.load() {
+        case .success(let archive):
+            self.workspaces = archive.workspaces
+            // Run initial migration for pinned repos not yet in workspaces
+            let result = WorkspaceMigrationEngine.migrateFromExistingData(
+                pinnedRepositoryIDs: pinnedRepoIDs,
+                allRepositories: lastResult.repositories,
+                existingWorkspaces: archive.workspaces
+            )
+            if result.workspacesCreated > 0 {
+                for ws in archive.workspaces {
+                    _ = workspaceStore.upsertWorkspace(ws)
+                }
+                // Create new workspaces for pinned repos
+                for i in 0..<result.workspacesCreated {
+                    let pinnedRepoIDs = Array(pinnedRepoIDs).sorted()
+                    if i < pinnedRepoIDs.count {
+                        let repoID = pinnedRepoIDs[i]
+                        if let repo = lastResult.repositories.first(where: { $0.id == repoID }) {
+                            let ws = Workspace(
+                                name: repo.name,
+                                sortOrder: workspaces.count + i,
+                                isPinned: true,
+                                repositoryIDs: [repoID],
+                                groupingBasis: .singleRepository,
+                                autoSuggestConfirmed: true
+                            )
+                            _ = workspaceStore.upsertWorkspace(ws)
+                        }
+                    }
+                }
+                // Reload
+                if case .success(let updated) = workspaceStore.load() {
+                    self.workspaces = updated.workspaces
+                }
+            }
+        case .failure:
+            self.workspaces = []
+        }
+    }
+
+    /// Recompute workspace aggregations after a scan completes.
+    private func refreshWorkspaceAggregations() {
+        let repos = lastResult.repositories
+        let confirmedWorkspaces = workspaces.filter { $0.autoSuggestConfirmed }
+        let unconfirmed = workspaces.filter { !$0.autoSuggestConfirmed }
+        Task.detached(priority: .utility) { @Sendable in
+            let aggregations = WorkspaceAggregationEngine.aggregateAll(
+                workspaces: confirmedWorkspaces,
+                allRepositories: repos
+            )
+            let unconfirmedAggregations = WorkspaceAggregationEngine.aggregateAll(
+                workspaces: unconfirmed,
+                allRepositories: repos
+            )
+            var all = aggregations
+            for (key, value) in unconfirmedAggregations {
+                all[key] = value
+            }
+            Task { @MainActor [weak self] in
+                self?.workspaceAggregations = all
+            }
+        }
+    }
+
+    /// Generate auto-suggest candidates for workspace grouping.
+    func refreshWorkspaceSuggestions() {
+        let repos = lastResult.repositories
+        let context = WorkspaceAutoSuggestEngine.SuggestionContext(
+            repositories: repos,
+            existingWorkspaces: workspaces,
+            dismissedHashes: Set()  // loaded from store on demand
+        )
+        Task.detached(priority: .utility) { @Sendable [weak self] in
+            guard let self else { return }
+            let candidates = WorkspaceAutoSuggestEngine.generateCandidates(context: context)
+            Task { @MainActor in
+                self.workspaceSuggestionCandidates = candidates
+            }
+        }
+    }
+
+    func createWorkspace(name: String, repositoryIDs: [String], groupingBasis: WorkspaceGroupingBasis) {
+        let ws = Workspace(
+            name: name,
+            sortOrder: workspaces.count,
+            repositoryIDs: repositoryIDs,
+            groupingBasis: groupingBasis
+        )
+        _ = workspaceStore.upsertWorkspace(ws)
+        loadWorkspacesFromStore()
+        refreshWorkspaceAggregations()
+    }
+
+    func deleteWorkspace(id: String) {
+        _ = workspaceStore.deleteWorkspace(id: id)
+        loadWorkspacesFromStore()
+        refreshWorkspaceAggregations()
+    }
+
+    func renameWorkspace(id: String, name: String) {
+        switch workspaceStore.load() {
+        case .success(var archive):
+            if let idx = archive.workspaces.firstIndex(where: { $0.id == id }) {
+                archive.workspaces[idx].name = name
+                archive.workspaces[idx].updatedAt = ISO8601DateFormatter().string(from: Date())
+                _ = workspaceStore.save(archive)
+                loadWorkspacesFromStore()
+            }
+        case .failure:
+            break
+        }
+    }
+
+    func moveRepositoryToWorkspace(repositoryID: String, fromWorkspaceID: String?, toWorkspaceID: String?) {
+        _ = workspaceStore.moveRepository(id: repositoryID, from: fromWorkspaceID, to: toWorkspaceID)
+        loadWorkspacesFromStore()
+        refreshWorkspaceAggregations()
+    }
+
+    func confirmWorkspaceSuggestion(_ candidate: WorkspaceAutoSuggestCandidate) {
+        let ws = Workspace(
+            name: candidate.name,
+            sortOrder: workspaces.count,
+            repositoryIDs: candidate.repositoryIDs,
+            groupingBasis: candidate.groupingBasis,
+            autoSuggestConfirmed: true
+        )
+        _ = workspaceStore.upsertWorkspace(ws)
+        loadWorkspacesFromStore()
+        refreshWorkspaceAggregations()
+        refreshWorkspaceSuggestions()
+    }
+
+    func dismissWorkspaceSuggestion(_ candidate: WorkspaceAutoSuggestCandidate) {
+        _ = workspaceStore.addDismissedSuggestion(hash: candidate.id)
+        refreshWorkspaceSuggestions()
+    }
+
+    func permanentlyIgnoreWorkspaceSuggestion(_ candidate: WorkspaceAutoSuggestCandidate) {
+        _ = workspaceStore.addDismissedSuggestion(hash: candidate.id)
+        refreshWorkspaceSuggestions()
+    }
+
+    func confirmUnconfirmedWorkspace(_ workspace: Workspace) {
+        let updated = Workspace(
+            id: workspace.id,
+            name: workspace.name,
+            sortOrder: workspace.sortOrder,
+            isPinned: workspace.isPinned,
+            repositoryIDs: workspace.repositoryIDs,
+            groupingBasis: workspace.groupingBasis,
+            autoSuggestConfirmed: true
+        )
+        _ = workspaceStore.upsertWorkspace(updated)
+        loadWorkspacesFromStore()
+        refreshWorkspaceAggregations()
+        refreshWorkspaceSuggestions()
+    }
+
+    private func loadWorkspacesFromStore() {
+        switch workspaceStore.load() {
+        case .success(let archive):
+            self.workspaces = archive.workspaces
+        case .failure:
+            break
+        }
+    }
+
+    func mergeWorkspaces(fromID: String, intoID: String) {
+        _ = workspaceStore.mergeWorkspaces(fromID: fromID, intoID: intoID)
+        loadWorkspacesFromStore()
+        refreshWorkspaceAggregations()
+    }
+
+    func splitWorkspace(sourceID: String, newName: String, moveRepositoryIDs: [String]) {
+        _ = workspaceStore.splitWorkspace(sourceID: sourceID, newName: newName, moveRepositoryIDs: moveRepositoryIDs)
+        loadWorkspacesFromStore()
+        refreshWorkspaceAggregations()
+    }
+
+    func reorderWorkspaces(ids: [String]) {
+        _ = workspaceStore.reorderWorkspaces(ids: ids)
+        loadWorkspacesFromStore()
+    }
+
+    func toggleWorkspacePin(id: String) {
+        switch workspaceStore.load() {
+        case .success(var archive):
+            if let idx = archive.workspaces.firstIndex(where: { $0.id == id }) {
+                archive.workspaces[idx].isPinned.toggle()
+                archive.workspaces[idx].updatedAt = ISO8601DateFormatter().string(from: Date())
+                _ = workspaceStore.save(archive)
+                loadWorkspacesFromStore()
+            }
+        case .failure:
+            break
+        }
+    }
+
+    /// Aggregation for a single workspace with drill-down support.
+    func aggregation(for workspaceID: String) -> WorkspaceAggregation? {
+        workspaceAggregations[workspaceID]
+    }
 
     // MARK: - Adaptive interval constants
 
@@ -861,6 +1077,8 @@ final class ScanScheduler: ObservableObject {
         }
         self.activityEventStore = commandMode ? nil : activityEventStore
         self.historyStore = commandMode ? nil : (historyStore ?? RepositoryHistoryStore.live())
+        self.workspaceStore = commandMode ? WorkspaceStore(fileURL: URL(fileURLWithPath: "/dev/null")) : WorkspaceStore.live()
+        self.workspaceAggregationCache = WorkspaceAggregationCache()
         if commandMode {
             appGroupAvailable = AppGroupStore.isAvailable
             gitAvailable = ProcessRunner.isGitAvailable()
@@ -868,9 +1086,12 @@ final class ScanScheduler: ObservableObject {
             return
         }
 
+        loadWorkspaces()
+
         loadConfig()
         loadScanDirectories()
         loadIgnoredRepositories()
+        loadWorkspaces()
         syncStoreInspection()
         appGroupAvailable = AppGroupStore.isAvailable
         gitAvailable = ProcessRunner.isGitAvailable()
@@ -1440,6 +1661,9 @@ final class ScanScheduler: ObservableObject {
                         self.lastRepositoryDiscoveryScanRootsSignature = rootsSignature
                     }
                 }
+                // Refresh workspace aggregations in background
+                self.refreshWorkspaceAggregations()
+                self.refreshWorkspaceSuggestions()
 
                 if self.warnings.isEmpty {
                     self.recordEvent(

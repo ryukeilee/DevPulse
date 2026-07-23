@@ -37,6 +37,9 @@ struct ContentView: View {
                 )
                 .tabContentVisibility(selectedTab == .overview)
 
+                WorkspaceListView()
+                    .tabContentVisibility(selectedTab == .workspaces)
+
                 RepositoryListView()
                     .tabContentVisibility(selectedTab == .repositories)
 
@@ -85,6 +88,11 @@ private struct AppSectionBar: View {
                     tab: .overview,
                     title: "Overview",
                     systemImage: "square.grid.2x2"
+                )
+                sectionButton(
+                    tab: .workspaces,
+                    title: "Workspaces",
+                    systemImage: "rectangle.3.group"
                 )
                 sectionButton(
                     tab: .repositories,

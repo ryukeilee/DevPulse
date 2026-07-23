@@ -1249,6 +1249,26 @@ struct ScanPerformanceTests {
         #expect(probeExited)
     }
 
+    @Test @MainActor func rapidRefreshStormDeduplication() async {
+        let probe = BlockingScanProbe()
+        let scheduler = ScanScheduler(
+            commandMode: true,
+            scanExecution: { request in
+                await probe.execute(request)
+            }
+        )
+
+        for _ in 0..<10 {
+            scheduler.scanNow(source: .manual)
+        }
+
+        #expect(await waitUntil { await probe.requestCount >= 1 })
+        #expect(await probe.requestCount == 1)
+
+        scheduler.shutdown()
+        #expect(await waitUntil { await probe.activeCount == 0 })
+    }
+
     private func resourceUsage() -> (cpuSeconds: Double, maxResidentBytes: Int64) {
 
         var usage = rusage()

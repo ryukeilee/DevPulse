@@ -273,6 +273,77 @@ enum GitRepositoryScanner {
 
     // MARK: - Public API
 
+    // MARK: - Discovery-only entry point
+
+    /// Perform repository discovery without running any git status or log
+    /// commands. Returns discovered paths, workspace classifications, and
+    /// any warnings. The caller is responsible for subsequent status reads.
+    static func discoverOnly(
+        config: ScanConfig = .default,
+        scanRoots: [String]? = nil,
+        knownRepositoryPaths: [String]? = nil,
+        ignoredRepositoryPaths: Set<String> = [],
+        forceRepositoryDiscovery: Bool = false,
+        previousSnapshot: AppGroupData? = nil,
+        metrics: ScanMetricsCollector? = nil,
+        gitCommandRunner: @escaping GitCommandRunner = defaultGitCommandRunner
+    ) async -> (
+        readablePaths: [String],
+        unavailablePaths: [String],
+        workspaceKindsByPath: [String: RepositoryWorkspaceKind],
+        allPaths: [String],
+        warnings: [String],
+        mode: RepositoryDiscoveryMode
+    ) {
+        let startTime = Date()
+        let collector = metrics ?? ScanMetricsCollector()
+        let scanToken = collector.beginScan()
+        defer {
+            collector.endScan(scanToken)
+            logScanSummary(collector.snapshot(), kind: "discovery")
+        }
+        var warnings: [String] = []
+        let previous = previousSnapshot ?? (try? AppGroupStore.read().get())
+        let previousRepositoryPaths = (previous?.repositories.map(\.path) ?? [])
+            + ((previous?.repositoryUnavailableSinceByPath?.keys).map { Array($0) } ?? [])
+        var previousWorkspaceKindsByPath: [String: RepositoryWorkspaceKind] = [:]
+        for repository in previous?.repositories ?? [] {
+            guard let workspaceKind = repository.workspaceKind else { continue }
+            previousWorkspaceKindsByPath[
+                RepositoryIdentity.canonicalPath(repository.path)
+            ] = workspaceKind
+        }
+
+        let discoveryStartedAt = ProcessInfo.processInfo.systemUptime
+        let discovery = await discoverRepositories(
+            config: config,
+            scanRoots: scanRoots,
+            knownRepositoryPaths: knownRepositoryPaths,
+            previousRepositoryPaths: previousRepositoryPaths,
+            previousWorkspaceKindsByPath: previousWorkspaceKindsByPath,
+            ignoredRepositoryPaths: ignoredRepositoryPaths,
+            forceRefresh: forceRepositoryDiscovery,
+            overallDeadline: startTime.addingTimeInterval(config.scanTimeout),
+            metrics: collector,
+            gitCommandRunner: gitCommandRunner,
+            warnings: &warnings
+        )
+        collector.recordDiscovery(
+            mode: repositoryDiscoveryMode(discovery.mode),
+            elapsed: ProcessInfo.processInfo.systemUptime - discoveryStartedAt,
+            discoveredRepositoryCount: discovery.retainedPaths.count
+        )
+
+        return (
+            readablePaths: discovery.readablePaths,
+            unavailablePaths: discovery.unavailablePaths,
+            workspaceKindsByPath: discovery.workspaceKindsByPath,
+            allPaths: discovery.retainedPaths,
+            warnings: warnings,
+            mode: repositoryDiscoveryMode(discovery.mode)
+        )
+    }
+
     /// Run a full scan with all low-power safeguards.
     /// Returns the scan result and an array of warning strings.
     static func scan(config: ScanConfig = .default,

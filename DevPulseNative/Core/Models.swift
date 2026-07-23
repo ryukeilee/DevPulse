@@ -2324,8 +2324,9 @@ enum WidgetDataTrustPrimaryButtonBuilder {
 
 enum AppTab: Int, Equatable {
     case overview = 0
-    case repositories = 1
-    case settings = 2
+    case workspaces = 1
+    case repositories = 2
+    case settings = 3
 }
 
 enum SettingsScrollTarget: Hashable {

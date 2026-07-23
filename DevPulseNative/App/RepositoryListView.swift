@@ -225,43 +225,55 @@ struct RepositoryListView: View {
     @ViewBuilder
     private func refreshHint(displayedCount: Int) -> some View {
         if scheduler.lastScanAt != nil || scheduler.refreshPhase != .idle {
-            HStack(spacing: 7) {
-                if scheduler.refreshPhase == .refreshing {
-                    ProgressView()
-                        .controlSize(.small)
-                        .scaleEffect(0.75)
-                } else {
-                    Circle()
-                        .fill(refreshHintTint.opacity(0.8))
-                        .frame(width: 6, height: 6)
-                        .accessibilityHidden(true)
-                }
+            VStack(spacing: 0) {
+                HStack(spacing: 7) {
+                    if scheduler.refreshPhase == .refreshing {
+                        ProgressView()
+                            .controlSize(.small)
+                            .scaleEffect(0.75)
+                    } else {
+                        Circle()
+                            .fill(refreshHintTint.opacity(0.8))
+                            .frame(width: 6, height: 6)
+                            .accessibilityHidden(true)
+                    }
 
-                Text(scheduler.refreshStatusText)
-                    .font(.caption)
-                    .foregroundStyle(refreshHintTint)
+                    Text(scheduler.refreshStatusText)
+                        .font(.caption)
+                        .foregroundStyle(refreshHintTint)
 
-                if let detail = scheduler.refreshDetailText {
-                    Text("· \(detail)")
+                    if let detail = scheduler.refreshDetailText {
+                        Text("· \(detail)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Text(repositoryCountLabel(displayedCount: displayedCount))
                         .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
                 }
+                .padding(.horizontal, RepositoryListMetrics.pageInset)
+                .padding(.top, 11)
+                .padding(.bottom, 1)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(
+                    [scheduler.refreshStatusText, scheduler.refreshDetailText]
+                        .compactMap { $0 }
+                        .joined(separator: "，")
+                )
 
-                Spacer()
-
-                Text(repositoryCountLabel(displayedCount: displayedCount))
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                if scheduler.isScanning, let progress = scheduler.currentProgress, let currentStage = progress.currentStage, let stageProgress = progress.phases[currentStage] {
+                    ProgressView(value: stageProgress.fraction)
+                        .progressViewStyle(.linear)
+                        .frame(maxWidth: .infinity)
+                        .scaleEffect(x: 1, y: 0.5, anchor: .center)
+                        .padding(.horizontal, RepositoryListMetrics.pageInset)
+                        .padding(.bottom, 6)
+                        .animation(.easeOut(duration: 0.2), value: scheduler.currentProgress)
+                }
             }
-            .padding(.horizontal, RepositoryListMetrics.pageInset)
-            .padding(.top, 11)
-            .padding(.bottom, 1)
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel(
-                [scheduler.refreshStatusText, scheduler.refreshDetailText]
-                    .compactMap { $0 }
-                    .joined(separator: "，")
-            )
         }
     }
 

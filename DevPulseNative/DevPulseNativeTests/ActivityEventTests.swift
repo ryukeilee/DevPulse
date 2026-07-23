@@ -431,6 +431,39 @@ struct ActivityEventTests {
         #expect(decoded.repositories.first?.lastCommitSummary == "Subject")
     }
 
+    @Test func identicalActivityEventsAreDeduplicated() {
+        // Pair 1: state change 0→2 produces one event
+        let base = snapshot(modified: 0)
+        let changed = snapshot(modified: 2)
+        let events1 = ActivityEventDiffer.events(
+            previous: data([base], generatedAt: "2026-07-20T08:00:00Z"),
+            current: data([changed], generatedAt: "2026-07-20T09:00:00Z"),
+            observedAt: "2026-07-20T09:00:00Z"
+        )
+        #expect(events1.count == 1)
+
+        // Pair 2: identical state produces no differ events
+        let events2 = ActivityEventDiffer.events(
+            previous: data([changed], generatedAt: "2026-07-20T09:00:00Z"),
+            current: data([changed], generatedAt: "2026-07-20T10:00:00Z"),
+            observedAt: "2026-07-20T10:00:00Z"
+        )
+        #expect(events2.isEmpty)
+
+        // Deduplicator: same event filtered when already in history
+        #expect(ActivityEventDeduplicator.newEvents(from: events1, comparedTo: events1).isEmpty)
+
+        // Change one value → event appears once
+        let further = snapshot(modified: 3)
+        let events3 = ActivityEventDiffer.events(
+            previous: data([changed], generatedAt: "2026-07-20T09:00:00Z"),
+            current: data([further], generatedAt: "2026-07-20T11:00:00Z"),
+            observedAt: "2026-07-20T11:00:00Z"
+        )
+        #expect(events3.count == 1)
+        #expect(ActivityEventDeduplicator.newEvents(from: events3, comparedTo: events1) == events3)
+    }
+
     private func makeWorkingTreeEvent(
         from oldCount: Int,
         to newCount: Int,
