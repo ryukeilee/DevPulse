@@ -660,10 +660,9 @@ struct RepositoryDiscoveryExperienceTests {
         }
 
         scheduler.scanNow(forceRepositoryDiscovery: true)
-        await Task.yield()
-        await Task.yield()
+        let requests = await recorder.waitForCount(1)
 
-        let request = try #require(await recorder.first())
+        let request = try #require(requests.first)
         #expect(request.roots.isEmpty)
         #expect(request.rootsSignature.isEmpty)
         #expect(request.forceRepositoryDiscovery)

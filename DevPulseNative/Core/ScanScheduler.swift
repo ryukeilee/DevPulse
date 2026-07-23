@@ -1152,7 +1152,12 @@ final class ScanScheduler: ObservableObject {
         if !waitsForRepositoryRetries {
             cancelRepositoryRetries()
         }
-        let signature = ScanSchedulerPolicy.scanRootsSignature(scanRoots().roots)
+        // Lightweight signature from configured paths, no file-system access.
+        let lightweightRoots = ScanLocationProvider.expandAll(
+            Array(scanLocationConfiguration.enabledBuiltInPaths)
+                + scanLocationConfiguration.customDirectories.map(\.path)
+        )
+        let signature = ScanSchedulerPolicy.scanRootsSignature(lightweightRoots)
         let queued: Bool
         if request.forceRepositoryDiscovery {
             queued = refreshCoordinator.requestForced(
@@ -1196,13 +1201,6 @@ final class ScanScheduler: ObservableObject {
         guard !isScanning else { return }
         pendingRepositoryRefreshRequirements.removeAll()
 
-        gitAvailable = ProcessRunner.isGitAvailable()
-        guard gitAvailable else {
-            failRefresh("Git 不可用", persistRepositoryTrustFailure: true)
-            completeCurrentScanAndDrain()
-            return
-        }
-
         isScanning = true
         diagnostics.lastRefreshStartedAt = Date()
         diagnostics.lastRefreshCompletedAt = nil
@@ -1215,44 +1213,82 @@ final class ScanScheduler: ObservableObject {
         diagnostics.sharedDataReadError = nil
         diagnostics.widgetSnapshotReadError = nil
         diagnostics.snapshotDecodable = false
-        let currentConfig = scanConfigForExecution()
-        let currentScanRoots = scanRoots()
-        let knownRepositoryPaths = lastDiscoveredRepositoryPaths
-        let currentScanRootsSignature = ScanSchedulerPolicy.scanRootsSignature(currentScanRoots.roots)
-        let shouldRediscoverRepositories = ScanSchedulerPolicy.shouldRediscoverRepositories(
-            forceRepositoryDiscovery: request.forceRepositoryDiscovery,
-            knownRepositoryPaths: knownRepositoryPaths,
-            lastRepositoryDiscoveryAt: lastRepositoryDiscoveryAt,
-            currentScanRootsSignature: currentScanRootsSignature,
-            lastScanRootsSignature: lastRepositoryDiscoveryScanRootsSignature
-        )
-        recordEvent(.scanStarted, "Scan started")
+        lastScanMetrics = nil
 
+        // Capture all values needed by the background task while on the
+        // main actor so the detached task never touches isolated state.
+        let capturedConfig = config
+        let capturedLocationConfig = scanLocationConfiguration
+        let capturedIgnoredPaths = ignoredRepositoryPaths
+        let knownRepositoryPaths = lastDiscoveredRepositoryPaths
+        let previousSnapshot = lastResult
+        let capturedRootsSignature = lastRepositoryDiscoveryScanRootsSignature
+        let capturedDiscoveryAt = lastRepositoryDiscoveryAt
         let execution = scanExecution
         let metricsCollector = ScanMetricsCollector()
-        lastScanMetrics = nil
-        let executionRequest = ScanExecutionRequest(
-            config: currentConfig,
-            roots: currentScanRoots.roots,
-            rootsSignature: currentScanRootsSignature,
-            knownRepositoryPaths: knownRepositoryPaths,
-            ignoredRepositoryPaths: ignoredRepositoryPaths,
-            forceRepositoryDiscovery: shouldRediscoverRepositories,
-            previousSnapshot: lastResult,
-            source: request.source,
-            metrics: metricsCollector
-        )
         scanGeneration &+= 1
         let generation = scanGeneration
-        scanTask = Task.detached(priority: request.taskPriority) { [weak self] in
-            let result = await execution(executionRequest)
+        recordEvent(.scanStarted, "Scan started")
+
+        scanTask = Task.detached(priority: request.taskPriority) {
+            // ---- Everything below runs OFF the main actor ----
+
+            // 1. Git availability check (synchronous file check, off-main).
+            let gitAvailable = ProcessRunner.isGitAvailable()
+            guard gitAvailable else {
+                await MainActor.run { [weak self] in
+                    guard let self, self.scanGeneration == generation else { return }
+                    self.failRefresh("Git is not available", persistRepositoryTrustFailure: true)
+                    self.completeCurrentScanAndDrain()
+                }
+                return
+            }
+
+            // 2. Resolve scan roots (synchronous FileManager checks, off-main).
+            let resolvedRoots = Self.resolveScanRootsOffMain(
+                locationConfig: capturedLocationConfig,
+                capturedConfig: capturedConfig
+            )
+            let executionConfig: ScanConfig = {
+                var c = capturedConfig
+                c.enabledBuiltInPaths = capturedLocationConfig.enabledBuiltInPaths
+                c.customPaths = capturedLocationConfig.customDirectories.map(\.path)
+                return c
+            }()
+            let rootsSignature = ScanSchedulerPolicy.scanRootsSignature(resolvedRoots.roots)
+            let forceDiscovery = request.forceRepositoryDiscovery
+            let shouldRediscover = ScanSchedulerPolicy.shouldRediscoverRepositories(
+                forceRepositoryDiscovery: forceDiscovery,
+                knownRepositoryPaths: knownRepositoryPaths,
+                lastRepositoryDiscoveryAt: capturedDiscoveryAt,
+                currentScanRootsSignature: rootsSignature,
+                lastScanRootsSignature: capturedRootsSignature
+            )
+
+            // 3. Run the actual scan (all I/O happens through the scanner inside).
+            let requestObj = ScanExecutionRequest(
+                config: executionConfig,
+                roots: resolvedRoots.roots,
+                rootsSignature: rootsSignature,
+                knownRepositoryPaths: knownRepositoryPaths,
+                ignoredRepositoryPaths: capturedIgnoredPaths,
+                forceRepositoryDiscovery: shouldRediscover,
+                previousSnapshot: previousSnapshot,
+                source: request.source,
+                metrics: metricsCollector
+            )
+            let result = await execution(requestObj)
             let wasCancelled = Task.isCancelled
 
+            // ---- Back on the main actor for result plumbing ----
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 guard self.scanGeneration == generation else { return }
                 self.scanTask = nil
                 self.lastScanMetrics = metricsCollector.snapshot()
+                self.gitAvailable = true
+                self.diagnostics.scanRoots = resolvedRoots.roots
+                self.diagnostics.scanRootWarnings = resolvedRoots.warning.map { [$0] } ?? []
 
                 if wasCancelled {
                     self.isScanning = false
@@ -1265,29 +1301,29 @@ final class ScanScheduler: ObservableObject {
 
                 if let failureMessage = self.scanFailureMessage(
                     for: result.data,
-                    scanRoots: currentScanRoots,
+                    scanRoots: resolvedRoots,
                     warnings: result.warnings
                 ) {
-                    let previousSnapshot = self.lastResult
+                    let previous = self.lastResult
                     let combinedWarnings = self.summarizeWarnings(
                         result.warnings,
-                        accessWarning: currentScanRoots.warning
+                        accessWarning: resolvedRoots.warning
                     )
 
                     self.isScanning = false
                     self.refreshPhase = .failure
                     self.refreshFailureMessage = failureMessage
-                    self.scanRootAccessWarning = currentScanRoots.warning
+                    self.scanRootAccessWarning = resolvedRoots.warning
                     self.warnings = [failureMessage] + combinedWarnings.filter { $0 != failureMessage }
                     self.diagnostics.validationIssues = self.warnings
                     self.recordEvent(.scanFailed, failureMessage)
                     self.lastDiscoveredRepositoryPaths = result.discoveredRepositoryPaths
-                    if shouldRediscoverRepositories,
+                    if shouldRediscover,
                        GitRepositoryScanner.discoveryWasIncomplete(result.warnings) {
                         self.lastRepositoryDiscoveryAt = ScanSchedulerPolicy
                             .shouldPreserveDiscoveryScopeAfterIncompleteRefresh(
                                 knownRepositoryPaths: knownRepositoryPaths,
-                                currentScanRootsSignature: currentScanRootsSignature,
+                                currentScanRootsSignature: rootsSignature,
                                 lastScanRootsSignature: self.lastRepositoryDiscoveryScanRootsSignature
                             ) ? Date() : nil
                     }
@@ -1297,14 +1333,14 @@ final class ScanScheduler: ObservableObject {
                         fallbackSnapshot: result.data
                     )
                     self.cleanupRemovedRepositoryPins(
-                        previous: previousSnapshot,
+                        previous: previous,
                         current: self.lastResult
                     )
                     self.completeCurrentScanAndDrain()
                     return
                 }
 
-                let previousSnapshot = self.lastResult
+                let previous = self.lastResult
                 let pinned = self.applyPins(result.data)
                 let completedAt = DateFormatting.date(from: pinned.generatedAt)
                 let isDegraded = pinned.scanSummary.errorRepositories > 0
@@ -1312,25 +1348,22 @@ final class ScanScheduler: ObservableObject {
                 let trustedResult = pinned.withLastSuccessfulRefreshAt(
                     !isDegraded && completedAt != nil
                         ? pinned.generatedAt
-                        : previousSnapshot.lastSuccessfulRefreshAt
+                        : previous.lastSuccessfulRefreshAt
                 )
                 let combinedWarnings = self.summarizeWarnings(
                     result.warnings,
-                    accessWarning: currentScanRoots.warning
+                    accessWarning: resolvedRoots.warning
                 )
                 self.warnings = combinedWarnings
-                let hadChanges = self.hadChanges(before: previousSnapshot, after: trustedResult)
+                let hadChanges = self.hadChanges(before: previous, after: trustedResult)
                 let recorded = hadChanges
                     ? self.recordActivityEvents(
-                        previous: previousSnapshot,
+                        previous: previous,
                         current: trustedResult,
                         observedAt: trustedResult.generatedAt
                     )
-                    : previousSnapshot
-                self.cleanupRemovedRepositoryPins(
-                    previous: previousSnapshot,
-                    current: recorded
-                )
+                    : previous
+                self.cleanupRemovedRepositoryPins(previous: previous, current: recorded)
 
                 if hadChanges {
                     self.lastResult = recorded
@@ -1340,20 +1373,20 @@ final class ScanScheduler: ObservableObject {
                 self.isScanning = false
                 self.refreshPhase = isDegraded ? .degraded : .success
                 self.refreshFailureMessage = nil
-                self.scanRootAccessWarning = currentScanRoots.warning
+                self.scanRootAccessWarning = resolvedRoots.warning
                 self.diagnostics.validationIssues = self.warnings
                 self.lastDiscoveredRepositoryPaths = result.discoveredRepositoryPaths
-                if shouldRediscoverRepositories {
+                if shouldRediscover {
                     if GitRepositoryScanner.discoveryWasIncomplete(result.warnings) {
                         self.lastRepositoryDiscoveryAt = ScanSchedulerPolicy
                             .shouldPreserveDiscoveryScopeAfterIncompleteRefresh(
                                 knownRepositoryPaths: knownRepositoryPaths,
-                                currentScanRootsSignature: currentScanRootsSignature,
+                                currentScanRootsSignature: rootsSignature,
                                 lastScanRootsSignature: self.lastRepositoryDiscoveryScanRootsSignature
                             ) ? Date() : nil
                     } else {
                         self.lastRepositoryDiscoveryAt = Date()
-                        self.lastRepositoryDiscoveryScanRootsSignature = currentScanRootsSignature
+                        self.lastRepositoryDiscoveryScanRootsSignature = rootsSignature
                     }
                 }
 
@@ -1369,7 +1402,6 @@ final class ScanScheduler: ObservableObject {
                     )
                 }
 
-                // Adaptive interval
                 if hadChanges {
                     self.consecutiveNoChanges = 0
                 } else {
@@ -1377,7 +1409,7 @@ final class ScanScheduler: ObservableObject {
                 }
                 self.updateScanInterval()
                 if hadChanges {
-                    self.syncSharedSnapshot(from: recorded, previousSnapshot: previousSnapshot, reason: "scan")
+                    self.syncSharedSnapshot(from: recorded, previousSnapshot: previous, reason: "scan")
                 } else {
                     self.diagnostics.lastRefreshCompletedAt = Date()
                     self.diagnostics.lastSnapshotStoreTrigger = "scan"
@@ -1932,6 +1964,77 @@ final class ScanScheduler: ObservableObject {
             previousSnapshot: before,
             nextSnapshot: after
         )
+    }
+
+    /// Resolve scan roots without accessing any main-actor-isolated state.
+    /// All FileManager calls run on the calling (background) thread.
+    private nonisolated static func resolveScanRootsOffMain(
+        locationConfig: ScanLocationConfiguration,
+        capturedConfig: ScanConfig
+    ) -> (roots: [String], warning: String?) {
+        let enabledBuiltIn = ScanLocationProvider.builtInLocations
+            .map(ScanLocationProvider.expandTilde)
+            .filter { locationConfig.enabledBuiltInPaths.contains($0) }
+        let customDirs = locationConfig.customDirectories
+
+        var roots: [String] = []
+        var inaccessibleCount = 0
+        var containerPathCount = 0
+
+        for path in enabledBuiltIn {
+            let norm = ScanLocationProvider.canonicalExistingFilePath(path)
+            if ScanLocationProvider.isLikelySandboxContainerPath(norm) {
+                containerPathCount += 1
+                continue
+            }
+            var isDir: ObjCBool = false
+            if !(FileManager.default.fileExists(atPath: norm, isDirectory: &isDir) && isDir.boolValue) {
+                inaccessibleCount += 1
+            }
+            roots.append(norm)
+        }
+
+        for dir in customDirs {
+            let resolved: String
+            if let bm = dir.bookmarkData {
+                var stale = false
+                if let url = try? URL(
+                    resolvingBookmarkData: bm,
+                    options: [.withSecurityScope],
+                    relativeTo: nil,
+                    bookmarkDataIsStale: &stale
+                ) {
+                    resolved = ScanLocationProvider.canonicalExistingFilePath(url.path)
+                } else {
+                    resolved = ScanLocationProvider.canonicalExistingFilePath(dir.path)
+                }
+            } else {
+                resolved = ScanLocationProvider.canonicalExistingFilePath(dir.path)
+            }
+
+            if ScanLocationProvider.isLikelySandboxContainerPath(resolved) {
+                containerPathCount += 1
+                continue
+            }
+            var isDir: ObjCBool = false
+            if !(FileManager.default.fileExists(atPath: resolved, isDirectory: &isDir) && isDir.boolValue) {
+                inaccessibleCount += 1
+            }
+            roots.append(resolved)
+        }
+
+        let deduped = Array(Set(roots)).sorted()
+        let warning: String?
+        if deduped.isEmpty {
+            warning = "没有找到可用的扫描目录。请在设置中添加一个真实的仓库根目录。"
+        } else if containerPathCount > 0 {
+            warning = "检测到沙盒容器路径，已忽略。请把扫描目录改回真实用户目录。"
+        } else if inaccessibleCount > 0 {
+            warning = "部分目录权限失效，请在设置中重新授权。"
+        } else {
+            warning = nil
+        }
+        return (deduped, warning)
     }
 
     private func scanRoots() -> (roots: [String], warning: String?) {

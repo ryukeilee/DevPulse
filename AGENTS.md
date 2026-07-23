@@ -1,61 +1,127 @@
 # Repository Guidelines
 
 ## Current Scope
-DevPulse is currently a local-first native macOS app plus WidgetKit extension. The product scope in this repository is the Swift/Xcode app under `DevPulseNative/`; there is no web app, backend, cloud sync, GitHub API, AI integration, or Git write path here.
+DevPulse is a local-first native macOS app with a WidgetKit extension. The entire product lives in `DevPulseNative/`. There is no Electron app, no backend, no cloud sync, no GitHub API integration, no AI integration, and no Git write path.
+
+GitHub remote: `origin https://github.com/ryukeilee/DevPulse.git`
 
 Preserve these boundaries unless the task explicitly changes product scope:
-- read local Git metadata only
-- show changed file basenames only
+- read local Git metadata only (`git status --porcelain=v2 --branch`, `git log -1`)
+- show changed file basenames only; do not expose full paths unnecessarily
 - do not read repository file contents unless the task requires it
-- do not add commit, push, sync, or remote API behavior
+- do not add commit, push, fetch, checkout, reset, or other Git mutations
+- do not add network or cloud access implicitly
 
-## Project Structure
-Primary code lives in `DevPulseNative/`.
+## Project Initialization
 
-- `App/`: SwiftUI app entry and screens
-- `Core/`: repository scanning, models, sorting, readiness, shared snapshot logic
-- `Utilities/`: reusable helpers
-- `Widget/`: WidgetKit extension
-- `DevPulseNativeTests/`: focused native tests
+First-time setup:
 
-Support files:
+```sh
+# Install Node.js dependencies (build tooling, icon generation)
+npm install
 
-- `scripts/verify-widgetkit.sh`: build plus Widget/App Group wiring checks
-- `scripts/verify-activity-timeline.sh`: timeline model verification harness
-- `scripts/install-and-self-check.sh`: signed local install plus runtime self-check
-- `scripts/secret-scan.sh`: staged or tracked secret scan
-- `scripts/generate-icon.mjs`: local icon asset generator
-- `docs/widgetkit-troubleshooting.md`: WidgetKit/signing troubleshooting reference
+# Ensure git hooks point to this repo's hooks
+git config core.hooksPath .githooks
+```
 
-Avoid committing DerivedData, build products, installed app bundles, or Xcode user state.
+`.env` with credentials should exist in the repo root; if missing, copy `.env.example` and populate.
 
-## Build And Verification
-Run commands from the repository root unless a command states otherwise.
+## Repository Layout
 
-Use repository verification entry points before inventing ad hoc commands.
+```
+.
+├── .claude/worktrees/        # Claude worktree sessions
+├── .githooks/
+│   ├── pre-commit            # runs scripts/secret-scan.sh staged
+│   └── pre-push              # runs scripts/secret-scan.sh tracked
+├── DevPulseNative/           # ⬅ primary product (see DevPulseNative/AGENTS.md)
+│   ├── App/                  # SwiftUI views (DevPulseApp, ContentView, settings, etc.)
+│   ├── Core/                 # scanning, models, readiness, risk, activity, snapshots
+│   ├── Utilities/            # ProcessRunner, DateFormatting
+│   ├── Widget/               # WidgetKit extension
+│   ├── DevPulseNativeTests/  # Swift Testing coverage
+│   ├── Assets.xcassets/      # app icon
+│   ├── project.yml           # XcodeGen declarative project spec
+│   └── AGENTS.md             # detailed native-app agent guidelines
+├── scripts/
+│   ├── verify-widgetkit.sh
+│   ├── verify-activity-timeline.sh
+│   ├── install-and-self-check.sh
+│   ├── secret-scan.sh
+│   └── generate-icon.mjs
+├── docs/
+│   └── widgetkit-troubleshooting.md
+├── CLAUDE.md
+├── AGENTS.md
+├── README.md
+├── SECURITY.md
+├── .env.example
+└── .gitignore
+```
 
-- Build: `xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug -destination platform=macOS CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build`
-- Tests: `xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug -derivedDataPath /tmp/devpulse-build -destination platform=macOS CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test`
-- Widget wiring: `./scripts/verify-widgetkit.sh`
-- Activity timeline logic: `./scripts/verify-activity-timeline.sh`
+Do not commit DerivedData, build products, installed app bundles, or Xcode user state.
 
-When the task touches installation, signing, launch, snapshot generation, or the app/widget runtime contract, prefer `./scripts/install-and-self-check.sh` if the environment is authorized and a signing identity is available.
+## Core files (DevPulseNative/Core/)
 
-For local install or Widget acceptance on a machine without an Xcode Developer account session, prefer this order:
+| File | Purpose |
+|------|---------|
+| `Models.swift` | RepositorySnapshot, RiskLevel, AppGroupData, WidgetRepositoryEntry, ScanSummary |
+| `GitRepositoryScanner.swift` | actor-based repo discovery + batched git-status read + slow-repo tracking |
+| `GitStatusParser.swift` | parse `git status --short` output |
+| `AppGroupStore.swift` | read/write AppGroupData to shared container |
+| `SharedSnapshotStore.swift` | atomic snapshot persistence for app + Widget sharing |
+| `ActivityEvent.swift` | activity event model and derivation |
+| `RepositorySorter.swift` | sort repos by recency, dirtiness, branch |
+| `RiskHintEngine.swift` | flag risky changes |
+| `CommitReadinessEngine.swift` | rules-based readiness assessment |
+| `CommitReadinessBadge.swift` | badge rendering logic for readiness |
+| `ScanScheduler.swift` | timer-based scan scheduling |
+| `ScanLocationProvider.swift` | scan root resolution |
+| `ExcludedDirectoryRules.swift` | directory exclusion rules |
+| `LaunchAtLoginController.swift` | ServiceManagement-based launch-at-login |
 
-- `./scripts/install-and-self-check.sh`
-- `./scripts/verify-widgetkit.sh`
-- `pluginkit -vm -A -D -i local.devpulse.app.widget`
-- `/Applications/DevPulse.app/Contents/MacOS/DevPulse --self-check`
-- targeted `log show` checks for `amfid`, `taskgated-helper`, `chronod`, and `runningboardd`
+## Test files (DevPulseNative/DevPulseNativeTests/)
 
-Treat `codesign --verify` as necessary but not sufficient for Widget launch.
-If logs show `No matching profile found` or `no eligible provisioning profiles found`, record that as an Apple provisioning-profile blocker for the current machine instead of continuing to modify app logic.
+| File | Coverage |
+|------|----------|
+| `ActivityEventTests.swift` | activity event derivation |
+| `CommitReadinessEngineTests.swift` | readiness rules |
+| `LaunchAtLoginControllerTests.swift` | login item registration |
+| `RepositoryDiscoveryExperienceTests.swift` | discovery flow |
+| `ScanPerformanceTests.swift` | scanning performance |
+| `SharedSnapshotStoreTests.swift` | snapshot persistence |
 
-For small logic changes, run the narrowest relevant verifier first, then the broader build/test command if risk justifies it.
+## Build and Verification
 
-## Project Facts That Matter During Changes
-Current native targets and identifiers:
+Run commands from the repository root unless stated otherwise.
+
+```sh
+# Build native app (no signing)
+xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj \
+  -scheme DevPulse -configuration Debug \
+  -destination 'platform=macOS' \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+
+# Run native tests
+xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj \
+  -scheme DevPulse -configuration Debug \
+  -derivedDataPath /tmp/devpulse-build \
+  -destination 'platform=macOS' \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test
+
+# Widget wiring check
+./scripts/verify-widgetkit.sh
+
+# Activity timeline logic check
+./scripts/verify-activity-timeline.sh
+
+# Signed local install + runtime self-check (requires signing identity)
+./scripts/install-and-self-check.sh
+```
+
+For small logic changes, run the narrowest relevant test first, then broaden according to risk.
+
+## Project Configuration
 
 - app scheme: `DevPulse`
 - app bundle id: `local.devpulse.app`
@@ -63,49 +129,49 @@ Current native targets and identifiers:
 - shared App Group: `group.local.devpulse`
 - test target bundle id: `local.devpulse.DevPulseTests`
 - deployment target: macOS 14.0
+- Swift: 6
+- marketing version: 0.2.0
 
-This project builds a host app, a widget extension, and native tests from one Xcode project. Changes affecting bundle IDs, entitlements, `Info.plist`, widget embedding, or shared snapshot format are high-risk and should be verified explicitly.
+Changes affecting bundle IDs, entitlements, `Info.plist`, widget embedding, App Group wiring, or shared snapshot format are high-risk and must be verified explicitly.
+
+`project.yml` is the declarative project definition; when changing targets, sources, build settings, or entitlements, update `project.yml` and regenerate with `cd DevPulseNative && xcodegen generate`. Do not hand-edit generated `.xcodeproj` data.
 
 ## Change Boundaries
-Keep changes tightly scoped to the active goal.
 
-- Preserve existing SwiftUI structure and naming unless the task requires a refactor.
+- Make the smallest sufficient change; preserve existing SwiftUI structure, naming, and behavior.
 - Keep repository scanning read-only.
-- Preserve App Group sharing between app and widget unless the task is specifically about that contract.
+- Preserve App Group sharing between app and widget.
 - Do not change signing, Team configuration, bundle identifiers, or entitlements as incidental cleanup.
-- Do not add account identifiers, team identifiers, certificate hashes, provisioning UUIDs, or other machine-specific signing values to docs unless the task explicitly requires them.
+- Never insert personal Team ID, certificate hash, provisioning UUID, or other machine-specific signing values into tracked files.
 - Do not introduce broad formatting churn or unrelated file moves.
 
 ## Testing Guidance
-Prefer focused coverage in `DevPulseNative/DevPulseNativeTests/` when changing scan logic, readiness rules, repository discovery, or launch-at-login behavior.
 
-If a change affects widget rendering or shared snapshot consumption, verify both:
-- native build or tests
-- `scripts/verify-widgetkit.sh` and/or `scripts/verify-activity-timeline.sh`, depending on the touched path
+Add or update focused coverage in `DevPulseNative/DevPulseNativeTests/` when changing:
+- scanning, parsing, concurrency, timeout, or performance
+- repository discovery, exclusions, or scan-location handling
+- commit readiness, risk hints, sorting, or activity-event derivation
+- shared snapshot encoding, atomic persistence, recovery, or diagnostics
+- launch-at-login behavior
 
-If real runtime behavior cannot be fully proven in CLI, state what was verified and what still needs manual confirmation in the installed app or widget.
+Widget-facing changes must verify both sides: snapshot production in Core and consumption in `Widget/`.
 
-## Definition Of Done
-- The requested behavior is implemented with the smallest sufficient in-scope change.
-- The narrowest relevant verifier passes; broaden to build, tests, Widget wiring, or runtime self-check only when the touched behavior requires it.
-- Documentation-only changes are checked by focused inspection and do not require unrelated builds.
-- The final diff and Git status contain no unrelated edits, generated artifacts, build products, or machine-local state.
-- The final report names checks actually run and any remaining manual confirmation, environment limitation, or blocker.
+If runtime behavior cannot be fully proven in CLI, state what was verified and what remains for manual confirmation.
 
-## Review Guidelines
-- Report only actionable defects introduced by the change, with the affected path and concrete impact; do not report style-only preferences as findings.
-- Treat regressions in the local-first privacy boundary as blocking, including unexpected file-content reads, network or cloud access, Git writes, or disclosure of paths beyond the intended basename-only UI.
-- Flag incidental changes to bundle identifiers, App Group wiring, entitlements, signing configuration, deployment target, or the shared snapshot contract.
-- Flag committed secrets, signing material, machine-specific identifiers, build products, DerivedData, installed app bundles, or Xcode user state.
-- Verify that changed scan, readiness, discovery, Widget, snapshot, or launch-at-login behavior has focused coverage or an explicit verification path; flag weakened or bypassed tests.
+## Security and Privacy (Blocking Regressions)
 
-## Security And Privacy
-Do not commit secrets, signing material, or private keys. Keep `.env.example` as placeholder-only documentation.
+- new file-content reads unrelated to explicit user intent
+- network, cloud, telemetry, or remote API access added without scope authorization
+- Git write operations
+- UI or logs disclosing full repository paths where basenames suffice
+- committed credentials, signing material, private keys, or machine-specific identifiers
+- incidental changes to bundle IDs, App Group entitlements, signing, deployment target, or shared snapshot format
 
-DevPulse's privacy boundary is part of the product contract:
-- no file-content reads unless explicitly required
-- no secret harvesting
-- no network or cloud integration added implicitly
-- no Git write operations
+Before commit or release-oriented work, run `./scripts/secret-scan.sh staged`.
 
-Before commit or release-oriented work, run `./scripts/secret-scan.sh staged` when relevant.
+## Definition of Done
+
+- The requested behavior is implemented with no material scope expansion.
+- The narrowest relevant verifier passes; broaden to build/tests only when risk justifies it.
+- The final diff is focused; Git status contains no generated or machine-local artifacts.
+- The final report lists only checks actually run and clearly states any unverified runtime behavior, environmental blocker, or required manual confirmation.
