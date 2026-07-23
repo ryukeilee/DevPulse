@@ -509,7 +509,7 @@ enum GitRepositoryScanner {
         }
 
         if !forceRefresh {
-            switch reusableKnownRepositoryPaths(
+            switch await reusableKnownRepositoryPaths(
                 knownCandidates,
                 limitedTo: normalizedRoots,
                 excluding: ignoredPaths,
@@ -517,7 +517,7 @@ enum GitRepositoryScanner {
                 successMode: .reusedKnown
             ) {
             case .reusable(let reusedPaths):
-                let enriched = enrichWorktreeDiscovery(
+                let enriched = await enrichWorktreeDiscovery(
                     reusedPaths,
                     scanRoots: normalizedRoots,
                     ignoredPaths: ignoredPaths,
@@ -548,7 +548,7 @@ enum GitRepositoryScanner {
         if forceRefresh {
             await discoveryCache.removeValue(for: cacheKey)
         } else if let cached = await discoveryCache.cachedPaths(for: cacheKey) {
-            switch reusableKnownRepositoryPaths(
+            switch await reusableKnownRepositoryPaths(
                 cached,
                 limitedTo: normalizedRoots,
                 excluding: ignoredPaths,
@@ -556,7 +556,7 @@ enum GitRepositoryScanner {
                 successMode: .reusedCache
             ) {
             case .reusable(let reusableCached):
-                let enriched = enrichWorktreeDiscovery(
+                let enriched = await enrichWorktreeDiscovery(
                     reusableCached,
                     scanRoots: normalizedRoots,
                     ignoredPaths: ignoredPaths,
@@ -588,7 +588,7 @@ enum GitRepositoryScanner {
             if traversalState.shouldStop(deadline: overallDeadline) { break }
             switch directoryAvailability(at: root) {
             case .repository:
-                walkDirectory(
+                await walkDirectory(
                     root,
                     config: config,
                     ignoredPaths: ignoredPaths,
@@ -625,7 +625,7 @@ enum GitRepositoryScanner {
             mode: traversalState.isComplete ? .walked : .incomplete,
             isComplete: traversalState.isComplete
         )
-        let enriched = enrichWorktreeDiscovery(
+        let enriched = await enrichWorktreeDiscovery(
             walked,
             scanRoots: normalizedRoots,
             ignoredPaths: ignoredPaths,
@@ -697,7 +697,7 @@ enum GitRepositoryScanner {
         metrics: ScanMetricsCollector,
         gitCommandRunner: @escaping GitCommandRunner,
         warnings: inout [String]
-    ) -> RepositoryDiscoveryResult {
+    ) async -> RepositoryDiscoveryResult {
         var readablePaths = Set(discovery.readablePaths.map(RepositoryIdentity.canonicalPath))
         var unavailablePaths = Set(discovery.unavailablePaths.map(RepositoryIdentity.canonicalPath))
         var workspaceKindsByPath: [String: RepositoryWorkspaceKind] = [:]
@@ -775,12 +775,13 @@ enum GitRepositoryScanner {
             }
 
             coveredPaths.formUnion(topology.kindsByPath.keys)
+            let worktreeCheckTimeout = min(config.gitCommandTimeout, max(0, topologyDeadline.timeIntervalSinceNow))
             for (path, kind) in topology.kindsByPath {
                 guard scanRoots.contains(where: {
                     RepositoryIdentity.isSameOrDescendantPath(path, of: $0)
                 }),
                 !RepositoryScope.contains(path, in: ignoredPaths),
-                repositoryAvailability(at: path) == .repository else { continue }
+                await checkedAvailability(at: path, timeout: worktreeCheckTimeout) == .repository else { continue }
 
                 readablePaths.insert(path)
                 unavailablePaths.remove(path)
@@ -869,7 +870,7 @@ enum GitRepositoryScanner {
         excluding ignoredPaths: Set<String>,
         overallDeadline: Date,
         successMode: DiscoveryMode
-    ) -> RepositoryReuseAttempt {
+    ) async -> RepositoryReuseAttempt {
         let normalizedRoots = scanRoots.map {
             ScanLocationProvider.canonicalExistingFilePath($0, resolveBuiltIn: true)
         }
@@ -888,19 +889,35 @@ enum GitRepositoryScanner {
             }
         guard !candidates.isEmpty else { return .invalidated }
 
+        // Check every candidate concurrently with a per-path timeout.
+        // A single unresponsive mount cannot block the healthy paths.
+        let rawPool: TimeInterval = max(0, overallDeadline.timeIntervalSinceNow) / 2.0
+        let perPathTimeout: TimeInterval = min(8.0, max(2.0, rawPool))
+
+        let checkResults = await withTaskGroup(
+            of: (path: String, availability: RepositoryPathAvailability).self
+        ) { group in
+            for path in candidates {
+                guard !Task.isCancelled, Date() < overallDeadline else { break }
+                group.addTask {
+                    let availability = await checkedAvailability(
+                        at: path,
+                        timeout: perPathTimeout
+                    )
+                    return (path, availability)
+                }
+            }
+            var results: [String: RepositoryPathAvailability] = [:]
+            for await entry in group {
+                results[entry.path] = entry.availability
+            }
+            return results
+        }
+
         var readable: [String] = []
         var unavailable: [String] = []
-        for (index, path) in candidates.enumerated() {
-            if Task.isCancelled || Date() >= overallDeadline {
-                unavailable.append(contentsOf: candidates[index...])
-                return .reusable(RepositoryDiscoveryResult(
-                    readablePaths: Array(Set(readable)).sorted(),
-                    unavailablePaths: Array(Set(unavailable)).sorted(),
-                    mode: .incomplete,
-                    isComplete: false
-                ))
-            }
-            switch repositoryAvailability(at: path) {
+        for path in candidates {
+            switch checkResults[path] ?? .unavailable {
             case .repository:
                 readable.append(path)
             case .unavailable:
@@ -939,7 +956,7 @@ enum GitRepositoryScanner {
                                       unavailablePrefixes: inout Set<String>,
                                       overallDeadline: Date,
                                       traversalState: inout DiscoveryTraversalState,
-                                      warnings: inout [String]) {
+                                      warnings: inout [String]) async {
         guard !traversalState.shouldStop(deadline: overallDeadline) else { return }
         guard depth <= config.maxDepth else { return }
 
@@ -967,15 +984,17 @@ enum GitRepositoryScanner {
         }
 
         let directoryURL = URL(fileURLWithPath: directory)
-        let entries: [URL]
-        do {
-            entries = try FileManager.default.contentsOfDirectory(
-                at: directoryURL,
-                includingPropertiesForKeys: [.isDirectoryKey],
-                options: [.skipsPackageDescendants]
-            )
-        } catch {
-            if !isMissingFileError(error) {
+        let readTimeout: TimeInterval = min(
+            config.gitCommandTimeout,
+            max(1.0, overallDeadline.timeIntervalSinceNow / 2.0)
+        )
+        let (entries, isUnavailable) = await readDirectoryContents(
+            at: directoryURL,
+            timeout: readTimeout
+        )
+
+        guard let entries else {
+            if isUnavailable {
                 unavailablePrefixes.insert(directory)
                 traversalState.markUnavailable()
                 warnings.append("Repository directory unavailable: \(directory)")
@@ -1003,15 +1022,15 @@ enum GitRepositoryScanner {
             }
             guard isDirectory else { continue }
 
-            walkDirectory(fullPath,
-                          config: config,
-                          depth: depth + 1,
-                          ignoredPaths: ignoredPaths,
-                          discovered: &discovered,
-                          unavailablePrefixes: &unavailablePrefixes,
-                          overallDeadline: overallDeadline,
-                          traversalState: &traversalState,
-                          warnings: &warnings)
+            await walkDirectory(fullPath,
+                                config: config,
+                                depth: depth + 1,
+                                ignoredPaths: ignoredPaths,
+                                discovered: &discovered,
+                                unavailablePrefixes: &unavailablePrefixes,
+                                overallDeadline: overallDeadline,
+                                traversalState: &traversalState,
+                                warnings: &warnings)
         }
     }
 
@@ -1057,6 +1076,61 @@ enum GitRepositoryScanner {
         let nsError = error as NSError
         return nsError.domain == NSCocoaErrorDomain
             && (nsError.code == NSFileNoSuchFileError || nsError.code == NSFileReadNoSuchFileError)
+    }
+
+    // MARK: - Availability helpers with timeout
+
+    /// Check whether a path contains a Git repository, with a per-call timeout
+    /// so a single unresponsive filesystem mount cannot block the scan.
+    /// Returns `.unavailable` when the check does not complete within `timeout`.
+    private static func checkedAvailability(
+        at path: String,
+        timeout: TimeInterval
+    ) async -> RepositoryPathAvailability {
+        guard timeout > 0 else { return .unavailable }
+        return await withTaskGroup(of: RepositoryPathAvailability.self) { group in
+            group.addTask {
+                repositoryAvailability(at: path)
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                return .unavailable
+            }
+            let result = await group.next() ?? .unavailable
+            group.cancelAll()
+            return result
+        }
+    }
+
+    /// Read directory entries with a timeout.  When the filesystem does not
+    /// respond within `timeout` seconds, returns `nil` entries and signals
+    /// that the path should be treated as unavailable.
+    private static func readDirectoryContents(
+        at url: URL,
+        timeout: TimeInterval
+    ) async -> (entries: [URL]?, isUnavailable: Bool) {
+        guard timeout > 0 else { return (nil, true) }
+        return await withTaskGroup(of: (entries: [URL]?, isUnavailable: Bool).self) { group in
+            group.addTask {
+                do {
+                    let entries = try FileManager.default.contentsOfDirectory(
+                        at: url,
+                        includingPropertiesForKeys: [.isDirectoryKey],
+                        options: [.skipsPackageDescendants]
+                    )
+                    return (entries, false)
+                } catch {
+                    return (nil, !isMissingFileError(error))
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                return (nil, true)
+            }
+            let result = await group.next() ?? (nil, true)
+            group.cancelAll()
+            return result
+        }
     }
 
     // MARK: - Batched snapshot reading

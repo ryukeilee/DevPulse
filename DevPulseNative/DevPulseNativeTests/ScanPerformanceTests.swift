@@ -1113,6 +1113,100 @@ struct ScanPerformanceTests {
         )
     }
 
+    @Test func invalidatedReuseFallsThroughToWalkAndDiscoversAllRepos() async throws {
+        let root = try temporaryDirectory(named: "invalidated-reuse")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Create two real git repositories under the scan root
+        let repoPaths = try (0..<2).map { index -> String in
+            let repo = root.appendingPathComponent("repo-\(index)")
+            try createCommittedRepository(at: repo)
+            return repo.path
+        }
+
+        // Create a non-repo directory under the scan root.
+        // When repositoryAvailability checks this path it returns .notRepository
+        // (a clean directory without .git), which invalidates the reuse set.
+        let nonRepoPath = root.appendingPathComponent("not-a-repo")
+        try FileManager.default.createDirectory(at: nonRepoPath, withIntermediateDirectories: true)
+
+        let knownPaths = repoPaths + [nonRepoPath.path]
+        let metrics = ScanMetricsCollector()
+        let startedAt = ProcessInfo.processInfo.systemUptime
+
+        let result = await GitRepositoryScanner.scan(
+            config: scanConfig(maxConcurrentGitOps: 3),
+            scanRoots: [root.path],
+            knownRepositoryPaths: knownPaths,
+            previousSnapshot: .empty(),
+            metrics: metrics
+        )
+        let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+        let snapshot = metrics.snapshot()
+
+        // The non-repo path caused reuse invalidation → walk mode
+        #expect(snapshot.discoveryMode == .walked)
+        #expect(result.data.repositories.count == repoPaths.count)
+        #expect(result.data.repositories.allSatisfy { $0.resolvedDataSource == .current })
+        #expect(elapsed < 5)
+
+        print(String(
+            format: "scan_invalidated_reuse.elapsed_ms=%.0f discovery=%@ repos=%d",
+            snapshot.elapsed * 1_000,
+            "\(snapshot.discoveryMode)",
+            result.data.repositories.count
+        ))
+    }
+
+    @Test func parallelReuseChecksCompleteQuickly() async throws {
+        let root = try temporaryDirectory(named: "parallel-reuse-checks")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Create several git repositories for a parallel reuse check
+        let repoPaths = try (0..<6).map { index -> String in
+            let repo = root.appendingPathComponent("repo-\(index)")
+            try createCommittedRepository(at: repo)
+            return repo.path
+        }
+
+        let firstMetrics = ScanMetricsCollector()
+        let first = await GitRepositoryScanner.scan(
+            config: scanConfig(maxConcurrentGitOps: 3),
+            scanRoots: [root.path],
+            knownRepositoryPaths: repoPaths,
+            forceRepositoryDiscovery: true,
+            previousSnapshot: .empty(),
+            metrics: firstMetrics
+        )
+        #expect(first.data.repositories.count == repoPaths.count)
+
+        // Second scan reuses known paths via parallel availability checks
+        let secondMetrics = ScanMetricsCollector()
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let second = await GitRepositoryScanner.scan(
+            config: scanConfig(maxConcurrentGitOps: 3),
+            scanRoots: [root.path],
+            knownRepositoryPaths: first.discoveredRepositoryPaths,
+            forceRepositoryDiscovery: false,
+            previousSnapshot: first.data,
+            metrics: secondMetrics
+        )
+        let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+        let secondSnapshot = secondMetrics.snapshot()
+
+        #expect(second.data.repositories.count == repoPaths.count)
+        #expect(secondSnapshot.discoveryMode == .reusedKnown)
+        #expect(second.data.repositories.allSatisfy { $0.resolvedDataSource == .current })
+        #expect(elapsed < 5)
+
+        print(String(
+            format: "scan_parallel_reuse.elapsed_ms=%.0f discovery=%@ repos=%d",
+            secondSnapshot.elapsed * 1_000,
+            "\(secondSnapshot.discoveryMode)",
+            second.data.repositories.count
+        ))
+    }
+
     @Test @MainActor func manualRefreshDoesNotBlockMainThread() async {
         let probe = BlockingScanProbe()
         let scheduler = ScanScheduler(commandMode: true, scanExecution: { request in
