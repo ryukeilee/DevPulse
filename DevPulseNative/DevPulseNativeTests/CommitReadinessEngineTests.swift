@@ -893,7 +893,7 @@ struct CommitReadinessEngineTests {
         #expect(decision.detail.contains("本次跳过"))
     }
 
-    @Test func widgetReloadDecisionRequestsUnchangedScanAfterThrottleExpires() {
+    @Test func widgetReloadDecisionSkipsUnchangedScanAfterThrottleExpires() {
         let now = Date(timeIntervalSince1970: 1_718_000_000)
         let baseline = snapshot(modified: 1)
         let previousSnapshot = AppGroupData(
@@ -913,8 +913,8 @@ struct CommitReadinessEngineTests {
             now: now
         )
 
-        #expect(decision.shouldRequest)
-        #expect(decision.detail.contains("已重新请求"))
+        #expect(decision.shouldRequest == false)
+        #expect(decision.detail.contains("本次跳过"))
     }
 
     @Test func widgetDataTrustBuilderUsesRefreshWhenResultsExistButSnapshotMissing() {

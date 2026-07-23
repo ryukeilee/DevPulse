@@ -439,23 +439,9 @@ enum ScanSchedulerPolicy {
             )
         }
 
-        guard let lastReloadRequestedAt else {
-            return WidgetReloadDecision(
-                shouldRequest: true,
-                detail: "还没有记录过 Widget reload，已补发第一次请求。"
-            )
-        }
-
-        if now.timeIntervalSince(lastReloadRequestedAt) >= widgetReloadThrottleInterval {
-            return WidgetReloadDecision(
-                shouldRequest: true,
-                detail: "共享快照无实质变化，但距上次 reload 已超过 15 分钟，已重新请求 Widget reload。"
-            )
-        }
-
         return WidgetReloadDecision(
             shouldRequest: false,
-            detail: "共享快照无实质变化，且距上次 reload 未超过 15 分钟，本次跳过 Widget reload。"
+            detail: "共享快照无实质变化，本次跳过 Widget reload。"
         )
     }
 
@@ -1333,18 +1319,22 @@ final class ScanScheduler: ObservableObject {
                     accessWarning: currentScanRoots.warning
                 )
                 self.warnings = combinedWarnings
-                let recorded = self.recordActivityEvents(
-                    previous: previousSnapshot,
-                    current: trustedResult,
-                    observedAt: trustedResult.generatedAt
-                )
+                let hadChanges = self.hadChanges(before: previousSnapshot, after: trustedResult)
+                let recorded = hadChanges
+                    ? self.recordActivityEvents(
+                        previous: previousSnapshot,
+                        current: trustedResult,
+                        observedAt: trustedResult.generatedAt
+                    )
+                    : previousSnapshot
                 self.cleanupRemovedRepositoryPins(
                     previous: previousSnapshot,
                     current: recorded
                 )
-                let hadChanges = self.hadChanges(before: previousSnapshot, after: recorded)
 
-                self.lastResult = recorded
+                if hadChanges {
+                    self.lastResult = recorded
+                }
                 self.lastScanAt = completedAt
                 self.diagnostics.lastScanAt = self.lastScanAt
                 self.isScanning = false
@@ -1386,7 +1376,16 @@ final class ScanScheduler: ObservableObject {
                     self.consecutiveNoChanges += 1
                 }
                 self.updateScanInterval()
-                self.syncSharedSnapshot(from: recorded, previousSnapshot: previousSnapshot, reason: "scan")
+                if hadChanges {
+                    self.syncSharedSnapshot(from: recorded, previousSnapshot: previousSnapshot, reason: "scan")
+                } else {
+                    self.diagnostics.lastRefreshCompletedAt = Date()
+                    self.diagnostics.lastSnapshotStoreTrigger = "scan"
+                    self.diagnostics.lastSnapshotStoreState = .verified
+                    self.diagnostics.lastSnapshotStoreDetail = "仓库状态未变化，保留现有可信快照。"
+                    self.diagnostics.lastWidgetReloadState = .skipped
+                    self.diagnostics.lastWidgetReloadDetail = "仓库状态未变化，本次未写快照或刷新 Widget。"
+                }
                 self.completeCurrentScanAndDrain()
             }
         }
