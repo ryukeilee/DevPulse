@@ -768,6 +768,7 @@ final class ScanScheduler: ObservableObject {
     nonisolated(unsafe) private var systemClockDidChangeObserver: NSObjectProtocol?
     nonisolated(unsafe) private var systemTimeZoneDidChangeObserver: NSObjectProtocol?
     nonisolated(unsafe) private var calendarDayChangedObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var lastSystemSleepAt: Date?
     private(set) var lastFreshnessRecalculationAt: Date?
     private var refreshCoordinator = ScanRefreshCoordinator()
@@ -791,6 +792,7 @@ final class ScanScheduler: ObservableObject {
     private let activityEventStore: ActivityEventStore?
     let historyStore: RepositoryHistoryStore?
     private var workspaceLoadingAttempted = false
+    private var pendingItemsLoadingAttempted = false
     private var configLoadedFromPersistence = false
     private var activityRepositoryIDMigrations: [String: String] = [:]
     private var requiresStartupScopeRefresh = false
@@ -878,7 +880,12 @@ final class ScanScheduler: ObservableObject {
     }
 
     /// Load pending items from disk.
+    /// Load pending items from disk into memory.
+    /// Safe to call multiple times — first call populates, subsequent calls
+    /// are no-ops unless cache was evicted.
     func loadPendingItems() {
+        guard !pendingItemsLoadingAttempted else { return }
+        pendingItemsLoadingAttempted = true
         switch pendingItemStore.load() {
         case .success(let archive):
             self.pendingItems = archive.items
@@ -887,6 +894,13 @@ final class ScanScheduler: ObservableObject {
             self.pendingItems = []
             self.pendingItemWidgetSummary = .empty()
         }
+    }
+
+    /// Ensure pending items are loaded when first accessed from the UI.
+    /// Call this from view entry points (PendingCenterView, widget) rather
+    /// than in the scheduler init, so memory is not consumed at startup.
+    func ensurePendingItemsLoaded() {
+        loadPendingItems()
     }
 
     /// Refresh pending items after a scan completes, in background.
@@ -1192,7 +1206,6 @@ final class ScanScheduler: ObservableObject {
         loadScanDirectories()
         loadIgnoredRepositories()
         loadWorkspaces()
-        loadPendingItems()
         syncStoreInspection()
         appGroupAvailable = AppGroupStore.isAvailable
         gitAvailable = ProcessRunner.isGitAvailable()
@@ -1202,6 +1215,7 @@ final class ScanScheduler: ObservableObject {
         startPowerMonitoring()
         startSleepWakeMonitoring()
         startApplicationLifecycleMonitoring()
+        startMemoryPressureMonitoring()
     }
 
     convenience init(
@@ -1243,6 +1257,8 @@ final class ScanScheduler: ObservableObject {
         if let calendarDayChangedObserver {
             NotificationCenter.default.removeObserver(calendarDayChangedObserver)
         }
+        memoryPressureSource?.cancel()
+        memoryPressureSource = nil
         let workspaceCenter = NSWorkspace.shared.notificationCenter
         if let workspaceSleepObserver {
             workspaceCenter.removeObserver(workspaceSleepObserver)
@@ -3291,6 +3307,35 @@ final class ScanScheduler: ObservableObject {
                 self?.handleLifecycleRefresh(.systemTimeChanged)
             }
         }
+    }
+
+    /// Handle memory pressure by evicting non-essential caches.
+    /// This is called automatically on a memory warning and can also
+    /// be triggered manually for testing.
+    func handleMemoryPressure() {
+        pendingItemStore.invalidateCache()
+        pendingItemNotificationStore.invalidateCache()
+        // Remove stale retry task entries (completed but not cleaned up)
+        repositoryRetryTasks = repositoryRetryTasks.filter { _, task in !task.isCancelled }
+        // Reset lazy-load flags so next access re-reads from disk instead
+        // of keeping memory populated after eviction
+        pendingItemsLoadingAttempted = false
+        pendingItems = []
+        pendingItemWidgetSummary = .empty()
+    }
+
+    private func startMemoryPressureMonitoring() {
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.critical, .warning, .normal],
+            queue: .main
+        )
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                self?.handleMemoryPressure()
+            }
+        }
+        source.activate()
+        memoryPressureSource = source
     }
 
     func suspendForSleep(now: Date = Date()) {

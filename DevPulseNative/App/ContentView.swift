@@ -43,6 +43,9 @@ struct ContentView: View {
                 RepositoryListView()
                     .tabContentVisibility(selectedTab == .repositories)
 
+                ImpactOverviewView()
+                    .tabContentVisibility(selectedTab == .impact)
+
                 SettingsView(scrollTarget: $settingsScrollTarget)
                     .tabContentVisibility(selectedTab == .settings)
             }
@@ -98,6 +101,11 @@ private struct AppSectionBar: View {
                     tab: .repositories,
                     title: "Repositories",
                     systemImage: "list.bullet.rectangle"
+                )
+                sectionButton(
+                    tab: .impact,
+                    title: "Impact",
+                    systemImage: "chart.bar.doc.horizontal"
                 )
                 sectionButton(
                     tab: .settings,

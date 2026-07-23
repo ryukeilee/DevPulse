@@ -41,6 +41,8 @@ enum PendingItemStoreError: LocalizedError, Equatable {
 final class PendingItemStore: @unchecked Sendable {
     private static let fileName = "pending-items.json"
     private static let lockFileName = ".pending-items.lock"
+    /// How long the in-memory cache is considered valid before a reload.
+    private static let cacheTTL: TimeInterval = 30 // seconds
 
     private let fileURL: URL
     private let lockURL: URL
@@ -50,6 +52,7 @@ final class PendingItemStore: @unchecked Sendable {
 
     private var cachedArchive: PendingItemArchive?
     private var lastLoadResult: Result<PendingItemArchive, PendingItemStoreError>?
+    private var cacheTimestamp: Date?
 
     init(fileURL: URL? = nil) {
         let url = fileURL ?? (FileManager.default.containerURL(
@@ -80,19 +83,32 @@ final class PendingItemStore: @unchecked Sendable {
 
     func load() -> Result<PendingItemArchive, PendingItemStoreError> {
         queue.sync {
-            if let cached = lastLoadResult {
+            if let cached = lastLoadResult, let ts = cacheTimestamp, -ts.timeIntervalSinceNow <= Self.cacheTTL {
                 return cached
             }
             let result = loadUnsafe()
             lastLoadResult = result
+            cacheTimestamp = Date()
             return result
         }
     }
 
+    /// Evict in-memory cache so the next `load()` re-reads from disk.
+    /// Safe to call on memory pressure — does not affect persisted data.
     func invalidateCache() {
         queue.sync {
             cachedArchive = nil
             lastLoadResult = nil
+            cacheTimestamp = nil
+        }
+    }
+
+    /// Returns true when the in-memory cache is expired and the next
+    /// `load()` will trigger a fresh disk read.
+    var isCacheExpired: Bool {
+        queue.sync {
+            guard let ts = cacheTimestamp else { return true }
+            return -ts.timeIntervalSinceNow > Self.cacheTTL
         }
     }
 
@@ -142,6 +158,7 @@ final class PendingItemStore: @unchecked Sendable {
             }
 
             cachedArchive = archive
+            cacheTimestamp = Date()
             return .success(archive)
         }
     }
@@ -155,6 +172,7 @@ final class PendingItemStore: @unchecked Sendable {
             if case .success(let saved) = result {
                 cachedArchive = saved
                 lastLoadResult = .success(saved)
+                cacheTimestamp = Date()
             }
             return result
         }

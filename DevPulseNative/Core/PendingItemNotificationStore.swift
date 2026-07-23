@@ -11,6 +11,8 @@ import OSLog
 final class PendingItemNotificationStore: @unchecked Sendable {
     private static let fileName = "pending-item-notifications.json"
     private static let lockFileName = ".pending-item-notifications.lock"
+    /// How long the in-memory cache is considered valid before a reload.
+    private static let cacheTTL: TimeInterval = 30 // seconds
 
     private let fileURL: URL
     private let lockURL: URL
@@ -19,6 +21,7 @@ final class PendingItemNotificationStore: @unchecked Sendable {
     private let logger = Logger(subsystem: "local.devpulse.app", category: "PendingNotifStore")
 
     private var cachedArchive: PendingItemNotificationArchive?
+    private var cacheTimestamp: Date?
 
     init(fileURL: URL? = nil) {
         let url = fileURL ?? (FileManager.default.containerURL(
@@ -47,12 +50,13 @@ final class PendingItemNotificationStore: @unchecked Sendable {
 
     func load() -> Result<PendingItemNotificationArchive, PendingItemStoreError> {
         queue.sync {
-            if let cached = cachedArchive {
+            if let cached = cachedArchive, let ts = cacheTimestamp, -ts.timeIntervalSinceNow <= Self.cacheTTL {
                 return .success(cached)
             }
             let result = loadUnsafe()
             if case .success(let archive) = result {
                 cachedArchive = archive
+                cacheTimestamp = Date()
             }
             return result
         }
@@ -61,6 +65,7 @@ final class PendingItemNotificationStore: @unchecked Sendable {
     func invalidateCache() {
         queue.sync {
             cachedArchive = nil
+            cacheTimestamp = nil
         }
     }
 
@@ -107,6 +112,7 @@ final class PendingItemNotificationStore: @unchecked Sendable {
             let result = saveUnsafe(archive)
             if case .success(let saved) = result {
                 cachedArchive = saved
+                cacheTimestamp = Date()
             }
             return result
         }

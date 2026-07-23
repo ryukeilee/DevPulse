@@ -11,6 +11,9 @@ struct ActivityTimelineView: View {
         ActivityTimelineDecisionContextBuilder.build(from: repositories)
     }
 
+    /// Only render a bounded window to keep memory stable under high event volume.
+    private static let maxDisplayedEvents = 100
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
@@ -19,13 +22,14 @@ struct ActivityTimelineView: View {
                 emptyState
             } else {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(events.prefix(100))) { event in
+                    let displayed = events.prefix(Self.maxDisplayedEvents)
+                    ForEach(Array(displayed)) { event in
                         ActivityEventRow(
                             event: event,
                             decision: decisionsByRepositoryID[event.repositoryID]
                         )
 
-                        if event.id != events.prefix(100).last?.id {
+                        if event.id != displayed.last?.id {
                             Divider().overlay(DevPulseVisualStyle.separator)
                         }
                     }

@@ -1,10 +1,16 @@
 import SwiftUI
 
+private enum PendingCenterPagination {
+    /// Maximum items displayed per page to keep memory bounded.
+    static let pageSize = 200
+}
+
 struct PendingCenterView: View {
     @EnvironmentObject var scheduler: ScanScheduler
     @State private var filter = PendingItemFilter()
     @State private var sortOrder: PendingItemSortOrder = .severity
     @State private var showDetailItem: PendingItem?
+    @State private var page = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -14,10 +20,13 @@ struct PendingCenterView: View {
             Divider().overlay(DevPulseVisualStyle.separator)
             contentList
         }
+        .onAppear { scheduler.ensurePendingItemsLoaded() }
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(item: $showDetailItem) {
             PendingItemDetailView(item: $0).environmentObject(scheduler)
         }
+        .onChange(of: filter.searchText) { _, _ in page = 0 }
+        .onChange(of: sortOrder) { _, _ in page = 0 }
     }
 
     private var header: some View {
@@ -26,6 +35,10 @@ struct PendingCenterView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("待处理中心").font(.title3.weight(.semibold))
                 Text("\(activeItems.count) 个待处理").font(.caption).foregroundStyle(.secondary)
+                if allItemsCount > PendingCenterPagination.pageSize {
+                    Text("显示 \(min(pagedItems.count, allItemsCount))/\(allItemsCount)")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
             }
             Spacer()
         }.padding(.horizontal, DevPulseVisualStyle.pageInset).padding(.vertical, 10)
@@ -53,9 +66,21 @@ struct PendingCenterView: View {
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             List {
-                ForEach(sortedItems) { item in
+                ForEach(pagedItems) { item in
                     PendingItemRowView(item: item)
                         .onTapGesture { showDetailItem = item }
+                }
+                if allItemsCount > (page + 1) * PendingCenterPagination.pageSize {
+                    HStack {
+                        Spacer()
+                        Button("加载更多…") {
+                            page += 1
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        Spacer()
+                    }
+                    .padding(.vertical, 8)
                 }
             }.listStyle(.plain)
         }
@@ -65,8 +90,17 @@ struct PendingCenterView: View {
         scheduler.pendingItems.filter { $0.status != .resolved && $0.status != .permanentlyIgnored }
     }
 
+    private var allItemsCount: Int { sortedItems.count }
+
     private var sortedItems: [PendingItem] {
         sortOrder.sort(filter.apply(to: scheduler.pendingItems))
+    }
+
+    /// Only show a bounded page of items, loaded on demand.
+    private var pagedItems: [PendingItem] {
+        let all = sortedItems
+        let end = min((page + 1) * PendingCenterPagination.pageSize, all.count)
+        return Array(all[all.startIndex..<end])
     }
 }
 

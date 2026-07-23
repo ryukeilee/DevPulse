@@ -2362,7 +2362,8 @@ enum AppTab: Int, Equatable {
     case overview = 0
     case workspaces = 1
     case repositories = 2
-    case settings = 3
+    case impact = 3
+    case settings = 4
 }
 
 enum SettingsScrollTarget: Hashable {
