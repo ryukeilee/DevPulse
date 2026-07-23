@@ -228,9 +228,12 @@ actor RefreshEngine {
                         elapsed: persistElapsed, finished: true, startedAt: overallStart)
 
         // ── Stage 6: Widget sync ─────────────────────────────────────────
+        // Widget reload is handled by ScanScheduler.syncSharedSnapshot() to
+        // avoid duplicate calls (the scheduler already decides whether changed
+        // data warrants a reload). Stage 6 remains as a lightweight diagnostic
+        // marker so the pipeline accounting stays consistent.
         let stage6Start = ProcessInfo.processInfo.systemUptime
-        logger.debug("Stage .widgetSync starting")
-        AppGroupStore.reloadWidgets()
+        logger.debug("Stage .widgetSync starting (deferred to scheduler)")
         let widgetElapsed = ProcessInfo.processInfo.systemUptime - stage6Start
         logger.debug("Stage .widgetSync finished elapsed_ms=\(Int(widgetElapsed * 1000))")
 

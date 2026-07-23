@@ -890,7 +890,7 @@ final class ScanScheduler: ObservableObject {
     }
 
     /// Refresh pending items after a scan completes, in background.
-    func refreshPendingItems() {
+    func refreshPendingItems(skipHealthAssessments: Bool = false) {
         let repos = lastResult.repositories
         let confirmWorkspaces = workspaces.filter { $0.autoSuggestConfirmed }
         let workspaceAggs = workspaceAggregations
@@ -899,9 +899,12 @@ final class ScanScheduler: ObservableObject {
         Task.detached(priority: .utility) { @Sendable [weak self] in
             guard let self else { return }
 
-            // Gather health assessments for all repos
+            // Gather health assessments for all repos.
+            // Skip this expensive loading when repo state hasn't changed —
+            // time-based rules (escalation, auto-recovery) still work from
+            // previous items alone and don't need fresh health data.
             var healthAssessments: [String: RepositoryHealthAssessment] = [:]
-            if let historyStore {
+            if !skipHealthAssessments, let historyStore {
                 for repo in repos {
                     switch historyStore.load(for: repo.id) {
                     case .success(let entries):
@@ -1110,11 +1113,13 @@ final class ScanScheduler: ObservableObject {
     private static let baseInterval: TimeInterval = 300       // 5 min
     private static let extendedInterval1: TimeInterval = 600  // 10 min
     private static let extendedInterval2: TimeInterval = 1200 // 20 min
-    private static let maxInterval: TimeInterval = 1800       // 30 min
+    private static let maxInterval: TimeInterval = 1800       // 30 min (AC power)
+    private static let batteryMaxInterval: TimeInterval = 3600 // 60 min (battery)
     private static let lowPowerBaseInterval: TimeInterval = 900 // 15 min
+    private static let lowPowerMaxInterval: TimeInterval = 7200 // 120 min (low-power mode)
     private static let noChangeThreshold1 = 3  // scans w/o change → 10 min
     private static let noChangeThreshold2 = 8  // scans w/o change → 20 min
-    private static let noChangeThreshold3 = 15 // scans w/o change → 30 min
+    private static let noChangeThreshold3 = 15 // scans w/o change → maxInterval
     private static let refreshCoalescingNanoseconds: UInt64 = 200_000_000
 
     @Published private(set) var config: ScanConfig = .default
@@ -1733,8 +1738,10 @@ final class ScanScheduler: ObservableObject {
                 if hadChanges {
                     self.lastResult = recorded
                 }
-                // Record repository state history in background
-                self.recordHistoryFromSnapshot(recorded)
+                // Record repository state history in background (skip when nothing changed)
+                if hadChanges {
+                    self.recordHistoryFromSnapshot(recorded)
+                }
                 self.lastScanAt = completedAt
                 self.diagnostics.lastScanAt = self.lastScanAt
                 self.isScanning = false
@@ -1757,11 +1764,17 @@ final class ScanScheduler: ObservableObject {
                         self.lastRepositoryDiscoveryScanRootsSignature = rootsSignature
                     }
                 }
-                // Refresh workspace aggregations in background
-                self.refreshWorkspaceAggregations()
-                self.refreshWorkspaceSuggestions()
-                // Refresh pending items (uses health assessments and workspace aggregations)
-                self.refreshPendingItems()
+                if hadChanges {
+                    // Refresh workspace aggregations in background
+                    self.refreshWorkspaceAggregations()
+                    self.refreshWorkspaceSuggestions()
+                    // Refresh pending items (uses health assessments and workspace aggregations)
+                    self.refreshPendingItems()
+                } else {
+                    // Still refresh pending items for time-based rule evaluation (escalation, auto-recovery)
+                    // but skip the expensive per-repo history loading since no state changed.
+                    self.refreshPendingItems(skipHealthAssessments: true)
+                }
 
                 if self.warnings.isEmpty {
                     self.recordEvent(
@@ -1781,6 +1794,13 @@ final class ScanScheduler: ObservableObject {
                     self.consecutiveNoChanges += 1
                 }
                 self.updateScanInterval()
+
+                // Stop the background timer entirely after prolonged inactivity.
+                // It will be restarted by the next lifecycle event or manual scan.
+                if !hadChanges, self.consecutiveNoChanges >= Self.noChangeThreshold3 + 1 {
+                    self.backgroundTimer?.invalidate()
+                    self.backgroundTimer = nil
+                }
                 if hadChanges {
                     self.syncSharedSnapshot(from: recorded, previousSnapshot: previous, reason: "scan")
                 } else {
@@ -1836,7 +1856,11 @@ final class ScanScheduler: ObservableObject {
         let generation = repositoryRetryGeneration
         retryingRepositoryIDs.insert(repositoryID)
 
-        let task = Task.detached(priority: .userInitiated) { [weak self] in
+        // Automatic retries use utility priority to avoid competing with
+        // user-facing work. User-initiated retries (via retryRepository) still
+        // use .userInitiated to feel responsive.
+        let retryPriority: TaskPriority = requiresRetryState ? .userInitiated : .utility
+        let task = Task.detached(priority: retryPriority) { [weak self] in
             let retriedRepository = await execution(retryConfig, previousRepository)
             let wasCancelled = Task.isCancelled
 
@@ -2278,7 +2302,7 @@ final class ScanScheduler: ObservableObject {
             return
         }
         backgroundTimer?.invalidate()
-        backgroundTimer = Timer.scheduledTimer(
+        let timer = Timer.scheduledTimer(
             withTimeInterval: scanIntervalSeconds,
             repeats: false
         ) { [weak self] _ in
@@ -2295,6 +2319,10 @@ final class ScanScheduler: ObservableObject {
                 self.scheduleNextTimer()
             }
         }
+        // Allow power-coalescing tolerance: 10 % of the interval
+        // enables the system to align this timer with other wake sources.
+        timer.tolerance = scanIntervalSeconds * 0.1
+        backgroundTimer = timer
     }
 
     // MARK: - Adaptive interval
@@ -2315,12 +2343,27 @@ final class ScanScheduler: ObservableObject {
             newInterval = Self.baseInterval
         }
 
-        // Power-aware floor
-        let floor: TimeInterval = powerState != "normal"
-            ? Self.lowPowerBaseInterval
-            : Self.baseInterval
+        // Power-aware floor and ceiling
+        let floor: TimeInterval
+        let ceiling: TimeInterval?
+        switch powerState {
+        case "low-power":
+            floor = Self.lowPowerBaseInterval
+            ceiling = Self.lowPowerMaxInterval
+        case "battery":
+            floor = Self.lowPowerBaseInterval
+            ceiling = Self.batteryMaxInterval
+        default:
+            floor = Self.baseInterval
+            ceiling = nil
+        }
 
-        scanIntervalSeconds = max(newInterval, floor)
+        let clamped: TimeInterval = max(newInterval, floor)
+        if let ceiling {
+            scanIntervalSeconds = min(clamped, ceiling)
+        } else {
+            scanIntervalSeconds = clamped
+        }
         UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
             .set(scanIntervalSeconds, forKey: lastScanIntervalKey)
 
