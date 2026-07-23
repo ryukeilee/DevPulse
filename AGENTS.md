@@ -75,10 +75,14 @@ Do not commit DerivedData, build products, installed app bundles, or Xcode user 
 | `RiskHintEngine.swift` | flag risky changes |
 | `CommitReadinessEngine.swift` | rules-based readiness assessment |
 | `CommitReadinessBadge.swift` | badge rendering logic for readiness |
-| `ScanScheduler.swift` | timer-based scan scheduling |
+| `ScanScheduler.swift` | timer-based scan scheduling; manages pending item lifecycle |
 | `ScanLocationProvider.swift` | scan root resolution |
 | `ExcludedDirectoryRules.swift` | directory exclusion rules |
 | `LaunchAtLoginController.swift` | ServiceManagement-based launch-at-login |
+| `PendingItem.swift` | pending item model, severity/lifecycle enums, notification strategy, widget summary |
+| `PendingItemStore.swift` | atomic persistence for pending items, user action management, schema migration |
+| `PendingItemNotificationStore.swift` | notification state persistence, cooldown tracking |
+| `PendingItemEvaluator.swift` | 12-rule engine for repository and workspace anomaly detection |
 
 ## Test files (DevPulseNative/DevPulseNativeTests/)
 
@@ -90,6 +94,7 @@ Do not commit DerivedData, build products, installed app bundles, or Xcode user 
 | `RepositoryDiscoveryExperienceTests.swift` | discovery flow |
 | `ScanPerformanceTests.swift` | scanning performance |
 | `SharedSnapshotStoreTests.swift` | snapshot persistence |
+| `PendingItemTests.swift` | pending item model, state machine, deduplication (when added) |
 
 ## Build and Verification
 
@@ -153,8 +158,15 @@ Add or update focused coverage in `DevPulseNative/DevPulseNativeTests/` when cha
 - commit readiness, risk hints, sorting, or activity-event derivation
 - shared snapshot encoding, atomic persistence, recovery, or diagnostics
 - launch-at-login behavior
+- **pending item model, state machine, identity stability (cross-refresh/restart/path-change dedup)**
+- **pending item evaluator rules (condition detection, escalation/de-escalation, auto-recovery)**
+- **pending item store atomicity, schema migration, and corruption recovery**
+- **notification strategy (cooldown, severity escalation, suppression, quiet hours)**
+- **pending item widget summary aggregation**
 
-Widget-facing changes must verify both sides: snapshot production in Core and consumption in `Widget/`.
+Pending item logic (`PendingItem`, `PendingItemEvaluator`, `PendingItemNotificationStrategy`) is pure (no I/O), making it straightforward to validate in CLI tests without App Group or signing. Tests can construct `PendingItemEvaluationContext` directly.
+
+Widget-facing changes to `PendingItemWidgetSummary` must verify both sides: production (`PendingItemWidgetSummary.build`) in Core and consumption (field in `AppGroupData`) in `Widget/`.
 
 If runtime behavior cannot be fully proven in CLI, state what was verified and what remains for manual confirmation.
 

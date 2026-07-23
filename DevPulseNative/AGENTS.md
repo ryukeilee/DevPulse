@@ -16,8 +16,8 @@ The scanner currently derives state from `git status --porcelain=v2 --branch` an
 
 ## Repository Layout
 
-- `App/`: SwiftUI app entry point, repository screens, activity timeline, settings, and diagnostics UI
-- `Core/`: repository discovery and scanning, scheduling, readiness/risk logic, models, activity events, launch-at-login, and shared snapshot persistence
+- `App/`: SwiftUI app entry point, repository screens, activity timeline, pending center (PendingCenterView, PendingItemDetailView), settings, and diagnostics UI
+- `Core/`: repository discovery and scanning, scheduling, readiness/risk logic, models, activity events, pending items (PendingItem, PendingItemStore, PendingItemEvaluator, PendingItemNotificationStore), launch-at-login, and shared snapshot persistence
 - `Utilities/`: process execution and date formatting helpers
 - `Widget/`: WidgetKit extension and its property list/entitlements
 - `DevPulseNativeTests/`: Swift Testing coverage for scanning, discovery, readiness, activity events, snapshots, performance, and launch-at-login
@@ -82,6 +82,16 @@ Add or update focused coverage in `DevPulseNativeTests/` when changing:
 - commit readiness, risk hints, sorting, or activity-event derivation
 - shared snapshot encoding, atomic persistence, recovery, or diagnostics
 - launch-at-login behavior
+- pending item model, lifecycle state machine, identity stability, and deduplication
+- pending item evaluator rules and condition detection
+- pending item store atomicity, schema migration, and corruption recovery
+- notification strategy (cooldown, suppression, severity escalation)
+- pending item widget summary aggregation
+
+Pending item logic is pure (no I/O for models and evaluator rules), making it straightforward to validate in CLI tests without App Group or signing.
+The evaluator (`PendingItemEvaluator.evaluate`) is a pure function: same input -> same output. Tests can construct `PendingItemEvaluationContext` directly.
+
+Widget-facing changes to `PendingItemWidgetSummary` must verify both sides: the production side (`PendingItemWidgetSummary.build`) and the consumption side (field in `AppGroupData` read by Widget `WidgetSnapshotStore`).
 
 Widget-facing changes must verify both sides of the contract: snapshot production in the app/Core path and snapshot consumption/rendering in `Widget/`. If CLI validation cannot prove installed Widget behavior, report exactly what passed and what remains for manual confirmation.
 
