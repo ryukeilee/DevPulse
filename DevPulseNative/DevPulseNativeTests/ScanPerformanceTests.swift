@@ -1113,7 +1113,50 @@ struct ScanPerformanceTests {
         )
     }
 
+    @Test @MainActor func manualRefreshDoesNotBlockMainThread() async {
+        let probe = BlockingScanProbe()
+        let scheduler = ScanScheduler(commandMode: true, scanExecution: { request in
+            await probe.execute(request)
+        })
+        let timestamp = DateFormatting.nowISO()
+        let initialData = lifecycleSnapshot(
+            timestamp: timestamp,
+            writtenAt: "2026-07-23T00:00:00Z",
+            storageRevision: 10
+        )
+        scheduler.lastResult = initialData
+        scheduler.lastScanAt = DateFormatting.date(from: timestamp)
+        scheduler.refreshPhase = .success
+
+        scheduler.scanNow(source: .manual)
+
+        #expect(scheduler.isScanning)
+        #expect(scheduler.refreshPhase == .refreshing)
+        #expect(scheduler.lastResult.generatedAt == initialData.generatedAt)
+        #expect(scheduler.lastResult.repositories.count == initialData.repositories.count)
+        #expect(!scheduler.lastResult.repositories.isEmpty)
+
+        let mainActorResponsive = await withTaskGroup(of: Bool.self) { group in
+            group.addTask { @MainActor in
+                true
+            }
+            group.addTask {
+                try? await Task.sleep(for: .milliseconds(50))
+                return false
+            }
+            let result = await group.next()!
+            group.cancelAll()
+            return result
+        }
+        #expect(mainActorResponsive)
+
+        scheduler.shutdown()
+        let probeExited = await waitUntil { await probe.activeCount == 0 }
+        #expect(probeExited)
+    }
+
     private func resourceUsage() -> (cpuSeconds: Double, maxResidentBytes: Int64) {
+
         var usage = rusage()
         getrusage(RUSAGE_SELF, &usage)
         let user = Double(usage.ru_utime.tv_sec) + Double(usage.ru_utime.tv_usec) / 1_000_000

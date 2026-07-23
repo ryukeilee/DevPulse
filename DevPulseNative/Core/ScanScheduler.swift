@@ -2059,18 +2059,25 @@ final class ScanScheduler: ObservableObject {
             keepingRepositoryIDs: repositoryIDs
         )
 
-        if let activityEventStore {
-            switch activityEventStore.save(merged) {
-            case .success(let saved):
-                activityEvents = saved
-            case .failure(let error):
-                activityEvents = merged
-                if !warnings.contains(error.localizedDescription) {
-                    warnings.append(error.localizedDescription)
+        activityEvents = merged
+
+        if let eventStore = activityEventStore {
+            Task.detached(priority: .utility) { @Sendable [weak self] in
+                switch eventStore.save(merged) {
+                case .success(let saved):
+                    await MainActor.run { @MainActor in
+                        self?.activityEvents = saved
+                    }
+                case .failure(let error):
+                    let message = error.localizedDescription
+                    await MainActor.run { @MainActor in
+                        guard let self else { return }
+                        if !self.warnings.contains(message) {
+                            self.warnings.append(message)
+                        }
+                    }
                 }
             }
-        } else {
-            activityEvents = merged
         }
 
         let now = DateFormatting.date(from: observedAt) ?? Date()
@@ -2224,73 +2231,65 @@ final class ScanScheduler: ObservableObject {
     ) {
         let writtenAt = DateFormatting.nowISO()
         let snapshotToWrite = applyPins(snapshot).withWrittenAt(writtenAt)
-        let previousSnapshot = previousSnapshot ?? lastResult
-        var verifiedSnapshot: AppGroupData?
+        let prevSnapshot = previousSnapshot ?? lastResult
+
         diagnostics.lastSnapshotStoreTrigger = reason
         diagnostics.lastSnapshotStoreState = .idle
-        diagnostics.lastSnapshotStoreDetail = "正在把 \(snapshotToWrite.repositories.count) 个仓库写入共享快照。"
+        diagnostics.lastSnapshotStoreDetail = "正在把 \(snapshotToWrite.repositories.count) 个仓库写入共享快照…"
 
-        switch AppGroupStore.write(snapshotToWrite) {
-        case .success(let readBack):
-            let now = Date()
-            sharedSnapshotSyncFailureMessage = nil
-            syncStoreInspection()
-            appGroupAvailable = AppGroupStore.isAvailable
-            diagnostics.lastRefreshCompletedAt = now
-            diagnostics.lastSharedWriteAt = readBack.writtenAt
-                .flatMap(DateFormatting.date(from:)) ?? now
-            diagnostics.lastGeneratedAt = readBack.generatedAt
-            diagnostics.lastWrittenAt = readBack.writtenAt
-            diagnostics.sharedDataWriteError = nil
-            diagnostics.snapshotDecodable = true
-            diagnostics.lastSnapshotStoreState = .verified
-            diagnostics.lastSnapshotStoreDetail = "已写入并读回校验成功：\(readBack.repositories.count) 个仓库，reason=\(reason)。"
-            verifiedSnapshot = readBack
-            recordEvent(
-                .sharedDataWritten,
-                "Shared snapshot written (\(snapshotToWrite.repositories.count) repos, \(reason))"
-            )
-        case .failure(let error):
-            syncStoreInspection()
-            diagnostics.lastRefreshCompletedAt = Date()
-            diagnostics.sharedDataWriteError = error.localizedDescription
-            diagnostics.snapshotDecodable = false
-            diagnostics.validationIssues = [error.localizedDescription]
-            diagnostics.lastSnapshotStoreState = .failed
-            diagnostics.lastSnapshotStoreDetail = error.localizedDescription
-            diagnostics.lastWidgetReloadState = .idle
-            diagnostics.lastWidgetReloadDetail = "共享快照写入失败，本次没有进入 Widget reload 判断。"
-            markSharedSnapshotSyncFailure(error.localizedDescription)
-            recordEvent(.sharedDataWriteFailed, "Shared snapshot write failed: \(error.localizedDescription)")
-            return
+        Task.detached(priority: .utility) { @Sendable [weak self] in
+            let writeResult = AppGroupStore.write(snapshotToWrite)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                switch writeResult {
+                case .success(let readBack):
+                    self.handleSyncSnapshotSuccess(
+                        readBack: readBack,
+                        prevSnapshot: prevSnapshot,
+                        reason: reason
+                    )
+                case .failure(let error):
+                    self.handleSyncSnapshotFailure(
+                        error: error,
+                        reason: reason
+                    )
+                }
+            }
         }
+    }
 
-        guard let verifiedSnapshot else {
-            diagnostics.lastRefreshCompletedAt = Date()
-            diagnostics.sharedDataWriteError = "Shared snapshot verification failed without a decoded payload."
-            diagnostics.validationIssues = [diagnostics.sharedDataWriteError ?? "Verification failed."]
-            diagnostics.lastSnapshotStoreState = .failed
-            diagnostics.lastSnapshotStoreDetail = diagnostics.sharedDataWriteError
-            diagnostics.lastWidgetReloadState = .idle
-            diagnostics.lastWidgetReloadDetail = "共享快照校验失败，本次没有进入 Widget reload 判断。"
-            markSharedSnapshotSyncFailure(diagnostics.sharedDataWriteError ?? "Verification failed.")
-            recordEvent(.sharedDataWriteFailed, "Shared snapshot verification failed unexpectedly.")
-            return
-        }
-
+    private func handleSyncSnapshotSuccess(
+        readBack: AppGroupData,
+        prevSnapshot: AppGroupData?,
+        reason: String
+    ) {
+        let now = Date()
+        sharedSnapshotSyncFailureMessage = nil
+        syncStoreInspection()
+        appGroupAvailable = AppGroupStore.isAvailable
+        diagnostics.lastRefreshCompletedAt = now
+        diagnostics.lastSharedWriteAt = readBack.writtenAt
+            .flatMap(DateFormatting.date(from:)) ?? now
+        diagnostics.lastGeneratedAt = readBack.generatedAt
+        diagnostics.lastWrittenAt = readBack.writtenAt
+        diagnostics.sharedDataWriteError = nil
+        diagnostics.snapshotDecodable = true
+        diagnostics.lastSnapshotStoreState = .verified
+        diagnostics.lastSnapshotStoreDetail = "已写入并读回校验成功：\(readBack.repositories.count) 个仓库，reason=\(reason)。"
         diagnostics.sharedDataReadAt = Date()
-        diagnostics.sharedDataSnapshot = verifiedSnapshot
+        diagnostics.sharedDataSnapshot = readBack
         diagnostics.sharedDataReadError = nil
-        setWidgetReadableSnapshot(verifiedSnapshot, readAt: diagnostics.sharedDataReadAt ?? Date())
+        setWidgetReadableSnapshot(readBack, readAt: Date())
         validateConsistency(
-            expected: verifiedSnapshot,
-            shared: verifiedSnapshot,
+            expected: readBack,
+            shared: readBack,
             widget: diagnostics.widgetSnapshot,
             reason: reason
         )
-        lastResult = applyPins(verifiedSnapshot)
+        lastResult = applyPins(readBack)
+        let prev = prevSnapshot ?? lastResult
         let reloadDecision = ScanSchedulerPolicy.widgetReloadDecision(
-            previousSnapshot: previousSnapshot,
+            previousSnapshot: prev,
             nextSnapshot: lastResult,
             lastReloadRequestedAt: diagnostics.lastReloadRequestedAt,
             reason: reason
@@ -2304,6 +2303,27 @@ final class ScanScheduler: ObservableObject {
         } else {
             recordEvent(.widgetReloadSkipped, "Widget reload skipped (\(reason)): \(reloadDecision.detail)")
         }
+        recordEvent(
+            .sharedDataWritten,
+            "Shared snapshot written (\(readBack.repositories.count) repos, \(reason))"
+        )
+    }
+
+    private func handleSyncSnapshotFailure(
+        error: AppGroupStoreError,
+        reason: String
+    ) {
+        syncStoreInspection()
+        diagnostics.lastRefreshCompletedAt = Date()
+        diagnostics.sharedDataWriteError = error.localizedDescription
+        diagnostics.snapshotDecodable = false
+        diagnostics.validationIssues = [error.localizedDescription]
+        diagnostics.lastSnapshotStoreState = .failed
+        diagnostics.lastSnapshotStoreDetail = error.localizedDescription
+        diagnostics.lastWidgetReloadState = .idle
+        diagnostics.lastWidgetReloadDetail = "共享快照写入失败，本次没有进入 Widget reload 判断。"
+        markSharedSnapshotSyncFailure(error.localizedDescription)
+        recordEvent(.sharedDataWriteFailed, "Shared snapshot write failed: \(error.localizedDescription)")
     }
 
     private func markSharedSnapshotSyncFailure(_ reason: String) {

@@ -312,6 +312,105 @@ struct ActivityEventTests {
         #expect(pruned.map(\.id) == [kept.id])
     }
 
+    @Test func linkedWorktreesProduceIsolatedEvents() {
+        let worktreeA = snapshot(
+            modified: 0, id: "worktree-A", path: "/tmp/worktree-A"
+        )
+        let worktreeB = snapshot(
+            modified: 0, id: "worktree-B", path: "/tmp/worktree-B"
+        )
+        let previous = data([worktreeA, worktreeB], generatedAt: "2026-07-20T08:00:00Z")
+
+        let changedA = snapshot(
+            modified: 3, untracked: 1,
+            id: "worktree-A", path: "/tmp/worktree-A"
+        )
+        let current = data([changedA, worktreeB], generatedAt: "2026-07-20T09:00:00Z")
+
+        let events = ActivityEventDiffer.events(
+            previous: previous,
+            current: current,
+            observedAt: current.generatedAt
+        )
+
+        #expect(events.map(\.repositoryID) == ["worktree-A"])
+        #expect(events.count == 1)
+        #expect(events.first?.kind == ActivityEventKind.workingTreeChanged)
+    }
+
+    @Test func bothWorktreesChangedProduceSeparateEvents() {
+        let prevA = snapshot(
+            modified: 0, id: "wt-A", path: "/tmp/wt-A"
+        )
+        let prevB = snapshot(
+            modified: 1, id: "wt-B", path: "/tmp/wt-B"
+        )
+        let previous = data([prevA, prevB], generatedAt: "2026-07-20T08:00:00Z")
+
+        let currA = snapshot(
+            modified: 3, id: "wt-A", path: "/tmp/wt-A"
+        )
+        let currB = snapshot(
+            modified: 0, id: "wt-B", path: "/tmp/wt-B"
+        )
+        let current = data([currA, currB], generatedAt: "2026-07-20T09:00:00Z")
+
+        let events = ActivityEventDiffer.events(
+            previous: previous,
+            current: current,
+            observedAt: current.generatedAt
+        )
+
+        let idsByKind: [String: [ActivityEventKind]] = Dictionary(
+            grouping: events,
+            by: \.repositoryID
+        ).mapValues { $0.map(\.kind) }
+
+        #expect(idsByKind["wt-A"] == [ActivityEventKind.workingTreeChanged])
+        #expect(idsByKind["wt-B"] == [ActivityEventKind.workingTreeChanged])
+    }
+
+    @Test func eventStoreSaveLoadThenDedupPreventsReplay() throws {
+        let url = temporaryURL()
+        let store = ActivityEventStore(fileURL: url)
+
+        let e1 = try #require(makeWorkingTreeEvent(
+            from: 0, to: 1, at: "2026-07-20T09:00:00Z"
+        ))
+        #expect(try store.save([e1]).get() == [e1])
+
+        let loaded = try store.load().get()
+        #expect(loaded.events == [e1])
+
+        let replay = try #require(makeWorkingTreeEvent(
+            from: 0, to: 1, at: "2026-07-20T10:00:00Z"
+        ))
+        #expect(ActivityEventDeduplicator.newEvents(
+            from: [replay],
+            comparedTo: loaded.events
+        ).isEmpty)
+
+        let diff = try #require(makeWorkingTreeEvent(
+            from: 1, to: 2, at: "2026-07-20T11:00:00Z"
+        ))
+        #expect(ActivityEventDeduplicator.newEvents(
+            from: [diff],
+            comparedTo: loaded.events
+        ) == [diff])
+    }
+
+    @Test func unchangedStateAfterWakeOrRestartProducesNoEvents() {
+        let snap = snapshot(modified: 2, staged: 1, unstaged: 1)
+        let previous = data([snap], generatedAt: "2026-07-20T08:00:00Z")
+        let current = data([snap], generatedAt: "2026-07-20T10:00:00Z")
+
+        #expect(ActivityEventDiffer.events(
+            previous: previous,
+            current: current,
+            observedAt: current.generatedAt
+        ).isEmpty)
+    }
+
     @Test func oldSharedSnapshotWithoutEventOrCommitFieldsStillDecodes() throws {
         let payload = data([
             snapshot(lastCommitID: "commit-id", lastCommitSummary: "Subject")
