@@ -1446,6 +1446,11 @@ struct AppGroupData: Codable, Equatable {
     /// File-level provenance. This is deliberately independent from each
     /// repository's Git-data provenance.
     let persistenceState: SharedSnapshotPersistenceState
+    /// Lightweight pending-item summary for Widget consumption.
+    /// Full items are persisted separately and never embedded in the
+    /// shared snapshot. This field is set during refresh persistence
+    /// and read by the Widget extension.
+    let pendingItemWidgetSummary: PendingItemWidgetSummary?
 
     init(schemaVersion: Int,
          generatedAt: String,
@@ -1458,7 +1463,8 @@ struct AppGroupData: Codable, Equatable {
          recentActivityEvents: [ActivityEventSummary]? = nil,
          repositoryUnavailableSinceByPath: [String: String]? = nil,
          storageRevision: UInt64 = 0,
-         persistenceState: SharedSnapshotPersistenceState = .committed) {
+         persistenceState: SharedSnapshotPersistenceState = .committed,
+         pendingItemWidgetSummary: PendingItemWidgetSummary? = nil) {
         self.schemaVersion = schemaVersion
         self.generatedAt = generatedAt
         self.writtenAt = writtenAt
@@ -1471,6 +1477,7 @@ struct AppGroupData: Codable, Equatable {
         self.repositoryUnavailableSinceByPath = repositoryUnavailableSinceByPath
         self.storageRevision = storageRevision
         self.persistenceState = persistenceState
+        self.pendingItemWidgetSummary = pendingItemWidgetSummary
     }
 
     init(from decoder: Decoder) throws {
@@ -1502,6 +1509,10 @@ struct AppGroupData: Codable, Equatable {
             Bool.self,
             forKey: .historyRecordingEnabled
         )
+        let decodedPendingItemSummary = try container.decodeIfPresent(
+            PendingItemWidgetSummary.self,
+            forKey: .pendingItemWidgetSummary
+        )
         self.init(
             schemaVersion: schemaVersion,
             generatedAt: try container.decode(String.self, forKey: .generatedAt),
@@ -1523,7 +1534,8 @@ struct AppGroupData: Codable, Equatable {
                 forKey: .repositoryUnavailableSinceByPath
             ),
             storageRevision: storageRevision,
-            persistenceState: persistenceState
+            persistenceState: persistenceState,
+            pendingItemWidgetSummary: decodedPendingItemSummary
         )
     }
 
@@ -1544,6 +1556,7 @@ struct AppGroupData: Codable, Equatable {
         )
         try container.encode(storageRevision, forKey: .storageRevision)
         try container.encode(persistenceState, forKey: .persistenceState)
+        try container.encodeIfPresent(pendingItemWidgetSummary, forKey: .pendingItemWidgetSummary)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1559,6 +1572,7 @@ struct AppGroupData: Codable, Equatable {
         case persistenceState
         case historySchemaVersion
         case historyRecordingEnabled
+        case pendingItemWidgetSummary
     }
 
     static func empty() -> AppGroupData {
@@ -1579,7 +1593,8 @@ struct AppGroupData: Codable, Equatable {
             recentActivityEvents: nil,
             repositoryUnavailableSinceByPath: nil,
             storageRevision: 0,
-            persistenceState: .committed
+            persistenceState: .committed,
+            pendingItemWidgetSummary: nil
         )
     }
 
@@ -1654,6 +1669,24 @@ struct AppGroupData: Codable, Equatable {
         )
     }
 
+    func withPendingItemWidgetSummary(_ summary: PendingItemWidgetSummary?) -> AppGroupData {
+        AppGroupData(
+            schemaVersion: schemaVersion,
+            generatedAt: generatedAt,
+            writtenAt: writtenAt,
+            lastSuccessfulRefreshAt: lastSuccessfulRefreshAt,
+            historySchemaVersion: historySchemaVersion,
+            historyRecordingEnabled: historyRecordingEnabled,
+            scanSummary: scanSummary,
+            repositories: repositories,
+            recentActivityEvents: recentActivityEvents,
+            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
+            storageRevision: storageRevision,
+            persistenceState: persistenceState,
+            pendingItemWidgetSummary: summary
+        )
+    }
+
     func withPersistenceMetadata(
         schemaVersion: Int,
         generatedAt: String,
@@ -1674,7 +1707,8 @@ struct AppGroupData: Codable, Equatable {
             recentActivityEvents: recentActivityEvents,
             repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
             storageRevision: storageRevision,
-            persistenceState: persistenceState
+            persistenceState: persistenceState,
+            pendingItemWidgetSummary: pendingItemWidgetSummary
         )
     }
 
@@ -1711,7 +1745,8 @@ struct AppGroupData: Codable, Equatable {
             recentActivityEvents: recentActivityEvents,
             repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
             storageRevision: storageRevision,
-            persistenceState: state
+            persistenceState: state,
+            pendingItemWidgetSummary: nil
         )
     }
 
@@ -1765,7 +1800,8 @@ struct AppGroupData: Codable, Equatable {
             recentActivityEvents: recentActivityEvents,
             repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
             storageRevision: storageRevision,
-            persistenceState: persistenceState
+            persistenceState: persistenceState,
+            pendingItemWidgetSummary: nil
         )
     }
 }

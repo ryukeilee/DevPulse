@@ -742,8 +742,13 @@ final class ScanScheduler: ObservableObject {
     @Published var workspaces: [Workspace] = []
     @Published var workspaceAggregations: [String: WorkspaceAggregation] = [:]
     @Published private(set) var workspaceSuggestionCandidates: [WorkspaceAutoSuggestCandidate] = []
+    @Published var pendingItems: [PendingItem] = []
+    @Published var pendingItemWidgetSummary: PendingItemWidgetSummary = .empty()
+    @Published var pendingItemEvaluationDurationMs: Double = 0
     private let workspaceStore: WorkspaceStore
     private let workspaceAggregationCache: WorkspaceAggregationCache
+    let pendingItemStore: PendingItemStore
+    let pendingItemNotificationStore: PendingItemNotificationStore
 
     private var backgroundTimer: Timer?
     private var consecutiveNoChanges = 0
@@ -869,6 +874,94 @@ final class ScanScheduler: ObservableObject {
             Task { @MainActor [weak self] in
                 self?.workspaceAggregations = all
             }
+        }
+    }
+
+    /// Load pending items from disk.
+    func loadPendingItems() {
+        switch pendingItemStore.load() {
+        case .success(let archive):
+            self.pendingItems = archive.items
+            self.pendingItemWidgetSummary = PendingItemWidgetSummary.build(from: archive.items)
+        case .failure:
+            self.pendingItems = []
+            self.pendingItemWidgetSummary = .empty()
+        }
+    }
+
+    /// Refresh pending items after a scan completes, in background.
+    func refreshPendingItems() {
+        let repos = lastResult.repositories
+        let confirmWorkspaces = workspaces.filter { $0.autoSuggestConfirmed }
+        let workspaceAggs = workspaceAggregations
+        let historyStore = self.historyStore
+
+        Task.detached(priority: .utility) { @Sendable [weak self] in
+            guard let self else { return }
+
+            // Gather health assessments for all repos
+            var healthAssessments: [String: RepositoryHealthAssessment] = [:]
+            if let historyStore {
+                for repo in repos {
+                    switch historyStore.load(for: repo.id) {
+                    case .success(let entries):
+                        let assessment = RepositoryHealthEngine.assess(
+                            repositoryID: repo.id,
+                            repositoryName: repo.name,
+                            entries: entries
+                        )
+                        healthAssessments[repo.id] = assessment
+                    case .failure:
+                        break
+                    }
+                }
+            }
+
+            // Load previous items from store
+            let previousArchive: PendingItemArchive?
+            switch self.pendingItemStore.load() {
+            case .success(let archive):
+                previousArchive = archive
+            case .failure:
+                previousArchive = nil
+            }
+
+            let context = PendingItemEvaluationContext(
+                repositories: repos,
+                workspaceAggregations: workspaceAggs,
+                workspaces: confirmWorkspaces,
+                healthAssessments: healthAssessments,
+                previousItems: previousArchive?.items ?? []
+            )
+
+            let result = PendingItemEvaluator.evaluate(
+                context: context,
+                previousArchive: previousArchive
+            )
+
+            // Save to store
+            _ = self.pendingItemStore.replaceAll(with: result.items)
+
+            // Compute widget summary
+            let summary = PendingItemWidgetSummary.build(from: result.items)
+            _ = self.pendingItemStore.widgetSummary()
+
+            Task { @MainActor in
+                self.pendingItems = result.items
+                self.pendingItemWidgetSummary = summary
+                self.pendingItemEvaluationDurationMs = result.durationMs
+            }
+        }
+    }
+
+    /// Apply a user action to a pending item.
+    func applyUserAction(to itemID: String, action: PendingItemUserAction, snoozeDuration: TimeInterval? = nil) {
+        switch pendingItemStore.applyUserAction(itemID: itemID, action: action, snoozeDuration: snoozeDuration) {
+        case .success(let archive):
+            self.pendingItems = archive.items
+            self.pendingItemWidgetSummary = PendingItemWidgetSummary.build(from: archive.items)
+        case .failure:
+            break
         }
     }
 
@@ -1078,6 +1171,8 @@ final class ScanScheduler: ObservableObject {
         self.activityEventStore = commandMode ? nil : activityEventStore
         self.historyStore = commandMode ? nil : (historyStore ?? RepositoryHistoryStore.live())
         self.workspaceStore = commandMode ? WorkspaceStore(fileURL: URL(fileURLWithPath: "/dev/null")) : WorkspaceStore.live()
+        self.pendingItemStore = commandMode ? PendingItemStore(fileURL: URL(fileURLWithPath: "/dev/null")) : PendingItemStore.live()
+        self.pendingItemNotificationStore = commandMode ? PendingItemNotificationStore(fileURL: URL(fileURLWithPath: "/dev/null")) : PendingItemNotificationStore.live()
         self.workspaceAggregationCache = WorkspaceAggregationCache()
         if commandMode {
             appGroupAvailable = AppGroupStore.isAvailable
@@ -1092,6 +1187,7 @@ final class ScanScheduler: ObservableObject {
         loadScanDirectories()
         loadIgnoredRepositories()
         loadWorkspaces()
+        loadPendingItems()
         syncStoreInspection()
         appGroupAvailable = AppGroupStore.isAvailable
         gitAvailable = ProcessRunner.isGitAvailable()
@@ -1664,6 +1760,8 @@ final class ScanScheduler: ObservableObject {
                 // Refresh workspace aggregations in background
                 self.refreshWorkspaceAggregations()
                 self.refreshWorkspaceSuggestions()
+                // Refresh pending items (uses health assessments and workspace aggregations)
+                self.refreshPendingItems()
 
                 if self.warnings.isEmpty {
                     self.recordEvent(
@@ -2677,7 +2775,11 @@ final class ScanScheduler: ObservableObject {
         reason: String
     ) {
         let writtenAt = DateFormatting.nowISO()
-        let snapshotToWrite = applyPins(snapshot).withWrittenAt(writtenAt)
+        let snapshotToWrite = applyPins(snapshot)
+            .withWrittenAt(writtenAt)
+            .withPendingItemWidgetSummary(
+                pendingItems.isEmpty ? nil : pendingItemWidgetSummary
+            )
         let prevSnapshot = previousSnapshot ?? lastResult
 
         diagnostics.lastSnapshotStoreTrigger = reason
