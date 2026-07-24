@@ -8,6 +8,18 @@ enum RepositorySnapshotSchema {
     static let version = 3
     static let oldestMigratableVersion = 1
 
+    /// On-disk envelope format version for the metadata header.
+    /// Increment when adding new required fields to the header that every
+    /// reader must recognise to safely interpret the payload.
+    static let storageFormatVersion = 1
+
+    /// Current app version marker written into every committed snapshot.
+    static var currentAppVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+            ?? (Bundle.main.infoDictionary?["CFBundleVersion"] as? String)
+            ?? "0.2.0"
+    }
+
     static let v3HistoryVersionKey = "historySchemaVersion"
 }
 
@@ -1462,6 +1474,13 @@ struct AppGroupData: Codable, Equatable {
     /// shared snapshot. This field is set during refresh persistence
     /// and read by the Widget extension.
     let pendingItemWidgetSummary: PendingItemWidgetSummary?
+    /// App version that wrote this snapshot. Written by `SharedSnapshotStore`
+    /// during commit. Readers can use this to detect stale-format payloads
+    /// that may need aggressive recovery.
+    let appVersion: String?
+    /// Storage format version of the on-disk envelope. Incremented when the
+    /// metadata header gains new mandatory fields.
+    let storageFormatVersion: Int?
 
     init(schemaVersion: Int,
          generatedAt: String,
@@ -1475,7 +1494,9 @@ struct AppGroupData: Codable, Equatable {
          repositoryUnavailableSinceByPath: [String: String]? = nil,
          storageRevision: UInt64 = 0,
          persistenceState: SharedSnapshotPersistenceState = .committed,
-         pendingItemWidgetSummary: PendingItemWidgetSummary? = nil) {
+         pendingItemWidgetSummary: PendingItemWidgetSummary? = nil,
+         appVersion: String? = nil,
+         storageFormatVersion: Int? = nil) {
         self.schemaVersion = schemaVersion
         self.generatedAt = generatedAt
         self.writtenAt = writtenAt
@@ -1489,6 +1510,8 @@ struct AppGroupData: Codable, Equatable {
         self.storageRevision = storageRevision
         self.persistenceState = persistenceState
         self.pendingItemWidgetSummary = pendingItemWidgetSummary
+        self.appVersion = appVersion
+        self.storageFormatVersion = storageFormatVersion
     }
 
     init(from decoder: Decoder) throws {
@@ -1524,6 +1547,14 @@ struct AppGroupData: Codable, Equatable {
             PendingItemWidgetSummary.self,
             forKey: .pendingItemWidgetSummary
         )
+        let decodedAppVersion = try container.decodeIfPresent(
+            String.self,
+            forKey: .appVersion
+        )
+        let decodedStorageFormatVersion = try container.decodeIfPresent(
+            Int.self,
+            forKey: .storageFormatVersion
+        )
         self.init(
             schemaVersion: schemaVersion,
             generatedAt: try container.decode(String.self, forKey: .generatedAt),
@@ -1546,7 +1577,9 @@ struct AppGroupData: Codable, Equatable {
             ),
             storageRevision: storageRevision,
             persistenceState: persistenceState,
-            pendingItemWidgetSummary: decodedPendingItemSummary
+            pendingItemWidgetSummary: decodedPendingItemSummary,
+            appVersion: decodedAppVersion,
+            storageFormatVersion: decodedStorageFormatVersion
         )
     }
 
@@ -1568,6 +1601,8 @@ struct AppGroupData: Codable, Equatable {
         try container.encode(storageRevision, forKey: .storageRevision)
         try container.encode(persistenceState, forKey: .persistenceState)
         try container.encodeIfPresent(pendingItemWidgetSummary, forKey: .pendingItemWidgetSummary)
+        try container.encodeIfPresent(appVersion, forKey: .appVersion)
+        try container.encodeIfPresent(storageFormatVersion, forKey: .storageFormatVersion)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1584,6 +1619,8 @@ struct AppGroupData: Codable, Equatable {
         case historySchemaVersion
         case historyRecordingEnabled
         case pendingItemWidgetSummary
+        case appVersion
+        case storageFormatVersion
     }
 
     static func empty() -> AppGroupData {
@@ -1605,7 +1642,9 @@ struct AppGroupData: Codable, Equatable {
             repositoryUnavailableSinceByPath: nil,
             storageRevision: 0,
             persistenceState: .committed,
-            pendingItemWidgetSummary: nil
+            pendingItemWidgetSummary: nil,
+            appVersion: RepositorySnapshotSchema.currentAppVersion,
+            storageFormatVersion: RepositorySnapshotSchema.storageFormatVersion
         )
     }
 
@@ -1622,7 +1661,10 @@ struct AppGroupData: Codable, Equatable {
             recentActivityEvents: recentActivityEvents,
             repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
             storageRevision: storageRevision,
-            persistenceState: persistenceState
+            persistenceState: persistenceState,
+            pendingItemWidgetSummary: pendingItemWidgetSummary,
+            appVersion: appVersion,
+            storageFormatVersion: storageFormatVersion
         )
     }
 
@@ -1639,7 +1681,10 @@ struct AppGroupData: Codable, Equatable {
             recentActivityEvents: recentActivityEvents,
             repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
             storageRevision: storageRevision,
-            persistenceState: persistenceState
+            persistenceState: persistenceState,
+            pendingItemWidgetSummary: pendingItemWidgetSummary,
+            appVersion: appVersion,
+            storageFormatVersion: storageFormatVersion
         )
     }
 
@@ -1656,7 +1701,10 @@ struct AppGroupData: Codable, Equatable {
             recentActivityEvents: events,
             repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
             storageRevision: storageRevision,
-            persistenceState: persistenceState
+            persistenceState: persistenceState,
+            pendingItemWidgetSummary: pendingItemWidgetSummary,
+            appVersion: appVersion,
+            storageFormatVersion: storageFormatVersion
         )
     }
 
@@ -1676,7 +1724,10 @@ struct AppGroupData: Codable, Equatable {
             recentActivityEvents: recentActivityEvents,
             repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
             storageRevision: storageRevision,
-            persistenceState: persistenceState
+            persistenceState: persistenceState,
+            pendingItemWidgetSummary: pendingItemWidgetSummary,
+            appVersion: appVersion,
+            storageFormatVersion: storageFormatVersion
         )
     }
 
@@ -1694,7 +1745,9 @@ struct AppGroupData: Codable, Equatable {
             repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
             storageRevision: storageRevision,
             persistenceState: persistenceState,
-            pendingItemWidgetSummary: summary
+            pendingItemWidgetSummary: summary,
+            appVersion: appVersion,
+            storageFormatVersion: storageFormatVersion
         )
     }
 
@@ -1719,7 +1772,9 @@ struct AppGroupData: Codable, Equatable {
             repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
             storageRevision: storageRevision,
             persistenceState: persistenceState,
-            pendingItemWidgetSummary: pendingItemWidgetSummary
+            pendingItemWidgetSummary: pendingItemWidgetSummary,
+            appVersion: RepositorySnapshotSchema.currentAppVersion,
+            storageFormatVersion: RepositorySnapshotSchema.storageFormatVersion
         )
     }
 
@@ -1757,7 +1812,9 @@ struct AppGroupData: Codable, Equatable {
             repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
             storageRevision: storageRevision,
             persistenceState: state,
-            pendingItemWidgetSummary: nil
+            pendingItemWidgetSummary: nil,
+            appVersion: appVersion,
+            storageFormatVersion: storageFormatVersion
         )
     }
 
@@ -1812,7 +1869,9 @@ struct AppGroupData: Codable, Equatable {
             repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
             storageRevision: storageRevision,
             persistenceState: persistenceState,
-            pendingItemWidgetSummary: nil
+            pendingItemWidgetSummary: nil,
+            appVersion: appVersion,
+            storageFormatVersion: storageFormatVersion
         )
     }
 }
@@ -3522,6 +3581,7 @@ enum AppGroupStoreError: LocalizedError, Equatable {
     case lockFailed(String)
     case writeFailed(String)
     case verificationFailed(String)
+    case crossProcessWriteDetected(observed: UInt64, actual: UInt64)
 
     var errorDescription: String? {
         switch self {
@@ -3545,6 +3605,8 @@ enum AppGroupStoreError: LocalizedError, Equatable {
             return "Failed to write shared snapshot: \(reason)"
         case .verificationFailed(let reason):
             return "Shared snapshot verification failed: \(reason)"
+        case .crossProcessWriteDetected(let observed, let actual):
+            return "Cross-process write conflict: observed revision \(observed), but current revision is \(actual)."
         }
     }
 }

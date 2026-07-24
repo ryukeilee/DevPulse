@@ -53,6 +53,7 @@ enum ScanRefreshSource: Int, Sendable {
 
 enum ScanLifecycleRefreshEvent: Equatable, Sendable {
     case startup
+    case lifecycleRecovery
     case windowReopened
     case applicationBecameActive
     case wake
@@ -1379,7 +1380,7 @@ final class ScanScheduler: ObservableObject {
             lastFreshnessRecalculationAt = now
             objectWillChange.send()
 
-        case .startup:
+        case .startup, .lifecycleRecovery:
             let decision = ScanSchedulerPolicy.startupRefreshDecision(
                 snapshotIsFresh: !shouldRunImmediateStartupScan,
                 currentRootsSignature: ScanSchedulerPolicy.scanRootsSignature(scanRoots().roots),
@@ -1397,7 +1398,7 @@ final class ScanScheduler: ObservableObject {
             if decision.shouldRefreshImmediately {
                 submitScanRequest(
                     forceRepositoryDiscovery: decision.forceRepositoryDiscovery,
-                    source: .startup,
+                    source: event == .lifecycleRecovery ? .lifecycleRecovery : .startup,
                     coalescingNanoseconds: Self.refreshCoalescingNanoseconds
                 )
             }

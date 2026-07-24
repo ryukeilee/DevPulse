@@ -131,6 +131,19 @@ enum AppGroupStore {
         return sharedStore.commit(data)
     }
 
+    /// Commit a snapshot with cross-process storage revision guarding.
+    /// Provide `observedStorageRevision` to prevent stale writes from
+    /// overwriting a newer snapshot written by another process.
+    static func write(
+        _ data: AppGroupData,
+        observedStorageRevision: UInt64?
+    ) -> Result<AppGroupData, AppGroupStoreError> {
+        guard let sharedStore else {
+            return .failure(.appGroupUnavailable)
+        }
+        return sharedStore.commit(data, observedStorageRevision: observedStorageRevision)
+    }
+
     @discardableResult
     static func cleanupTemporaryFiles() -> Result<Void, AppGroupStoreError> {
         guard let sharedStore else {

@@ -91,12 +91,20 @@ targets:
     platform: macOS
     sources:
       - path: DevPulseNativeTests
+      - path: Widget/DevPulseWidget.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: local.devpulse.DevPulseTests
         GENERATE_INFOPLIST_FILE: "YES"
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG WIDGET_TEST
+        Release:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: WIDGET_TEST
     dependencies:
       - target: DevPulse
+      - sdk: WidgetKit.framework
+      - sdk: SwiftUI.framework
 
 schemes:
   DevPulse:

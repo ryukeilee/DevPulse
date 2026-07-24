@@ -1,6 +1,9 @@
 import Foundation
 import OSLog
 import os.lock
+#if canImport(WidgetKit)
+import WidgetKit
+#endif
 
 // MARK: - Refresh engine
 
@@ -28,7 +31,11 @@ actor RefreshEngine {
 
     // MARK: - Private state
 
+    /// Current generation counter. Advanced atomically by `advanceGeneration()`.
+    /// Captured as `GenerationIsolation.Token` at task-spawn time so stale
+    /// tasks can be detected via `GenerationIsolation.isCurrent(token:...)`.
     private var generation: UInt64 = 0
+    private var generationEpoch: UInt64 = 0
     private let cancelledLock = OSAllocatedUnfairLock(initialState: false)
     private var observationCollector = RefreshObservationCollector()
     private var _isCancelled: Bool {
@@ -68,6 +75,20 @@ actor RefreshEngine {
         cancelledLock.withLock { $0 }
     }
 
+    /// Atomically advance the generation and reset the cancellation flag.
+    /// Returns the new generation token using the unified `GenerationIsolation.Token`.
+    private func advanceGeneration() -> GenerationIsolation.Token {
+        let old = generation
+        generation &+= 1
+        if old == UInt64.max {
+            // generation wrapped to 0 — advance epoch so no composite key
+            // from a previous wrap-around can match the current identity.
+            generationEpoch &+= 1
+        }
+        _isCancelled = false
+        return GenerationIsolation.Token(generation: generation, epoch: generationEpoch)
+    }
+
     // MARK: - Execute
 
     /// Run a full refresh with stage progress.
@@ -85,7 +106,7 @@ actor RefreshEngine {
         await observationCollector.reset()
         await observationCollector.setSource(String(describing: source))
         generation &+= 1
-        let currentGeneration = generation
+        let currentGeneration = GenerationIsolation.Token(generation: generation, epoch: generationEpoch)
         _isCancelled = false
         let overallStart = ProcessInfo.processInfo.systemUptime
         let overallDeadline = overallStart + config.scanTimeout
@@ -126,7 +147,7 @@ actor RefreshEngine {
             ObservationSpan(label: "discovery", startedAt: stage1Start, duration: discoveryElapsed, callCount: 0, concurrentPeak: 0, timeoutCount: 0, cancellationCount: 0, cacheHitCount: 0, snapshotReuseCount: 0, mainThreadStallUs: 0, resourceDeltaCPU: 0, resourceDeltaMemoryMB: 0, resourceDeltaDiskWritesKB: 0)
         }
 
-        guard !isInvalidated(currentGeneration) else {
+        guard !isInvalidated(token: currentGeneration) else {
             return buildCancelled(previous: previousSnapshot, discoveredPaths: discoveryResult.allPaths)
         }
 
@@ -159,7 +180,7 @@ actor RefreshEngine {
                         completed: coreResult.completed, elapsed: coreElapsed,
                         finished: true, startedAt: overallStart)
 
-        guard !isInvalidated(currentGeneration) else {
+        guard !isInvalidated(token: currentGeneration) else {
             return buildPartialCancelled(
                 discovery: discoveryResult,
                 coreSnapshots: coreResult.snapshots,
@@ -230,12 +251,27 @@ actor RefreshEngine {
                         elapsed: mergeElapsed, finished: true, startedAt: overallStart)
 
         // ── Stage 5: Persistence ─────────────────────────────────────────
+        // Captures the on-disk storage revision observed at the time of the
+        // last successful read (or the previous snapshot) so that the commit
+        // can detect a cross-process race — another process wrote a newer
+        // snapshot while we were scanning — and refuse to overwrite it.
         let stage5Start = ProcessInfo.processInfo.systemUptime
         logger.debug("Stage .persistence starting")
         let persistedData = mergedData.withWrittenAt(DateFormatting.nowISO())
+        let observedStorageRevision: UInt64? = previousSnapshot?.storageRevision ?? mergedData.storageRevision
         var persistError: String?
-        switch AppGroupStore.write(persistedData) {
-        case .success: break
+        let persistResult = AppGroupStore.write(persistedData, observedStorageRevision: observedStorageRevision)
+        switch persistResult {
+        case .success:
+            break
+        case .failure(AppGroupStoreError.crossProcessWriteDetected(let observed, let actual)):
+            persistError = "cross-process write conflict: observed rev \(observed), on-disk rev \(actual)"
+            warnings.append("共享快照写入冲突: 另一进程在此期间更新了快照。将重试读取最新版本。")
+            // Attempt to re-read the current snapshot to recover.
+            if case .success(let reloaded) = AppGroupStore.readDetailed() {
+                _ = reloaded
+                logger.debug("Re-read snapshot after conflict: rev \(reloaded.snapshot.storageRevision)")
+            }
         case .failure(let error):
             persistError = error.localizedDescription
             warnings.append("共享快照写入失败: \(persistError ?? "unknown")")
@@ -247,16 +283,34 @@ actor RefreshEngine {
                         elapsed: persistElapsed, finished: true, startedAt: overallStart)
 
         // ── Stage 6: Widget sync ─────────────────────────────────────────
-        // Widget reload is handled by ScanScheduler.syncSharedSnapshot() to
-        // avoid duplicate calls (the scheduler already decides whether changed
-        // data warrants a reload). Stage 6 remains as a lightweight diagnostic
-        // marker so the pipeline accounting stays consistent.
+        // Reload WidgetKit timelines so the widget picks up the newly
+        // persisted snapshot. The scheduler additionally calls reloadWidgets()
+        // for non-scan triggers (e.g. pin toggle), so this stage covers the
+        // primary scan path. Redundant reloads are harmless — WidgetKit
+        // coalesces them.
         let stage6Start = ProcessInfo.processInfo.systemUptime
-        logger.debug("Stage .widgetSync starting (deferred to scheduler)")
+        logger.debug("Stage .widgetSync starting")
+        let widgetReloadError: String?
+        do {
+            #if canImport(WidgetKit)
+            if #available(macOS 14.0, *) {
+                WidgetCenter.shared.reloadTimelines(ofKind: WidgetIdentity.kind)
+                logger.debug("Widget timelines reloaded for kind \(WidgetIdentity.kind)")
+            } else {
+                logger.debug("Widget reload skipped: macOS < 14.0")
+            }
+            #else
+            logger.debug("Widget reload skipped: WidgetKit not available")
+            #endif
+            widgetReloadError = nil
+        } catch {
+            widgetReloadError = error.localizedDescription
+            warnings.append("Widget timeline reload failed: \(error.localizedDescription)")
+        }
         let widgetElapsed = ProcessInfo.processInfo.systemUptime - stage6Start
-        logger.debug("Stage .widgetSync finished elapsed_ms=\(Int(widgetElapsed * 1000))")
+        logger.debug("Stage .widgetSync finished elapsed_ms=\(Int(widgetElapsed * 1000)) error=\(widgetReloadError ?? "nil")")
 
-        publishProgress(stage: .widgetSync, total: 1, completed: 1,
+        publishProgress(stage: .widgetSync, total: 1, completed: widgetReloadError == nil ? 1 : 0,
                         elapsed: widgetElapsed, finished: true, startedAt: overallStart)
 
         progressContinuation.finish()
@@ -321,7 +375,7 @@ actor RefreshEngine {
             extendedMetrics: extendedResult,
             timeBudgetExhaustedByStage: timeBudgetExhaustedByStage,
             persistError: persistError,
-            widgetSyncError: nil
+            widgetSyncError: widgetReloadError
         )
 
         // Collect and store observations
@@ -447,7 +501,7 @@ extension RefreshEngine {
         previousSnapshot: AppGroupData?,
         workspaceKindsByPath: [String: RepositoryWorkspaceKind],
         overallDeadline: TimeInterval,
-        generation: UInt64,
+        generation: GenerationIsolation.Token,
         gitCommandRunner: @escaping GitCommandRunner,
         warnings: inout [String]
     ) async -> CoreReadResult {
@@ -476,8 +530,15 @@ extension RefreshEngine {
                 nextIdx += 1
                 pendingCount += 1
 
-                group.addTask {
-                    guard !Task.isCancelled, !self.isCancelled else { return (idx, nil) }
+                let statusGenNum = generation.generation
+                let statusEpochNum = generation.epoch
+                group.addTask { [tGen = statusGenNum, tEpoch = statusEpochNum] in
+                    let cancelled = self.isCancelled
+                    let tToken = GenerationIsolation.Token(generation: tGen, epoch: tEpoch)
+                    let stale = !GenerationIsolation.isCurrent(token: tToken, currentGeneration: tGen, currentEpoch: tEpoch) || cancelled
+                    // Generation check: if the current scan has been
+                    // superseded, don't start new work.
+                    guard !Task.isCancelled, !cancelled, !stale else { return (idx, nil) }
                     let remaining = overallDeadline - ProcessInfo.processInfo.systemUptime
                     guard remaining > 0 else { return (idx, nil) }
 
@@ -491,7 +552,7 @@ extension RefreshEngine {
                         ["status", "--porcelain=v2", "--branch"],
                         canonical, timeout,
                         ProcessRunner.defaultOutputLimit,
-                        { self.isCancelled || Task.isCancelled }
+                        { cancelled || Task.isCancelled || stale }
                     )
 
                     return (idx, ProcessReadResult(
@@ -510,6 +571,14 @@ extension RefreshEngine {
                 pendingCount -= 1
                 counters.peak = max(counters.peak, pendingCount + 1)
                 defer { submit() }
+
+                // Cross-generation check: if the generation advanced while
+                // we were awaiting, discard the result and stop.
+                let invalidated = await self.isInvalidated(token: generation)
+                guard !invalidated else {
+                    group.cancelAll()
+                    break
+                }
 
                 if let read {
                     switch read.result {
@@ -674,7 +743,7 @@ extension RefreshEngine {
         config: ScanConfig,
         previousSnapshot: AppGroupData?,
         overallDeadline: TimeInterval,
-        generation: UInt64,
+        generation: GenerationIsolation.Token,
         gitCommandRunner: @escaping GitCommandRunner,
         warnings: inout [String]
     ) async -> ExtendedReadResult {
@@ -722,8 +791,18 @@ extension RefreshEngine {
                 let (origIdx, snapshot) = needsLog[nextIdx]
                 nextIdx += 1
 
-                group.addTask {
-                    guard !Task.isCancelled, !self.isCancelled else { return (origIdx, nil) }
+                let logGen = generation.generation
+                let logEpoch = generation.epoch
+                let logToken = GenerationIsolation.Token(generation: logGen, epoch: logEpoch)
+                group.addTask { [localGen = logGen, localEpoch = logEpoch, localToken = logToken] in
+                    let cancelled = self.isCancelled
+                    let isStale = !GenerationIsolation.isCurrent(
+                        token: localToken,
+                        currentGeneration: localGen,
+                        currentEpoch: localEpoch
+                    ) || cancelled
+                    // Generation check before starting work
+                    guard !Task.isCancelled, !cancelled, !isStale else { return (origIdx, nil) }
                     let remaining = overallDeadline - ProcessInfo.processInfo.systemUptime
                     guard remaining > 0 else { return (origIdx, nil) }
                     let timeout = min(config.gitCommandTimeout, max(0.5, remaining))
@@ -732,8 +811,12 @@ extension RefreshEngine {
                         ["log", "-1", "--pretty=%H%x00%cI%x00%s"],
                         snapshot.path, timeout,
                         ProcessRunner.defaultOutputLimit,
-                        { self.isCancelled || Task.isCancelled }
+                        { cancelled || Task.isCancelled || isStale }
                     )
+
+                    guard !isStale else {
+                        return (origIdx, nil)
+                    }
 
                     guard case .success(let output) = logResult else {
                         return (origIdx, snapshot) // keep status snapshot without log metadata
@@ -780,6 +863,12 @@ extension RefreshEngine {
 
             while let (origIdx, result) = await group.next() {
                 defer { submit() }
+                // Cross-generation check
+                let invalidated2 = await self.isInvalidated(token: generation)
+                guard !invalidated2 else {
+                    group.cancelAll()
+                    break
+                }
                 if let result { logResults[origIdx] = result }
                 if self.isCancelled || Task.isCancelled || ProcessInfo.processInfo.systemUptime >= overallDeadline {
                     group.cancelAll()
@@ -932,8 +1021,14 @@ extension RefreshEngine {
         return byPath
     }
 
-    private func isInvalidated(_ checkGeneration: UInt64) -> Bool {
-        generation != checkGeneration || _isCancelled
+    /// Check whether `token` still matches the current generation identity.
+    /// Delegates to `GenerationIsolation.isCurrent` for the canonical comparison.
+    private func isInvalidated(token: GenerationIsolation.Token) -> Bool {
+        !GenerationIsolation.isCurrent(
+            token: token,
+            currentGeneration: generation,
+            currentEpoch: generationEpoch
+        ) || _isCancelled
     }
 
     private func publishProgress(stage: RefreshPipelineStage, total: Int,
@@ -1158,5 +1253,21 @@ extension GitRepositoryScanner {
             forceRepositoryDiscovery: forceRepositoryDiscovery,
             previousSnapshot: previousSnapshot
         )
+    }
+}
+
+// MARK: - Test helpers
+
+extension RefreshEngine {
+    /// Test helper: advance the generation token.
+    /// Available only via `@testable import DevPulse`.
+    func advanceGenerationForTesting() -> GenerationIsolation.Token {
+        advanceGeneration()
+    }
+
+    /// Test helper: check generation invalidation.
+    /// Available only via `@testable import DevPulse`.
+    func isInvalidatedForTesting(token: GenerationIsolation.Token) -> Bool {
+        isInvalidated(token: token)
     }
 }

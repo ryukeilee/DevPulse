@@ -2,6 +2,10 @@ import Foundation
 import SwiftUI
 import WidgetKit
 
+#if WIDGET_TEST
+@testable import DevPulse
+#endif
+
 private enum WidgetSnapshotStore {
     static let appGroupIdentifier = SharedSnapshotLocation.appGroupIdentifier
     private static let snapshotFileName = SharedSnapshotLocation.fileName
@@ -127,31 +131,20 @@ struct Provider: TimelineProvider {
     }
 
     private func loadEntry() -> WidgetEntry {
-        do {
-            let result = WidgetSnapshotStore.load()
-            switch result {
-            case .success(let snapshot):
-                return .content(
-                    snapshot: snapshot,
-                    feed: ActivityTimelineBuilder.build(from: snapshot)
-                )
-            case .failure(let error):
-                switch error {
-                case .snapshotMissing:
-                    return .noSnapshot()
-                case .appGroupUnavailable, .readFailed, .decodeFailed, .schemaMismatch:
-                    return .loadFailed(error)
-                }
+        let result = WidgetSnapshotStore.load()
+        switch result {
+        case .success(let snapshot):
+            return .content(
+                snapshot: snapshot,
+                feed: ActivityTimelineBuilder.build(from: snapshot)
+            )
+        case .failure(let error):
+            switch error {
+            case .snapshotMissing:
+                return .noSnapshot()
+            case .appGroupUnavailable, .readFailed, .decodeFailed, .schemaMismatch:
+                return .loadFailed(error)
             }
-        } catch {
-            // Safety net: defensive catch for any unexpected throw
-            // (e.g. I/O edge case, unanticipated JSON structure,
-            //  or future migration path) so the widget extension
-            //  process never crashes during timeline loading.
-            return .loadFailed(.readFailed(
-                path: SharedSnapshotLocation.fileName,
-                reason: error.localizedDescription
-            ))
         }
     }
 }
@@ -231,15 +224,13 @@ struct DevPulseWidgetEntryView: View {
             WidgetPanelBackground()
 
             Group {
-                switch widgetFamily {
-                case .systemSmall:
+                switch WidgetFamilyKind(widgetFamily) {
+                case .small:
                     SmallGlanceWidgetView(entry: entry)
-                case .systemMedium:
+                case .medium:
                     MediumGlanceWidgetView(entry: entry)
-                case .systemLarge:
+                case .large:
                     LargeGlanceWidgetView(entry: entry)
-                default:
-                    SmallGlanceWidgetView(entry: entry)
                 }
             }
         }
@@ -1428,279 +1419,96 @@ private struct WidgetReadinessBadge: View {
     }
 }
 
-private struct SimpleWidgetChromeHeader: View {
-    let trailingText: String?
+private enum WidgetFamilyKind: Equatable {
+    case small
+    case medium
+    case large
 
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "terminal")
-                .font(.caption2.weight(.semibold))
-            Text("DevPulse")
-                .font(.caption.weight(.semibold))
-            Spacer(minLength: 0)
-            if let trailingText {
-                Text(trailingText)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
+    init(_ family: WidgetFamily) {
+        switch family {
+        case .systemSmall: self = .small
+        case .systemMedium: self = .medium
+        case .systemLarge: self = .large
+        default: self = .small
         }
-        .foregroundStyle(.secondary)
     }
 }
 
-private struct SimpleWidgetStateBlock: View {
-    let title: String
-    let detail: String?
-    let icon: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label(title, systemImage: icon)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.primary)
-
-            if let detail {
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct SimpleWidgetRepositoryRow: View {
-    let item: ActivityTimelineItem
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(item.repoName)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-
-                Spacer(minLength: 6)
-
-                Text(item.widgetChangeCountLabel)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            HStack(spacing: 6) {
-                WidgetDataSourceBadge(item: item, compact: true)
-
-                Text(item.branchDisplayLabel)
-                    .font(.caption2)
-                    .lineLimit(1)
-                    .foregroundStyle(.secondary)
-
-                Spacer(minLength: 4)
-
-                Text(item.activityLabel)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        }
-    }
-
-}
-
-private struct SimpleSmallGlanceWidgetView: View {
+/// Fallback rendering for any WidgetFamily that is not explicitly handled.
+/// Uses the same 4-state decision tree as the dedicated views but with a
+/// minimal layout that works in constrained space.
+private struct FallbackWidgetView: View {
     let entry: WidgetEntry
 
-    private var prioritizedItems: [ActivityTimelineItem] {
-        entry.feed.items
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SimpleWidgetChromeHeader(trailingText: nil)
-
-            content
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding(12)
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        if let state = fallbackState {
-            SimpleWidgetStateBlock(title: state.title, detail: state.detail, icon: state.icon)
-        } else if let item = prioritizedItems.first {
-            SimpleWidgetRepositoryRow(item: item)
-        } else {
-            SimpleWidgetStateBlock(title: "没有找到仓库", detail: "检查扫描目录后重新刷新", icon: "folder")
-        }
-    }
-
-    private var fallbackState: (title: String, detail: String?, icon: String)? {
-        switch entry.loadState {
-        case .placeholder:
-            return ("正在读取共享快照", nil, "clock")
-        case .noSnapshot:
-            return (WidgetRefreshCopy.waitingFirstRefreshTitle, WidgetRefreshCopy.waitingFirstRefreshDetail, "arrow.triangle.2.circlepath")
-        case .loadFailed:
-            return (entry.loadFailure?.title ?? "共享快照读取失败", entry.loadFailure?.detail, entry.loadFailure?.icon ?? "exclamationmark.triangle.fill")
-        case .ready:
-            switch entry.trustAssessment?.state {
-            case .stale, .expired, .degraded:
-                return (WidgetRefreshCopy.waitingRefreshTitle, WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment), "clock.badge.exclamationmark")
-            case .unknown, .failed, .none:
-                return (WidgetRefreshCopy.pendingConfirmationTitle, WidgetRefreshCopy.pendingConfirmationDetail, "questionmark.circle")
-            case .fresh:
-                return nil
-            }
-        }
-    }
-}
-
-private struct SimpleMediumGlanceWidgetView: View {
-    let entry: WidgetEntry
-
-    private var prioritizedItems: [ActivityTimelineItem] {
-        entry.feed.items
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SimpleWidgetChromeHeader(trailingText: mediumTrailingText)
-
-            content
-
-            Text(entry.footerText)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding(12)
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        if let state = fallbackState {
-            SimpleWidgetStateBlock(title: state.title, detail: state.detail, icon: state.icon)
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(Array(prioritizedItems.prefix(2).enumerated()), id: \.element.id) { index, item in
-                    SimpleWidgetRepositoryRow(item: item)
-                    if index == 0 && prioritizedItems.count > 1 {
-                        Divider()
-                    }
-                }
-            }
-        }
-    }
-
-    private var mediumTrailingText: String? {
-        guard case .ready = entry.loadState else { return nil }
-        guard let state = entry.trustAssessment?.state, state != .fresh else { return nil }
-        switch state {
-        case .stale, .expired, .degraded:
-            return WidgetRefreshCopy.waitingRefreshTitle
-        case .unknown, .failed:
-            return WidgetRefreshCopy.pendingConfirmationTitle
-        case .fresh:
-            return nil
-        }
-    }
-
-    private var fallbackState: (title: String, detail: String?, icon: String)? {
-        switch entry.loadState {
-        case .placeholder:
-            return ("正在读取共享快照", nil, "clock")
-        case .noSnapshot:
-            return (WidgetRefreshCopy.waitingFirstRefreshTitle, WidgetRefreshCopy.waitingFirstRefreshDetail, "arrow.triangle.2.circlepath")
-        case .loadFailed:
-            return (entry.loadFailure?.title ?? "共享快照读取失败", entry.loadFailure?.detail, entry.loadFailure?.icon ?? "exclamationmark.triangle.fill")
-        case .ready:
-            switch entry.trustAssessment?.state {
-            case .stale, .expired, .degraded:
-                return (WidgetRefreshCopy.waitingRefreshTitle, WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment), "clock.badge.exclamationmark")
-            case .unknown, .failed, .none:
-                return (WidgetRefreshCopy.pendingConfirmationTitle, WidgetRefreshCopy.pendingConfirmationDetail, "questionmark.circle")
-            case .fresh:
-                return prioritizedItems.isEmpty ? ("没有找到仓库", "检查扫描目录后重新刷新", "folder") : nil
-            }
-        }
-    }
-}
-
-private struct SimpleLargeGlanceWidgetView: View {
-    let entry: WidgetEntry
-
-    private var prioritizedItems: [ActivityTimelineItem] {
-        entry.feed.items
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SimpleWidgetChromeHeader(trailingText: largeTrailingText)
-
-            content
+        VStack(alignment: .leading, spacing: 6) {
+            WidgetChromeHeader(trailingText: nil, compactTitle: true)
 
             Spacer(minLength: 0)
 
-            Text(entry.footerText)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            fallbackContent
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding(14)
+        .padding(10)
     }
 
     @ViewBuilder
-    private var content: some View {
-        if let state = fallbackState {
-            SimpleWidgetStateBlock(title: state.title, detail: state.detail, icon: state.icon)
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(Array(prioritizedItems.prefix(3).enumerated()), id: \.element.id) { index, item in
-                    SimpleWidgetRepositoryRow(item: item)
-                    if index < min(prioritizedItems.count, 3) - 1 {
-                        Divider()
-                    }
-                }
-            }
-        }
-    }
-
-    private var largeTrailingText: String? {
-        guard case .ready = entry.loadState else { return nil }
-        guard let state = entry.trustAssessment?.state, state != .fresh else { return nil }
-        switch state {
-        case .stale, .expired, .degraded:
-            return WidgetRefreshCopy.waitingRefreshTitle
-        case .unknown, .failed:
-            return WidgetRefreshCopy.pendingConfirmationTitle
-        case .fresh:
-            return nil
-        }
-    }
-
-    private var fallbackState: (title: String, detail: String?, icon: String)? {
+    private var fallbackContent: some View {
         switch entry.loadState {
         case .placeholder:
-            return ("正在读取共享快照", nil, "clock")
+            WidgetStateBlock(
+                title: "正在读取共享快照",
+                detail: nil,
+                icon: "clock",
+                prominent: false
+            )
         case .noSnapshot:
-            return (WidgetRefreshCopy.waitingFirstRefreshTitle, WidgetRefreshCopy.waitingFirstRefreshDetail, "arrow.triangle.2.circlepath")
+            WidgetStateBlock(
+                title: WidgetRefreshCopy.waitingFirstRefreshTitle,
+                detail: WidgetRefreshCopy.waitingFirstRefreshDetail,
+                icon: "arrow.triangle.2.circlepath",
+                prominent: false
+            )
         case .loadFailed:
-            return (entry.loadFailure?.title ?? "共享快照读取失败", entry.loadFailure?.detail, entry.loadFailure?.icon ?? "exclamationmark.triangle.fill")
+            WidgetStateBlock(
+                title: entry.loadFailure?.title ?? "共享快照读取失败",
+                detail: entry.loadFailure?.detail,
+                icon: entry.loadFailure?.icon ?? "exclamationmark.triangle.fill",
+                prominent: false
+            )
         case .ready:
-            switch entry.trustAssessment?.state {
-            case .stale, .expired, .degraded:
-                return (WidgetRefreshCopy.waitingRefreshTitle, WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment), "clock.badge.exclamationmark")
-            case .unknown, .failed, .none:
-                return (WidgetRefreshCopy.pendingConfirmationTitle, WidgetRefreshCopy.pendingConfirmationDetail, "questionmark.circle")
-            case .fresh:
-                return prioritizedItems.isEmpty ? ("没有找到仓库", "检查扫描目录后重新刷新", "folder") : nil
+            guardedReadyFallback
+        }
+    }
+
+    @ViewBuilder
+    private var guardedReadyFallback: some View {
+        switch entry.trustAssessment?.state {
+        case .fresh:
+            if let item = entry.feed.items.first {
+                WidgetSmallRepositoryFocus(item: item)
+            } else {
+                WidgetStateBlock(
+                    title: "没有找到仓库",
+                    detail: "检查扫描目录后重新刷新",
+                    icon: "folder",
+                    prominent: false
+                )
             }
+        case .stale, .expired, .degraded:
+            WidgetStateBlock(
+                title: WidgetRefreshCopy.waitingRefreshTitle,
+                detail: WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment),
+                icon: "clock.badge.exclamationmark",
+                prominent: false
+            )
+        case .unknown, .failed, .none:
+            WidgetStateBlock(
+                title: WidgetRefreshCopy.pendingConfirmationTitle,
+                detail: WidgetRefreshCopy.pendingConfirmationDetail,
+                icon: "questionmark.circle",
+                prominent: false
+            )
         }
     }
 }

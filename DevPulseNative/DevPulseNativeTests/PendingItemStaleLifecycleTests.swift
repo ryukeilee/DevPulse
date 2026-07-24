@@ -314,19 +314,19 @@ struct PendingItemStaleLifecycleTests {
             Issue.record("Failed to save: \(saveResult)")
             return
         }
-        let staleID = try #require(archive.items.first { $0.source == .staleRepository })?.id
-
-        let result = store.applyUserAction(itemID: staleID, action: .cleanupStaleRepository)
+        let loadedStaleItem = try #require(archive.items.first { $0.source == .staleRepository })
+        let staleID = loadedStaleItem.id
+        let result = store.applyUserAction(itemID: staleID, action: PendingItemUserAction.cleanupStaleRepository)
         guard case .success(let updated) = result else {
             Issue.record("Failed to apply: \(result)")
             return
         }
 
-        let stale = try #require(updated.items.first { $0.source == .staleRepository })
-        #expect(stale.status == .resolved)
+        let stale = try #require(updated.items.first { $0.source == PendingItemSource.staleRepository })
+        #expect(stale.status == PendingItemStatus.resolved)
 
-        let dirty = try #require(updated.items.first { $0.source == .dirtyWorkspace })
-        #expect(dirty.status == .active)  // unchanged
+        let dirty = try #require(updated.items.first { $0.source == PendingItemSource.dirtyWorkspace })
+        #expect(dirty.status == PendingItemStatus.active)  // unchanged
     }
 
     // MARK: - Mutual exclusion: unavailable vs staleRepository

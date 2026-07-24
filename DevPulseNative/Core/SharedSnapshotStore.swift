@@ -66,10 +66,18 @@ final class SharedSnapshotStore: @unchecked Sendable {
         }
     }
 
-    func commit(_ candidate: AppGroupData) -> Result<AppGroupData, AppGroupStoreError> {
+    /// Commit a snapshot with an optional observed cross-process storage revision.
+    /// When `observedStorageRevision` is provided, the commit fails with
+    /// `.crossProcessWriteDetected` if the on-disk revision has advanced past
+    /// the observed value, preventing stale data from overwriting a newer write
+    /// from another process.
+    func commit(
+        _ candidate: AppGroupData,
+        observedStorageRevision: UInt64? = nil
+    ) -> Result<AppGroupData, AppGroupStoreError> {
         do {
             let committed = try withFileLock(.exclusive) {
-                return try commitUnlocked(candidate)
+                return try commitUnlocked(candidate, observedStorageRevision: observedStorageRevision)
             }
             return .success(committed)
         } catch let error as AppGroupStoreError {
@@ -100,7 +108,7 @@ final class SharedSnapshotStore: @unchecked Sendable {
         let primaryResult = decodeFile(at: primaryURL)
         let backupResult = decodeFile(at: backupURL)
 
-        if case .failure(.futureSchema(let actual)) = primaryResult {
+        if case .failure(.futureSchema(let actual, _)) = primaryResult {
             // A future primary is authoritative. An older process must never
             // hide or overwrite it by falling back to a schema-v2 backup.
             throw AppGroupStoreError.schemaVersionMismatch(
@@ -108,7 +116,7 @@ final class SharedSnapshotStore: @unchecked Sendable {
                 actual: actual
             )
         }
-        if case .failure(.futureSchema(let actual)) = backupResult {
+        if case .failure(.futureSchema(let actual, _)) = backupResult {
             // A newer recovery artifact makes the whole pair version-unsafe
             // for this process, even while the older primary is readable.
             throw AppGroupStoreError.schemaVersionMismatch(
@@ -172,11 +180,19 @@ final class SharedSnapshotStore: @unchecked Sendable {
         }
 
         if versionHeader.schemaVersion > RepositorySnapshotSchema.version {
-            return .failure(.futureSchema(versionHeader.schemaVersion))
+            return .failure(.futureSchema(versionHeader.schemaVersion, appVersion: versionHeader.appVersion))
         }
 
         guard versionHeader.schemaVersion >= RepositorySnapshotSchema.oldestMigratableVersion else {
             return .failure(.unsupportedSchema(versionHeader.schemaVersion))
+        }
+
+        // Protocol-level envelope check: if the file carries a storageFormatVersion
+        // that exceeds what this process understands, reject immediately without
+        // attempting to decode the metadata header or payload body.
+        if let fileProtocolVersion = versionHeader.storageFormatVersion,
+           fileProtocolVersion > RepositorySnapshotSchema.storageFormatVersion {
+            return .failure(.futureSchema(versionHeader.schemaVersion, appVersion: versionHeader.appVersion))
         }
 
         if versionHeader.schemaVersion == RepositorySnapshotSchema.version {
@@ -197,6 +213,12 @@ final class SharedSnapshotStore: @unchecked Sendable {
             }
             guard metadataHeader.persistenceState != nil else {
                 return .failure(.invalid("schema-v2 persistenceState field is missing"))
+            }
+            // storageFormatVersion check: if the file has it, ensure we
+            // can read the version. Missing is OK for legacy v3 payloads.
+            if let fileFormatVersion = metadataHeader.storageFormatVersion,
+               fileFormatVersion > RepositorySnapshotSchema.storageFormatVersion {
+                return .failure(.futureSchema(versionHeader.schemaVersion, appVersion: versionHeader.appVersion))
             }
         }
 
@@ -267,8 +289,25 @@ final class SharedSnapshotStore: @unchecked Sendable {
 
     // MARK: - Commit
 
-    private func commitUnlocked(_ candidate: AppGroupData) throws -> AppGroupData {
+    private func commitUnlocked(
+        _ candidate: AppGroupData,
+        observedStorageRevision: UInt64? = nil
+    ) throws -> AppGroupData {
         let baseline = try commitBaselineUnlocked()
+
+        // Cross-process generation guard: if the on-disk storageRevision has
+        // advanced past what the caller observed when they started working,
+        // reject the commit to prevent stale data from overwriting a newer
+        // write from another process.
+        if let observedRevision = observedStorageRevision,
+           let baselineRevision = baseline.snapshot?.storageRevision,
+           baselineRevision > observedRevision {
+            throw AppGroupStoreError.crossProcessWriteDetected(
+                observed: observedRevision,
+                actual: baselineRevision
+            )
+        }
+
         // Future-schema checks above happen before any cleanup or write.
         try cleanupTemporaryFilesUnlocked()
         let prepared = try prepare(candidate, previous: baseline.snapshot)
@@ -293,6 +332,8 @@ final class SharedSnapshotStore: @unchecked Sendable {
             throw AppGroupStoreError.writeFailed("staging failed: \(error.localizedDescription)")
         }
 
+        // `decodeFile` below performs full schema + storage-format validation
+        // on the staged data, so no separate protocol-level check is needed here.
         switch decodeFile(at: stagingURL) {
         case .success(let staged) where !staged.wasMigrated && staged.snapshot == prepared:
             break
@@ -352,13 +393,13 @@ final class SharedSnapshotStore: @unchecked Sendable {
         let primary = decodeFile(at: primaryURL)
         let backup = decodeFile(at: backupURL)
 
-        if case .failure(.futureSchema(let actual)) = primary {
+        if case .failure(.futureSchema(let actual, _)) = primary {
             throw AppGroupStoreError.schemaVersionMismatch(
                 expected: RepositorySnapshotSchema.version,
                 actual: actual
             )
         }
-        if case .failure(.futureSchema(let actual)) = backup {
+        if case .failure(.futureSchema(let actual, _)) = backup {
             // Even when the primary is readable, an older writer must not
             // destroy a recovery artifact written by a newer app version.
             throw AppGroupStoreError.schemaVersionMismatch(
@@ -869,28 +910,57 @@ final class SharedSnapshotStore: @unchecked Sendable {
     }
 }
 
-private struct SnapshotVersionHeader: Decodable {
+/// Header decoded independently before the full payload, containing
+/// version identifiers that must be recognised before any schema-specific
+/// decoding. Adding new optional fields here is backward-compatible;
+/// adding new required fields requires incrementing `storageFormatVersion`
+/// in `RepositorySnapshotSchema`.
+struct SnapshotVersionHeader: Decodable {
     let schemaVersion: Int
+    /// Envelope format version. Every reader must check this before
+    /// interpreting the metadata header or payload body.
+    let storageFormatVersion: Int?
+    /// App version that wrote this snapshot. Purely diagnostic.
+    let appVersion: String?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        storageFormatVersion = try container.decodeIfPresent(
+            Int.self, forKey: .storageFormatVersion
+        )
+        appVersion = try container.decodeIfPresent(
+            String.self, forKey: .appVersion
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case storageFormatVersion
+        case appVersion
+    }
 }
 
-private struct CurrentSnapshotMetadataHeader: Decodable {
+struct CurrentSnapshotMetadataHeader: Decodable {
     let writtenAt: String?
     let storageRevision: UInt64?
     let persistenceState: SharedSnapshotPersistenceState?
+    let appVersion: String?
+    let storageFormatVersion: Int?
 }
 
-private struct DecodedFile {
+struct DecodedFile {
     let snapshot: AppGroupData
     let bytes: Data
     let wasMigrated: Bool
 }
 
-private struct CommitBaseline {
+fileprivate struct CommitBaseline {
     let snapshot: AppGroupData?
     let recoveryCopyPlan: RecoveryCopyPlan
 }
 
-private enum RecoveryCopyPlan {
+fileprivate enum RecoveryCopyPlan {
     case publish(Data)
     case preserveExistingBackup
     case publishCandidate
@@ -908,7 +978,7 @@ private struct SnapshotValidationError: LocalizedError {
 
 private enum SnapshotFileFailure: Error, Equatable {
     case missing
-    case futureSchema(Int)
+    case futureSchema(Int, appVersion: String?)
     case unsupportedSchema(Int)
     case read(String)
     case decode(String)
@@ -918,7 +988,10 @@ private enum SnapshotFileFailure: Error, Equatable {
         switch self {
         case .missing:
             return "file is missing"
-        case .futureSchema(let version):
+        case .futureSchema(let version, let appVersion):
+            if let appVersion {
+                return "future schema v\(version) (app \(appVersion)) is not supported"
+            }
             return "future schema v\(version) is not supported"
         case .unsupportedSchema(let version):
             return "schema v\(version) has no safe migration"

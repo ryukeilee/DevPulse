@@ -342,6 +342,67 @@ enum PendingItemEvaluator {
             )
         }
 
+        // Post-processing: carry forward firstDetectedAt from previous items
+        // with a different source but the same repositoryID. This ensures
+        // transitions like unavailable → staleRepository preserve the
+        // original detection timestamp.
+        // Also resolve previous items whose source changed to a different
+        // category (e.g. .unavailable → .staleRepository).
+        for i in newItems.indices {
+            let currentItem = newItems[i]
+
+            // Find previous items for the same repository with different source
+            // that can be auto-resolved.
+            let matchingPrev = previousByID.values.filter {
+                guard $0.repositoryID == currentItem.repositoryID &&
+                      $0.source != currentItem.source else { return false }
+                switch $0.status {
+                case .active, .acknowledged, .restored:
+                    return true
+                case .snoozed, .muted, .resolved, .permanentlyIgnored:
+                    return false
+                }
+            }
+
+            for prev in matchingPrev {
+                // Record a transition from the old source to the new one.
+                // The old item is not added to newItems — the new item
+                // replaces it with the preserved firstDetectedAt.
+                let transition = PendingItemTransition(
+                    from: prev.status,
+                    to: .resolved,
+                    severityChanged: true,
+                    previousSeverity: prev.severity,
+                    newSeverity: currentItem.severity,
+                    reason: "仓库状态从 \(prev.source.displayName) 转为 \(currentItem.source.displayName)"
+                )
+                transitions.append(transition)
+                resolvedCount += 1
+
+                // Carry forward firstDetectedAt from the previous item
+                if prev.firstDetectedAt != currentItem.firstDetectedAt {
+                    newItems[i] = PendingItem(
+                        id: currentItem.id,
+                        source: currentItem.source,
+                        severity: currentItem.severity,
+                        repositoryID: currentItem.repositoryID,
+                        repositoryName: currentItem.repositoryName,
+                        workspaceID: currentItem.workspaceID,
+                        workspaceName: currentItem.workspaceName,
+                        title: currentItem.title,
+                        explanation: currentItem.explanation,
+                        evidence: currentItem.evidence,
+                        firstDetectedAt: prev.firstDetectedAt,
+                        lastConfirmedAt: currentItem.lastConfirmedAt,
+                        status: currentItem.status,
+                        snoozedUntil: currentItem.snoozedUntil,
+                        duration: currentItem.duration,
+                        lastTransition: currentItem.lastTransition
+                    )
+                }
+            }
+        }
+
         // Sort by severity descending then lastConfirmedAt descending
         newItems.sort { $0.severity > $1.severity || ($0.severity == $1.severity && $0.lastConfirmedAt > $1.lastConfirmedAt) }
 
