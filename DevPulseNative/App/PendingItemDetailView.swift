@@ -108,6 +108,12 @@ struct PendingItemDetailView: View {
                 if item.status == .snoozed || item.status == .acknowledged || item.status == .muted {
                     Button("Restore") { scheduler.applyUserAction(to: item.id, action: .unmute); dismiss() }.buttonStyle(.bordered)
                 }
+                if item.source == .staleRepository && item.status != .resolved {
+                    Button("清理并移除跟踪", role: .destructive) {
+                        scheduler.applyUserAction(to: item.id, action: .cleanupStaleRepository)
+                        dismiss()
+                    }.buttonStyle(.borderedProminent).tint(.red)
+                }
             }
         }
     }

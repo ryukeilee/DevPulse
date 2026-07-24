@@ -3298,19 +3298,53 @@ struct CommitReadinessEngineTests {
         #expect(GitRepositoryScanner.discoveryWasIncomplete(result.warnings))
     }
 
-    @Test func unreadableRepositoryRetentionHasFiniteGraceWindow() throws {
+    @Test func retentionKeepsPreviouslyKnownRepoIndefinitely() throws {
+        // Repos that had at least one successful scan are retained until
+        // the user explicitly cleans them up via scan-ignore.
         let unavailableAt = try #require(DateFormatting.date(from: "2026-07-01T00:00:00Z"))
         let retained = snapshot().retainingLastSuccessfulData(
             attemptedAt: "2026-07-01T00:00:00Z",
             errorMessage: "权限暂时不可用"
         )
 
+        // Should retain within the old grace window
         #expect(RepositoryRetentionPolicy.shouldRetain(
             retained,
             now: unavailableAt.addingTimeInterval(60 * 60)
         ))
-        #expect(!RepositoryRetentionPolicy.shouldRetain(
+        // Should still retain long after the old 7-day window
+        #expect(RepositoryRetentionPolicy.shouldRetain(
             retained,
+            now: unavailableAt.addingTimeInterval(60 * 24 * 60 * 60)
+        ))
+    }
+
+    @Test func retentionDropsUnknownRepoAfterGraceWindow() throws {
+        // Repos that never had a successful scan follow the time-based
+        // retention window.
+        let unavailableAt = try #require(DateFormatting.date(from: "2026-07-01T00:00:00Z"))
+        let unknown = RepositorySnapshot(
+            id: "repo-unknown", name: "unknown", path: "/tmp/unknown",
+            workspaceKind: nil, branch: "unknown", status: .error,
+            modifiedFileCount: 0, addedFileCount: 0, deletedFileCount: 0,
+            untrackedFileCount: 0, stagedFileCount: nil, unstagedFileCount: nil,
+            conflictedFileCount: nil, aheadCount: nil, behindCount: nil,
+            hasUpstream: nil, changedFileCount: 0, changedFilesPreview: [],
+            risk: .low,
+            lastScannedAt: DateFormatting.isoString(from: unavailableAt),
+            dataSource: .unknown, lastSuccessfulScanAt: nil,
+            lastChangedAt: nil, lastCommitID: nil, lastCommitSummary: nil,
+            lastCommitMetadataAvailable: false, lastActivityAt: nil,
+            unavailableSince: DateFormatting.isoString(from: unavailableAt),
+            errorMessage: "无法访问", isPinned: false
+        )
+
+        #expect(RepositoryRetentionPolicy.shouldRetain(
+            unknown,
+            now: unavailableAt.addingTimeInterval(60 * 60)
+        ))
+        #expect(!RepositoryRetentionPolicy.shouldRetain(
+            unknown,
             now: unavailableAt.addingTimeInterval(8 * 24 * 60 * 60)
         ))
     }
@@ -3536,7 +3570,12 @@ struct CommitReadinessEngineTests {
             knownRepositoryPaths: baseline.discoveredRepositoryPaths,
             previousSnapshot: agedPrevious
         )
-        #expect(firstHidden.data.repositories.isEmpty)
+        // Previously-known repos (with a prior successful scan) are retained
+        // indefinitely so the evaluator can surface a staleRepository item and
+        // recovery auto-reassociates when the path becomes accessible again.
+        #expect(!firstHidden.data.repositories.isEmpty, "Previously-known repo should be retained")
+        let retainedFirst = try #require(firstHidden.data.repositories.first(where: { $0.path == canonicalPath }))
+        #expect(retainedFirst.resolvedDataSource == .lastSuccessful)
         #expect(firstHidden.data.repositoryUnavailableSinceByPath?[canonicalPath] == unavailableSince)
         #expect(firstHidden.discoveredRepositoryPaths == [canonicalPath])
 
@@ -3546,7 +3585,9 @@ struct CommitReadinessEngineTests {
             knownRepositoryPaths: firstHidden.discoveredRepositoryPaths,
             previousSnapshot: firstHidden.data
         )
-        #expect(secondHidden.data.repositories.isEmpty)
+        #expect(!secondHidden.data.repositories.isEmpty, "Previously-known repo should still be retained on second scan")
+        let retainedSecond = try #require(secondHidden.data.repositories.first(where: { $0.path == canonicalPath }))
+        #expect(retainedSecond.resolvedDataSource == .lastSuccessful)
         #expect(secondHidden.data.repositoryUnavailableSinceByPath?[canonicalPath] == unavailableSince)
         #expect(secondHidden.discoveredRepositoryPaths == [canonicalPath])
 

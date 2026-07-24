@@ -214,6 +214,24 @@ enum PendingItemEvaluator {
                 rule: evaluateUnavailable
             )
 
+            // Rule: Stale repository (unavailable beyond retention window)
+            evaluateRule(
+                source: .staleRepository,
+                repo: repo,
+                health: health,
+                cached: cached,
+                previousByID: previousByID,
+                context: context,
+                items: &newItems,
+                transitions: &transitions,
+                notifications: &notifications,
+                newCount: &newCount,
+                resolvedCount: &resolvedCount,
+                escalatedCount: &escalatedCount,
+                deescalatedCount: &deescalatedCount,
+                rule: evaluateStaleRepository
+            )
+
             // Rule: Scan failure (consecutive)
             evaluateRule(
                 source: .scanFailure,
@@ -786,10 +804,12 @@ enum PendingItemEvaluator {
         }
         let duration = context.now.timeIntervalSince(sinceDate)
 
+        // Delegate to evaluateStaleRepository when duration exceeds retention window
+        let retentionThreshold = RepositoryRetentionPolicy.unavailableRetentionInterval
+        guard duration < retentionThreshold else { return nil }
+
         let severity: PendingItemSeverity
-        if duration >= 7 * 24 * 3600 {
-            severity = .critical
-        } else if duration >= 24 * 3600 {
+        if duration >= 24 * 3600 {
             severity = .high
         } else {
             severity = .medium
@@ -803,6 +823,42 @@ enum PendingItemEvaluator {
             title: "仓库无法访问",
             explanation: "仓库 \(repo.name) 从 \(DateFormatting.displayString(from: sinceDate)) 起不可访问，持续 \(formatDuration(duration))。",
             evidence: ["错误信息：\(repo.errorMessage ?? "未知")"],
+            duration: max(0, duration)
+        )
+    }
+
+    private static func evaluateStaleRepository(
+        _ repo: RepositorySnapshot,
+        _ health: RepositoryHealthAssessment?,
+        _ cached: CachedHealth?,
+        _ context: PendingItemEvaluationContext
+    ) -> PendingItem? {
+        let isUnavailable = repo.resolvedDataSource != .current || repo.status == .error
+        guard isUnavailable else { return nil }
+
+        let sinceDate: Date
+        if let unavailableSince = repo.unavailableSince,
+           let d = DateFormatting.date(from: unavailableSince) {
+            sinceDate = d
+        } else if let d = DateFormatting.date(from: repo.lastScannedAt) {
+            sinceDate = d
+        } else {
+            sinceDate = context.now
+        }
+        let duration = context.now.timeIntervalSince(sinceDate)
+
+        // Only activate when unavailable duration exceeds the retention threshold
+        let retentionThreshold = RepositoryRetentionPolicy.unavailableRetentionInterval
+        guard duration >= retentionThreshold else { return nil }
+
+        return PendingItem(
+            source: .staleRepository,
+            severity: .critical,
+            repositoryID: repo.id,
+            repositoryName: repo.name,
+            title: "仓库已长期无法访问",
+            explanation: "仓库 \(repo.name) 从 \(DateFormatting.displayString(from: sinceDate)) 起已无法访问超过 7 天，持续 \(formatDuration(duration))。请在确认仓库本身已不存在后执行「清理」操作以移除跟踪。",
+            evidence: ["错误信息：\(repo.errorMessage ?? "未知")", "持续时间：\(formatDuration(duration))"],
             duration: max(0, duration)
         )
     }

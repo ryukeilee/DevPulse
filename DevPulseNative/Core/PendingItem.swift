@@ -57,6 +57,9 @@ enum PendingItemSource: String, Codable, Sendable {
     case creepingChanges
     case staleActivity
     case healthTrend
+    /// Repository has been unavailable beyond the retention window
+    /// and needs explicit user cleanup action.
+    case staleRepository
 
     /// Workspace-level
     case workspaceDegraded
@@ -75,6 +78,7 @@ enum PendingItemSource: String, Codable, Sendable {
         case .creepingChanges: return "改动持续堆积"
         case .staleActivity: return "长期无活动"
         case .healthTrend: return "健康趋势"
+        case .staleRepository: return "陈旧仓库"
         case .workspaceDegraded: return "工作空间降级"
         case .workspaceConflicts: return "工作空间冲突"
         case .workspaceAggregation: return "工作空间综合"
@@ -93,6 +97,7 @@ enum PendingItemSource: String, Codable, Sendable {
         case .creepingChanges: return "doc.text.magnifyingglass"
         case .staleActivity: return "clock"
         case .healthTrend: return "heart.text.clipboard"
+        case .staleRepository: return "trash.slash"
         case .workspaceDegraded: return "rectangle.3.group.slash"
         case .workspaceConflicts: return "rectangle.3.group.fill"
         case .workspaceAggregation: return "rectangle.3.group"
@@ -154,6 +159,9 @@ enum PendingItemUserAction: String, Codable, Sendable {
     case unmute
     case restoreReminder
     case permanentlyIgnore
+    /// Remove a stale repository from tracking entirely — adds its path
+    /// to the scan-ignore list and marks the pending item as resolved.
+    case cleanupStaleRepository
 
     var displayName: String {
         switch self {
@@ -162,6 +170,7 @@ enum PendingItemUserAction: String, Codable, Sendable {
         case .unmute: return "恢复提醒"
         case .restoreReminder: return "恢复提醒"
         case .permanentlyIgnore: return "永久忽略"
+        case .cleanupStaleRepository: return "清理并移除跟踪"
         }
     }
 }

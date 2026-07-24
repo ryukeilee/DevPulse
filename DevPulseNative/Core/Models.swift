@@ -788,15 +788,26 @@ enum RepositoryReadFailureReason {
 }
 
 enum RepositoryRetentionPolicy {
-    /// Keep a temporarily unreadable repository long enough to survive normal
-    /// permission and sleep/wake interruptions, but never retain it forever.
+    /// How long a repository with NO prior successful scan is retained
+    /// before it is dropped from the snapshot and treated as stale.
     static let unavailableRetentionInterval: TimeInterval = 7 * 24 * 60 * 60
 
     static func shouldRetain(_ snapshot: RepositorySnapshot, now: Date = Date()) -> Bool {
+        // Current healthy repos are always retained.
         guard snapshot.resolvedDataSource != .current || snapshot.status == .error else {
             return true
         }
 
+        // Repos that had at least one successful scan are kept until the user
+        // explicitly cleans them up via the stale-repository action. This lets
+        // the evaluator surface a `staleRepository` pending item and preserves
+        // the last known data for recovery.
+        if snapshot.resolvedLastSuccessfulScanAt != nil {
+            return true
+        }
+
+        // Unknown repos (never successfully scanned) follow a time-based
+        // retention so transient errors don't accumulate indefinitely.
         let unavailableAt = snapshot.unavailableSince
             .flatMap(DateFormatting.date(from:))
             ?? DateFormatting.date(from: snapshot.lastScannedAt)

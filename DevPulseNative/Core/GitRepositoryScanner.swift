@@ -1759,13 +1759,18 @@ enum GitRepositoryScanner {
                 continue
             }
 
-            let firstUnavailableAt = snapshot.unavailableSince
-                ?? unavailableSinceByPath[normalizedPath]
-                ?? snapshot.lastScannedAt
-            retainedUnavailability[normalizedPath] = firstUnavailableAt
             if RepositoryRetentionPolicy.shouldRetain(snapshot) {
+                let firstUnavailableAt = snapshot.unavailableSince
+                    ?? unavailableSinceByPath[normalizedPath]
+                    ?? snapshot.lastScannedAt
+                retainedUnavailability[normalizedPath] = firstUnavailableAt
                 retainedSnapshots.append(snapshot)
             }
+            // When shouldRetain returns false the snapshot AND its
+            // unavailableSince are dropped. This breaks the infinite tracking
+            // loop for repos that never had a successful scan while avoiding
+            // silent data loss — previously-known repos are always retained
+            // (see RepositoryRetentionPolicy.shouldRetain).
         }
         return RepositoryMergeResult(
             snapshots: retainedSnapshots,

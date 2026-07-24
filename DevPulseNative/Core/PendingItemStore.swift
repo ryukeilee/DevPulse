@@ -322,6 +322,10 @@ final class PendingItemStore: @unchecked Sendable {
             case .permanentlyIgnore:
                 item.status = .permanentlyIgnored
                 item.lastConfirmedAt = now
+            case .cleanupStaleRepository:
+                item.status = .resolved
+                item.lastConfirmedAt = now
+                item.explanation += "（已清理并移除跟踪）"
             }
 
             archive.items[idx] = item

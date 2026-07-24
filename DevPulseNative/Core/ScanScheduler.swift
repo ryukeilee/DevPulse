@@ -973,6 +973,16 @@ final class ScanScheduler: ObservableObject {
 
     /// Apply a user action to a pending item.
     func applyUserAction(to itemID: String, action: PendingItemUserAction, snoozeDuration: TimeInterval? = nil) {
+        // For stale-repository cleanup, look up the repository path and
+        // add it to the ignored set before marking the item as resolved.
+        if action == .cleanupStaleRepository {
+            if let item = pendingItems.first(where: { $0.id == itemID }),
+               let repoID = item.repositoryID,
+               let repoPath = lastResult.repositories.first(where: { $0.id == repoID })?.path {
+                ignoreRepository(path: repoPath)
+            }
+        }
+
         switch pendingItemStore.applyUserAction(itemID: itemID, action: action, snoozeDuration: snoozeDuration) {
         case .success(let archive):
             self.pendingItems = archive.items

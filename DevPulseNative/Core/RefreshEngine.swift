@@ -884,13 +884,17 @@ extension RefreshEngine {
                 continue
             }
 
-            let since = snap.unavailableSince
-                ?? previousUnavailableSinceByPath[cpath]
-                ?? snap.lastScannedAt
-            unavailability[cpath] = since
             if RepositoryRetentionPolicy.shouldRetain(snap) {
+                let since = snap.unavailableSince
+                    ?? previousUnavailableSinceByPath[cpath]
+                    ?? snap.lastScannedAt
+                unavailability[cpath] = since
                 retained.append(snap)
             }
+            // When shouldRetain returns false the snapshot AND its
+            // unavailableSince are dropped to prevent infinite tracking loops.
+            // Previously-known repos are always retained — see
+            // RepositoryRetentionPolicy.shouldRetain.
         }
 
         return MergeOutput(snapshots: retained, unavailableSinceByPath: unavailability)
