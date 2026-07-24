@@ -30,6 +30,7 @@ actor RefreshEngine {
 
     private var generation: UInt64 = 0
     private let cancelledLock = OSAllocatedUnfairLock(initialState: false)
+    private var observationCollector = RefreshObservationCollector()
     private var _isCancelled: Bool {
         get { cancelledLock.withLock { $0 } }
         set { cancelledLock.withLock { $0 = newValue } }
@@ -60,6 +61,7 @@ actor RefreshEngine {
     /// but the returned result will be marked as cancelled.
     func cancel() {
         cancelledLock.withLock { $0 = true }
+        Task { await observationCollector.reset() }
     }
 
     nonisolated var isCancelled: Bool {
@@ -80,6 +82,8 @@ actor RefreshEngine {
         source: ScanRefreshSource = .manual,
         gitCommandRunner: @escaping GitCommandRunner = GitRepositoryScanner.defaultGitCommandRunner
     ) async -> RefreshResult {
+        await observationCollector.reset()
+        await observationCollector.setSource(String(describing: source))
         generation &+= 1
         let currentGeneration = generation
         _isCancelled = false
@@ -88,6 +92,11 @@ actor RefreshEngine {
         let isFastFirst = source == .manual || source == .configuration
 
         var warnings: [String] = []
+
+        // Wrap git command runner with FaultInjector if enabled
+        let wrappedRunner: GitCommandRunner = FaultInjector.isEnabled
+            ? FaultInjector.shared.wrappingRunner(gitCommandRunner, stage: "execute")
+            : gitCommandRunner
 
         // ── Stage 1: Discovery ───────────────────────────────────────────
         let stage1Start = ProcessInfo.processInfo.systemUptime
@@ -113,6 +122,10 @@ actor RefreshEngine {
                         completed: discoveryResult.readablePaths.count,
                         elapsed: discoveryElapsed, finished: true, startedAt: overallStart)
 
+        await recordStageSpan(stage: "discovery", duration: discoveryElapsed, callCount: 0) {
+            ObservationSpan(label: "discovery", startedAt: stage1Start, duration: discoveryElapsed, callCount: 0, concurrentPeak: 0, timeoutCount: 0, cancellationCount: 0, cacheHitCount: 0, snapshotReuseCount: 0, mainThreadStallUs: 0, resourceDeltaCPU: 0, resourceDeltaMemoryMB: 0, resourceDeltaDiskWritesKB: 0)
+        }
+
         guard !isInvalidated(currentGeneration) else {
             return buildCancelled(previous: previousSnapshot, discoveredPaths: discoveryResult.allPaths)
         }
@@ -132,12 +145,15 @@ actor RefreshEngine {
             workspaceKindsByPath: discoveryResult.workspaceKindsByPath,
             overallDeadline: stage2Deadline,
             generation: currentGeneration,
-            gitCommandRunner: gitCommandRunner,
+            gitCommandRunner: wrappedRunner,
             warnings: &warnings
         )
         let coreElapsed = ProcessInfo.processInfo.systemUptime - stage2Start
         let coreBudgetExhausted = coreElapsed > stage2Slice
         logger.debug("Stage .coreStatus finished elapsed_ms=\(Int(coreElapsed * 1000)) exhausted=\(coreBudgetExhausted)")
+        await recordStageSpan(stage: "coreStatus", duration: coreElapsed, callCount: coreResult.gitStatusCount) {
+            ObservationSpan(label: "coreStatus", startedAt: stage2Start, duration: coreElapsed, callCount: coreResult.gitStatusCount, concurrentPeak: coreResult.peakConcurrency, timeoutCount: coreResult.gitTimeoutCount, cancellationCount: coreResult.gitCancelledCount, cacheHitCount: 0, snapshotReuseCount: 0, mainThreadStallUs: 0, resourceDeltaCPU: 0, resourceDeltaMemoryMB: 0, resourceDeltaDiskWritesKB: 0)
+        }
 
         publishProgress(stage: .coreStatus, total: coreResult.total,
                         completed: coreResult.completed, elapsed: coreElapsed,
@@ -164,10 +180,13 @@ actor RefreshEngine {
             previousSnapshot: previousSnapshot,
             overallDeadline: stage3Deadline,
             generation: currentGeneration,
-            gitCommandRunner: gitCommandRunner,
+            gitCommandRunner: wrappedRunner,
             warnings: &warnings
         )
         let extendedElapsed = ProcessInfo.processInfo.systemUptime - stage3Start
+        await recordStageSpan(stage: "extendedInfo", duration: extendedElapsed, callCount: extendedResult.completed) {
+            ObservationSpan(label: "extendedInfo", startedAt: stage3Start, duration: extendedElapsed, callCount: extendedResult.completed, concurrentPeak: 0, timeoutCount: 0, cancellationCount: 0, cacheHitCount: 0, snapshotReuseCount: extendedResult.reusedMetadataCount, mainThreadStallUs: 0, resourceDeltaCPU: 0, resourceDeltaMemoryMB: 0, resourceDeltaDiskWritesKB: 0)
+        }
         let extendedBudgetExhausted = extendedElapsed > stage3Slice
         logger.debug("Stage .extendedInfo finished elapsed_ms=\(Int(extendedElapsed * 1000)) exhausted=\(extendedBudgetExhausted)")
 
@@ -305,6 +324,21 @@ actor RefreshEngine {
             widgetSyncError: nil
         )
 
+        // Collect and store observations
+        await recordStageSpan(stage: "merge", duration: mergeElapsed, callCount: 0) {
+            ObservationSpan(label: "merge", startedAt: stage4Start, duration: mergeElapsed, callCount: 0, concurrentPeak: 0, timeoutCount: 0, cancellationCount: 0, cacheHitCount: 0, snapshotReuseCount: 0, mainThreadStallUs: 0, resourceDeltaCPU: 0, resourceDeltaMemoryMB: 0, resourceDeltaDiskWritesKB: 0)
+        }
+        await recordStageSpan(stage: "persistence", duration: persistElapsed, callCount: 0) {
+            ObservationSpan(label: "persistence", startedAt: stage5Start, duration: persistElapsed, callCount: 0, concurrentPeak: 0, timeoutCount: 0, cancellationCount: 0, cacheHitCount: 0, snapshotReuseCount: 0, mainThreadStallUs: 0, resourceDeltaCPU: 0, resourceDeltaMemoryMB: 0, resourceDeltaDiskWritesKB: 0)
+        }
+        await recordStageSpan(stage: "widgetSync", duration: widgetElapsed, callCount: 0) {
+            ObservationSpan(label: "widgetSync", startedAt: stage6Start, duration: widgetElapsed, callCount: 0, concurrentPeak: 0, timeoutCount: 0, cancellationCount: 0, cacheHitCount: 0, snapshotReuseCount: 0, mainThreadStallUs: 0, resourceDeltaCPU: 0, resourceDeltaMemoryMB: 0, resourceDeltaDiskWritesKB: 0)
+        }
+
+        let obs = await observationCollector.snapshot()
+        let store = RefreshObservationStore()
+        store.append(obs)
+
         return RefreshResult(
             data: persistedData,
             warnings: warnings,
@@ -314,6 +348,14 @@ actor RefreshEngine {
             timedOut: false,
             diagnostics: diagnostics
         )
+    }
+
+    // MARK: - Stage recording helper
+
+    private func recordStageSpan(stage: String, duration: TimeInterval, callCount: Int, spanProvider: @Sendable () -> ObservationSpan) async {
+        let span = spanProvider()
+        await observationCollector.recordStageSpan(stage: stage, span: span)
+        await observationCollector.recordGitCall(count: callCount)
     }
 }
 
