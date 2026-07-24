@@ -2363,11 +2363,13 @@ enum AppTab: Int, Equatable {
     case workspaces = 1
     case repositories = 2
     case impact = 3
-    case settings = 4
+    case backup = 4
+    case settings = 5
 }
 
 enum SettingsScrollTarget: Hashable {
     case diagnostics
+    case backup
 }
 
 enum OverviewPrimaryActionKind: Equatable {

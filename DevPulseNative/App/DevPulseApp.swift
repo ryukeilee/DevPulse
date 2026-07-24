@@ -96,6 +96,11 @@ struct DevPulseApp: App {
 
 final class StartupCommandDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Recover any pending restore transaction from a previous crash
+        let backupManager = BackupManager()
+        let restoreManager = RestoreManager(backupManager: backupManager)
+        restoreManager.recoverPendingTransaction(config: .default)
+
         guard let command = AppCommand(arguments: ProcessInfo.processInfo.arguments) else { return }
 
         Task { @MainActor in

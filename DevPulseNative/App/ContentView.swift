@@ -46,6 +46,9 @@ struct ContentView: View {
                 ImpactOverviewView()
                     .tabContentVisibility(selectedTab == .impact)
 
+                BackupManagementView()
+                    .tabContentVisibility(selectedTab == .backup)
+
                 SettingsView(scrollTarget: $settingsScrollTarget)
                     .tabContentVisibility(selectedTab == .settings)
             }
@@ -106,6 +109,11 @@ private struct AppSectionBar: View {
                     tab: .impact,
                     title: "Impact",
                     systemImage: "chart.bar.doc.horizontal"
+                )
+                sectionButton(
+                    tab: .backup,
+                    title: "Backup",
+                    systemImage: "externaldrive"
                 )
                 sectionButton(
                     tab: .settings,

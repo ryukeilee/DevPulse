@@ -17,6 +17,7 @@ struct SettingsView: View {
                     customScanDirectoriesSection
                     repositoryScanScopeSection
                     launchAtLoginSection
+                    backupSettingsSection
                     diagnosticsSection
                         .id(SettingsScrollTarget.diagnostics)
                 }
@@ -340,6 +341,78 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(severityBackground(launchAtLoginSeverity))
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .settingsSectionSurface()
+    }
+
+    // MARK: - Backup settings
+
+    private var backupSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            settingsSectionHeader(
+                title: "数据备份",
+                subtitle: "管理本地备份、恢复与自动备份策略。所有数据仅保存在本机。",
+                systemImage: "externaldrive.badge.checkmark"
+            )
+
+            HStack {
+                Text("自动备份")
+                    .font(.caption)
+                Spacer()
+                Toggle("", isOn: .constant(true))
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 32)
+            .background(DevPulseVisualStyle.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            HStack {
+                Text("备份模式")
+                    .font(.caption)
+                Spacer()
+                Picker("", selection: .constant(BackupPrivacyMode.standard)) {
+                    Text("标准（脱敏）").tag(BackupPrivacyMode.standard)
+                    Text("完整").tag(BackupPrivacyMode.full)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 200)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 32)
+            .background(DevPulseVisualStyle.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            HStack {
+                Text("保留数量")
+                    .font(.caption)
+                Spacer()
+                Text("最多 10 个")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 32)
+            .background(DevPulseVisualStyle.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            HStack {
+                Text("自动备份间隔")
+                    .font(.caption)
+                Spacer()
+                Text("每天")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 32)
+            .background(DevPulseVisualStyle.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            Text("备份存储在本地 App 支持目录，不会离开本机。转到「备份」标签页管理备份文件。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
         .settingsSectionSurface()
     }
