@@ -108,8 +108,17 @@ struct Provider: TimelineProvider {
         let entry = loadEntry()
         let nextRefreshInterval: TimeInterval
         switch entry.loadState {
-        case .placeholder, .noSnapshot, .loadFailed:
-            nextRefreshInterval = 300
+        case .placeholder, .noSnapshot:
+            // No snapshot yet — refresh every 60 s to pick up
+            // a newly written shared snapshot as soon as possible
+            // after the first app launch or a delayed write.
+            nextRefreshInterval = 60
+        case .loadFailed:
+            // Load failure (corruption, schema, App Group) — retry
+            // at 180 s to recover from a transient I/O or a
+            // short-lived process state mismatch without
+            // thrashing WidgetKit.
+            nextRefreshInterval = 180
         case .ready:
             nextRefreshInterval = 900
         }
@@ -118,19 +127,31 @@ struct Provider: TimelineProvider {
     }
 
     private func loadEntry() -> WidgetEntry {
-        switch WidgetSnapshotStore.load() {
-        case .success(let snapshot):
-            return .content(
-                snapshot: snapshot,
-                feed: ActivityTimelineBuilder.build(from: snapshot)
-            )
-        case .failure(let error):
-            switch error {
-            case .snapshotMissing:
-                return .noSnapshot()
-            case .appGroupUnavailable, .readFailed, .decodeFailed, .schemaMismatch:
-                return .loadFailed(error)
+        do {
+            let result = WidgetSnapshotStore.load()
+            switch result {
+            case .success(let snapshot):
+                return .content(
+                    snapshot: snapshot,
+                    feed: ActivityTimelineBuilder.build(from: snapshot)
+                )
+            case .failure(let error):
+                switch error {
+                case .snapshotMissing:
+                    return .noSnapshot()
+                case .appGroupUnavailable, .readFailed, .decodeFailed, .schemaMismatch:
+                    return .loadFailed(error)
+                }
             }
+        } catch {
+            // Safety net: defensive catch for any unexpected throw
+            // (e.g. I/O edge case, unanticipated JSON structure,
+            //  or future migration path) so the widget extension
+            //  process never crashes during timeline loading.
+            return .loadFailed(.readFailed(
+                path: SharedSnapshotLocation.fileName,
+                reason: error.localizedDescription
+            ))
         }
     }
 }
@@ -201,24 +222,30 @@ struct DevPulseWidgetEntryView: View {
     let entry: WidgetEntry
 
     var body: some View {
-        Group {
-            switch widgetFamily {
-            case .systemSmall:
-                SmallGlanceWidgetView(entry: entry)
-            case .systemMedium:
-                MediumGlanceWidgetView(entry: entry)
-            case .systemLarge:
-                LargeGlanceWidgetView(entry: entry)
-            default:
-                SmallGlanceWidgetView(entry: entry)
+        ZStack {
+            // Embedded background as part of the view hierarchy.
+            // On macOS 14, .containerBackground reliability varies;
+            // a ZStack base guarantees the dark gradient fills the
+            // entire widget area regardless of WidgetKit container
+            // rendering behavior.
+            WidgetPanelBackground()
+
+            Group {
+                switch widgetFamily {
+                case .systemSmall:
+                    SmallGlanceWidgetView(entry: entry)
+                case .systemMedium:
+                    MediumGlanceWidgetView(entry: entry)
+                case .systemLarge:
+                    LargeGlanceWidgetView(entry: entry)
+                default:
+                    SmallGlanceWidgetView(entry: entry)
+                }
             }
         }
         .containerBackground(for: .widget) {
             WidgetPanelBackground()
         }
-        // Direct background fallback for macOS WidgetKit where
-        // containerBackground may not render reliably (macOS 14.0).
-        .background(WidgetPanelBackground())
     }
 }
 

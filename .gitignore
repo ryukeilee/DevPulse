@@ -68,3 +68,6 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
+
+# AI agent session artifacts
+pi-session-*.html

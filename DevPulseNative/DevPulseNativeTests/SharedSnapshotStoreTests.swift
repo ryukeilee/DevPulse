@@ -376,6 +376,55 @@ struct SharedSnapshotStoreTests {
         #expect(recovered.snapshot.persistenceState == .recovered)
     }
 
+    @Test func emptyStoreReturnsSnapshotMissing() throws {
+        let directory = try temporaryDirectory()
+        defer { removeTemporaryDirectory(directory) }
+
+        let store = self.store(in: directory, now: date("2026-07-18T10:00:00Z"))
+        let result = store.load()
+
+        switch result {
+        case .success:
+            Issue.record("Empty store should fail with snapshotMissing, not succeed.")
+        case .failure(let error):
+            guard case .snapshotMissing = error else {
+                Issue.record("Empty store should fail with snapshotMissing, got \(error)")
+                return
+            }
+        }
+    }
+
+    @Test func freshlyCommittedSnapshotLoadsWithPrimarySource() throws {
+        let directory = try temporaryDirectory()
+        defer { removeTemporaryDirectory(directory) }
+
+        let store = self.store(in: directory, now: date("2026-07-18T10:00:00Z"))
+        let payload = fixture(label: "widget-ready", timestamp: "2026-07-18T09:00:00Z")
+        try requireSuccess(store.commit(payload))
+
+        let loaded = try requireSuccess(store.load())
+        #expect(loaded.source == .primary)
+        #expect(loaded.snapshot.repositories.first?.id == "widget-ready")
+        #expect(loaded.snapshot.repositories.first?.resolvedDataSource == .current)
+        #expect(loaded.snapshot.persistenceState == .committed)
+    }
+
+    @Test func corruptedJsonPrimaryFallsBackToValidBackup() throws {
+        let directory = try temporaryDirectory()
+        defer { removeTemporaryDirectory(directory) }
+
+        let store = self.store(in: directory, now: date("2026-07-18T10:00:00Z"))
+        try requireSuccess(store.commit(fixture(label: "backup-safe", timestamp: "2026-07-18T09:00:00Z")))
+
+        try "invalid json garbage".data(using: .utf8)!.write(to: store.primaryURL)
+
+        let loaded = try requireSuccess(store.load())
+        #expect(loaded.source == .backup)
+        #expect(loaded.snapshot.repositories.first?.id == "backup-safe")
+        #expect(loaded.snapshot.persistenceState == .recovered)
+        #expect(loaded.snapshot.repositories.first?.resolvedDataSource != .current)
+    }
+
     @Test func recoveredSnapshotCanCommitFreshDataWithoutMovingWatermarksOrRevisionBackward() throws {
         let directory = try temporaryDirectory()
         defer { removeTemporaryDirectory(directory) }
