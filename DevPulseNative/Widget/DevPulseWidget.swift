@@ -216,6 +216,9 @@ struct DevPulseWidgetEntryView: View {
         .containerBackground(for: .widget) {
             WidgetPanelBackground()
         }
+        // Direct background fallback for macOS WidgetKit where
+        // containerBackground may not render reliably (macOS 14.0).
+        .background(WidgetPanelBackground())
     }
 }
 
@@ -237,7 +240,10 @@ private enum WidgetPalette {
 
 private struct WidgetPanelBackground: View {
     var body: some View {
-        ContainerRelativeShape()
+        // Rectangle is used instead of ContainerRelativeShape because the
+        // latter can render as transparent on macOS 14 WidgetKit, producing
+        // a white/blank widget. Rectangle reliably fills the available space.
+        Rectangle()
             .fill(
                 LinearGradient(
                     colors: [
@@ -250,7 +256,7 @@ private struct WidgetPanelBackground: View {
                 )
             )
             .overlay(
-                ContainerRelativeShape()
+                Rectangle()
                     .stroke(WidgetPalette.stroke, lineWidth: 0.6)
             )
     }
