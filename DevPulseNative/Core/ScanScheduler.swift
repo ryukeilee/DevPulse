@@ -1317,48 +1317,35 @@ final class ScanScheduler: ObservableObject {
     }
 
     var refreshStatusText: String {
-        switch refreshPhase {
-        case .refreshing:
-            return "刷新中…"
-        case .degraded:
-            return "部分仓库读取失败"
-        case .failure:
-            return "刷新失败"
-        case .success:
-            return refreshTrustAssessment.state == .fresh
-                ? "刷新成功"
-                : refreshTrustAssessment.title
-        case .idle:
-            return refreshTrustAssessment.title
-        }
+        let freshness = DataFreshnessBuilder.build(
+            refreshPhase: refreshPhase,
+            trustAssessment: refreshTrustAssessment,
+            persistenceState: lastResult.persistenceState,
+            repositories: lastResult.repositories,
+            isRefreshing: isScanning
+        )
+        return freshness.label
     }
 
     var refreshDetailText: String? {
-        switch refreshPhase {
-        case .refreshing:
-            let errorCount = lastResult.scanSummary.errorRepositories
-            if errorCount > 0 {
-                return "仍显示上次结果 · \(errorCount) 个仓库待重试"
-            }
-            if let lastSuccessfulRefreshAt {
-                return "仍显示上次成功：\(RefreshStatusFormatter.updateLabel(for: lastSuccessfulRefreshAt))"
-            }
-            return lastResult.repositories.isEmpty ? nil : "仍显示上次结果"
-        case .degraded:
-            let errorCount = lastResult.scanSummary.errorRepositories
-            if errorCount > 0 {
-                return "\(errorCount) 个仓库待重试，其他仓库已更新"
-            }
-            return "部分扫描目录待重试，已发现仓库已更新"
-        case .failure:
-            let reason = refreshFailureMessage ?? "本轮未能建立可用结果"
-            return "\(reason) · \(refreshTrustAssessment.detail)"
-        case .success:
-            return refreshTrustAssessment.state == .fresh
-                ? lastSuccessfulRefreshAt.map { RefreshStatusFormatter.updateLabel(for: $0) }
-                : refreshTrustAssessment.detail
-        case .idle:
-            return refreshTrustAssessment.state == .fresh ? nil : refreshTrustAssessment.detail
+        let freshness = DataFreshnessBuilder.build(
+            refreshPhase: refreshPhase,
+            trustAssessment: refreshTrustAssessment,
+            persistenceState: lastResult.persistenceState,
+            repositories: lastResult.repositories,
+            isRefreshing: isScanning
+        )
+        switch freshness {
+        case .normal(let reason):
+            return reason
+        case .refreshing(let reason):
+            return reason
+        case .stale(let reason):
+            return reason
+        case .degraded(let reason):
+            return reason
+        case .failed(let reason):
+            return reason
         }
     }
 
@@ -1603,6 +1590,36 @@ final class ScanScheduler: ObservableObject {
         diagnostics.widgetSnapshotReadError = nil
         diagnostics.snapshotDecodable = false
         lastScanMetrics = nil
+
+        // Write an isRefreshing snapshot so Widget can distinguish a running scan from stale/degraded data.
+        let refreshingData = lastResult.withWrittenAt(DateFormatting.nowISO())
+        let refreshingSnapshot = AppGroupData(
+            schemaVersion: refreshingData.schemaVersion,
+            generatedAt: refreshingData.generatedAt,
+            writtenAt: refreshingData.writtenAt,
+            lastSuccessfulRefreshAt: refreshingData.lastSuccessfulRefreshAt,
+            historySchemaVersion: refreshingData.historySchemaVersion,
+            historyRecordingEnabled: refreshingData.historyRecordingEnabled,
+            scanSummary: refreshingData.scanSummary,
+            repositories: refreshingData.repositories,
+            recentActivityEvents: refreshingData.recentActivityEvents,
+            repositoryUnavailableSinceByPath: refreshingData.repositoryUnavailableSinceByPath,
+            storageRevision: refreshingData.storageRevision,
+            persistenceState: refreshingData.persistenceState,
+            pendingItemWidgetSummary: refreshingData.pendingItemWidgetSummary,
+            isRefreshing: true,
+            appVersion: refreshingData.appVersion,
+            storageFormatVersion: refreshingData.storageFormatVersion
+        )
+        switch AppGroupStore.write(refreshingSnapshot) {
+        case .success:
+            diagnostics.sharedDataWriteError = nil
+            diagnostics.lastSharedWriteAt = Date()
+            diagnostics.lastSnapshotStoreTrigger = "refresh-start"
+            AppGroupStore.reloadWidgets()
+        case .failure:
+            break
+        }
 
         // Capture all values needed by the background task while on the
         // main actor so the detached task never touches isolated state.

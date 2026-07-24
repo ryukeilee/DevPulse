@@ -258,7 +258,7 @@ struct CrossProcessPipelineTests {
 
 // MARK: - Helpers
 
-private func requireSuccess<T>(_ result: Result<T, Error>) throws -> T {
+private func requireSuccess<T>(_ result: Result<T, AppGroupStoreError>) throws -> T {
     switch result {
     case .success(let value):
         return value

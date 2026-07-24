@@ -205,7 +205,7 @@ struct WidgetDegradedRenderingTests {
                 stagedFileCount: 0, unstagedFileCount: 0,
                 conflictedFileCount: 0, aheadCount: 0, behindCount: 0,
                 hasUpstream: true, changedFileCount: 0,
-                changedFilesPreview: nil, risk: .clean,
+                changedFilesPreview: [], risk: .low,
                 lastScannedAt: formatter.string(from: now.addingTimeInterval(-30)),
                 dataSource: .current,
                 lastSuccessfulScanAt: formatter.string(from: now.addingTimeInterval(-30)),

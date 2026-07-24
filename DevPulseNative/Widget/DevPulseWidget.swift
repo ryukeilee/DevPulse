@@ -124,7 +124,13 @@ struct Provider: TimelineProvider {
             // thrashing WidgetKit.
             nextRefreshInterval = 180
         case .ready:
-            nextRefreshInterval = 900
+            // When the app is refreshing, poll every 60 s so the widget
+            // picks up completed scan results as soon as possible.
+            if entry.snapshot?.isRefreshing == true {
+                nextRefreshInterval = 60
+            } else {
+                nextRefreshInterval = 900
+            }
         }
         let nextRefresh = Date().addingTimeInterval(nextRefreshInterval)
         completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
@@ -207,6 +213,47 @@ struct WidgetEntry: TimelineEntry {
             ),
             trustAssessment: nil
         )
+    }
+}
+
+extension WidgetEntry {
+    /// Unified freshness state derived from the entry's load results.
+    var freshnessState: DataFreshnessState {
+        switch loadState {
+        case .placeholder:
+            return .refreshing(reason: "等待首次数据")
+        case .noSnapshot:
+            return .failed(reason: "没有共享快照")
+        case .loadFailed:
+            let reason = loadFailure?.detail ?? loadFailure?.title ?? "共享快照读取失败"
+            return .failed(reason: reason)
+        case .ready:
+            break
+        }
+
+        // Refreshing flag from the live snapshot gets first priority.
+        if snapshot?.isRefreshing == true {
+            return .refreshing(reason: "正在更新仓库状态")
+        }
+
+        guard let ta = trustAssessment else {
+            return .normal(reason: "数据正常")
+        }
+
+        switch ta.state {
+        case .fresh:
+            return .normal(reason: ta.title)
+        case .stale:
+            return .stale(reason: ta.title)
+        case .expired:
+            return .stale(reason: ta.title)
+        case .degraded:
+            return .degraded(reason: ta.title)
+        case .unknown:
+            return .failed(reason: ta.title)
+        case .failed:
+            return .failed(reason: ta.title)
+        }
     }
 }
 
@@ -1013,26 +1060,32 @@ private struct SmallGlanceWidgetView: View {
 
     @ViewBuilder
     private var guardedReadyContent: some View {
-        switch entry.trustAssessment?.state {
-        case .fresh:
+        switch entry.freshnessState {
+        case .normal:
             readyContent
-        case .stale, .expired, .degraded:
+        case .refreshing(let reason):
             shortState(
-                title: WidgetRefreshCopy.waitingRefreshTitle,
-                detail: WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment),
+                title: "刷新中",
+                detail: reason,
+                icon: "arrow.triangle.2.circlepath"
+            )
+        case .stale(let reason):
+            shortState(
+                title: "数据过期",
+                detail: reason + " · 点按 Rescan Now 重新刷新",
                 icon: "clock.badge.exclamationmark"
             )
-        case .unknown, .failed:
+        case .degraded(let reason):
             shortState(
-                title: entry.trustAssessment?.title ?? WidgetRefreshCopy.pendingConfirmationTitle,
-                detail: entry.trustAssessment?.detail ?? WidgetRefreshCopy.pendingConfirmationDetail,
-                icon: "questionmark.circle"
+                title: "读取降级",
+                detail: reason + " · 点按 Rescan 重新确认",
+                icon: "clock.arrow.circlepath"
             )
-        case .none:
+        case .failed(let reason):
             shortState(
-                title: WidgetRefreshCopy.pendingConfirmationTitle,
-                detail: WidgetRefreshCopy.pendingConfirmationDetail,
-                icon: "questionmark.circle"
+                title: "读取失败",
+                detail: reason + " · 检查 Settings 后重试",
+                icon: "exclamationmark.triangle.fill"
             )
         }
     }
@@ -1129,26 +1182,32 @@ private struct MediumGlanceWidgetView: View {
 
     @ViewBuilder
     private var guardedReadyContent: some View {
-        switch entry.trustAssessment?.state {
-        case .fresh:
+        switch entry.freshnessState {
+        case .normal:
             readyContent
-        case .stale, .expired, .degraded:
+        case .refreshing(let reason):
             shortState(
-                title: WidgetRefreshCopy.waitingRefreshTitle,
-                detail: WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment),
+                title: "刷新中",
+                detail: reason,
+                icon: "arrow.triangle.2.circlepath"
+            )
+        case .stale(let reason):
+            shortState(
+                title: "数据过期",
+                detail: reason + " · 点按 Rescan Now 重新刷新",
                 icon: "clock.badge.exclamationmark"
             )
-        case .unknown, .failed:
+        case .degraded(let reason):
             shortState(
-                title: entry.trustAssessment?.title ?? WidgetRefreshCopy.pendingConfirmationTitle,
-                detail: entry.trustAssessment?.detail ?? WidgetRefreshCopy.pendingConfirmationDetail,
-                icon: "questionmark.circle"
+                title: "读取降级",
+                detail: reason + " · 点按 Rescan 重新确认",
+                icon: "clock.arrow.circlepath"
             )
-        case .none:
+        case .failed(let reason):
             shortState(
-                title: WidgetRefreshCopy.pendingConfirmationTitle,
-                detail: WidgetRefreshCopy.pendingConfirmationDetail,
-                icon: "questionmark.circle"
+                title: "读取失败",
+                detail: reason + " · 检查 Settings 后重试",
+                icon: "exclamationmark.triangle.fill"
             )
         }
     }
@@ -1255,26 +1314,32 @@ private struct LargeGlanceWidgetView: View {
 
     @ViewBuilder
     private var guardedReadyContent: some View {
-        switch entry.trustAssessment?.state {
-        case .fresh:
+        switch entry.freshnessState {
+        case .normal:
             readyContent
-        case .stale, .expired, .degraded:
+        case .refreshing(let reason):
             shortState(
-                title: WidgetRefreshCopy.waitingRefreshTitle,
-                detail: WidgetRefreshCopy.waitingRefreshDetail(from: entry.trustAssessment),
+                title: "刷新中",
+                detail: reason,
+                icon: "arrow.triangle.2.circlepath"
+            )
+        case .stale(let reason):
+            shortState(
+                title: "数据过期",
+                detail: reason + " · 点按 Rescan Now 重新刷新",
                 icon: "clock.badge.exclamationmark"
             )
-        case .unknown, .failed:
+        case .degraded(let reason):
             shortState(
-                title: entry.trustAssessment?.title ?? WidgetRefreshCopy.pendingConfirmationTitle,
-                detail: entry.trustAssessment?.detail ?? WidgetRefreshCopy.pendingConfirmationDetail,
-                icon: "questionmark.circle"
+                title: "读取降级",
+                detail: reason + " · 点按 Rescan 重新确认",
+                icon: "clock.arrow.circlepath"
             )
-        case .none:
+        case .failed(let reason):
             shortState(
-                title: WidgetRefreshCopy.pendingConfirmationTitle,
-                detail: WidgetRefreshCopy.pendingConfirmationDetail,
-                icon: "questionmark.circle"
+                title: "读取失败",
+                detail: reason + " · 检查 Settings 后重试",
+                icon: "exclamationmark.triangle.fill"
             )
         }
     }
@@ -1513,37 +1578,29 @@ private struct FallbackWidgetView: View {
     }
 }
 
-private extension WidgetEntry {
+extension WidgetEntry {
+    /// Footer text displayed at the bottom of widget views.
     var footerText: String {
         switch loadState {
         case .placeholder:
-            return "正在读取共享快照"
+            return "等待数据"
         case .noSnapshot:
-            return "最近刷新: \(WidgetRefreshCopy.waitingFirstRefreshTitle)"
+            return "打开 DevPulse 执行刷新"
         case .loadFailed:
-            return loadFailure?.footerText ?? "最近刷新: snapshot 读取失败"
+            return loadFailure?.footerText ?? "打开 DevPulse 查看诊断"
         case .ready:
-            if let trustAssessment, trustAssessment.state != .fresh {
-                switch trustAssessment.state {
-                case .stale, .expired, .degraded:
-                    return "\(WidgetRefreshCopy.waitingRefreshTitle) · \(trustAssessment.detail)"
-                case .unknown, .failed:
-                    return "最近刷新: \(WidgetRefreshCopy.pendingConfirmationTitle)"
-                case .fresh:
-                    break
-                }
+            switch freshnessState {
+            case .normal(let reason):
+                return reason
+            case .refreshing:
+                return "刷新中"
+            case .stale:
+                return "数据需要刷新"
+            case .degraded:
+                return "数据来自备份或迁移"
+            case .failed(let reason):
+                return reason
             }
-
-            guard let snapshot else {
-                return "最近刷新: 未知"
-            }
-
-            guard let successfulAt = snapshot.lastSuccessfulRefreshAt,
-                  DateFormatting.date(from: successfulAt) != nil else {
-                return "最近刷新: 未知"
-            }
-
-            return "最近成功刷新 \(DateFormatting.relativeTime(from: successfulAt, relativeTo: date))"
         }
     }
 }

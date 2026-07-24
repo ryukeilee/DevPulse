@@ -1474,6 +1474,10 @@ struct AppGroupData: Codable, Equatable {
     /// shared snapshot. This field is set during refresh persistence
     /// and read by the Widget extension.
     let pendingItemWidgetSummary: PendingItemWidgetSummary?
+    /// Whether the host app is currently performing a refresh scan.
+    /// Written during the persistence phase so the Widget can distinguish
+    /// "refreshing" from "stale" / "degraded".
+    let isRefreshing: Bool?
     /// App version that wrote this snapshot. Written by `SharedSnapshotStore`
     /// during commit. Readers can use this to detect stale-format payloads
     /// that may need aggressive recovery.
@@ -1495,6 +1499,7 @@ struct AppGroupData: Codable, Equatable {
          storageRevision: UInt64 = 0,
          persistenceState: SharedSnapshotPersistenceState = .committed,
          pendingItemWidgetSummary: PendingItemWidgetSummary? = nil,
+         isRefreshing: Bool? = nil,
          appVersion: String? = nil,
          storageFormatVersion: Int? = nil) {
         self.schemaVersion = schemaVersion
@@ -1510,6 +1515,7 @@ struct AppGroupData: Codable, Equatable {
         self.storageRevision = storageRevision
         self.persistenceState = persistenceState
         self.pendingItemWidgetSummary = pendingItemWidgetSummary
+        self.isRefreshing = isRefreshing
         self.appVersion = appVersion
         self.storageFormatVersion = storageFormatVersion
     }
@@ -1555,6 +1561,10 @@ struct AppGroupData: Codable, Equatable {
             Int.self,
             forKey: .storageFormatVersion
         )
+        let decodedIsRefreshing = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .isRefreshing
+        )
         self.init(
             schemaVersion: schemaVersion,
             generatedAt: try container.decode(String.self, forKey: .generatedAt),
@@ -1578,6 +1588,7 @@ struct AppGroupData: Codable, Equatable {
             storageRevision: storageRevision,
             persistenceState: persistenceState,
             pendingItemWidgetSummary: decodedPendingItemSummary,
+            isRefreshing: decodedIsRefreshing,
             appVersion: decodedAppVersion,
             storageFormatVersion: decodedStorageFormatVersion
         )
@@ -1601,6 +1612,7 @@ struct AppGroupData: Codable, Equatable {
         try container.encode(storageRevision, forKey: .storageRevision)
         try container.encode(persistenceState, forKey: .persistenceState)
         try container.encodeIfPresent(pendingItemWidgetSummary, forKey: .pendingItemWidgetSummary)
+        try container.encodeIfPresent(isRefreshing, forKey: .isRefreshing)
         try container.encodeIfPresent(appVersion, forKey: .appVersion)
         try container.encodeIfPresent(storageFormatVersion, forKey: .storageFormatVersion)
     }
@@ -1619,6 +1631,7 @@ struct AppGroupData: Codable, Equatable {
         case historySchemaVersion
         case historyRecordingEnabled
         case pendingItemWidgetSummary
+        case isRefreshing
         case appVersion
         case storageFormatVersion
     }
@@ -1643,6 +1656,7 @@ struct AppGroupData: Codable, Equatable {
             storageRevision: 0,
             persistenceState: .committed,
             pendingItemWidgetSummary: nil,
+            isRefreshing: nil,
             appVersion: RepositorySnapshotSchema.currentAppVersion,
             storageFormatVersion: RepositorySnapshotSchema.storageFormatVersion
         )
@@ -1663,6 +1677,7 @@ struct AppGroupData: Codable, Equatable {
             storageRevision: storageRevision,
             persistenceState: persistenceState,
             pendingItemWidgetSummary: pendingItemWidgetSummary,
+            isRefreshing: isRefreshing,
             appVersion: appVersion,
             storageFormatVersion: storageFormatVersion
         )
@@ -1683,6 +1698,7 @@ struct AppGroupData: Codable, Equatable {
             storageRevision: storageRevision,
             persistenceState: persistenceState,
             pendingItemWidgetSummary: pendingItemWidgetSummary,
+            isRefreshing: isRefreshing,
             appVersion: appVersion,
             storageFormatVersion: storageFormatVersion
         )
@@ -1703,6 +1719,7 @@ struct AppGroupData: Codable, Equatable {
             storageRevision: storageRevision,
             persistenceState: persistenceState,
             pendingItemWidgetSummary: pendingItemWidgetSummary,
+            isRefreshing: isRefreshing,
             appVersion: appVersion,
             storageFormatVersion: storageFormatVersion
         )
@@ -1726,6 +1743,7 @@ struct AppGroupData: Codable, Equatable {
             storageRevision: storageRevision,
             persistenceState: persistenceState,
             pendingItemWidgetSummary: pendingItemWidgetSummary,
+            isRefreshing: isRefreshing,
             appVersion: appVersion,
             storageFormatVersion: storageFormatVersion
         )
@@ -1746,6 +1764,7 @@ struct AppGroupData: Codable, Equatable {
             storageRevision: storageRevision,
             persistenceState: persistenceState,
             pendingItemWidgetSummary: summary,
+            isRefreshing: isRefreshing,
             appVersion: appVersion,
             storageFormatVersion: storageFormatVersion
         )
@@ -1773,6 +1792,7 @@ struct AppGroupData: Codable, Equatable {
             storageRevision: storageRevision,
             persistenceState: persistenceState,
             pendingItemWidgetSummary: pendingItemWidgetSummary,
+            isRefreshing: isRefreshing,
             appVersion: RepositorySnapshotSchema.currentAppVersion,
             storageFormatVersion: RepositorySnapshotSchema.storageFormatVersion
         )
@@ -1813,6 +1833,7 @@ struct AppGroupData: Codable, Equatable {
             storageRevision: storageRevision,
             persistenceState: state,
             pendingItemWidgetSummary: nil,
+            isRefreshing: isRefreshing,
             appVersion: appVersion,
             storageFormatVersion: storageFormatVersion
         )
@@ -1870,6 +1891,7 @@ struct AppGroupData: Codable, Equatable {
             storageRevision: storageRevision,
             persistenceState: persistenceState,
             pendingItemWidgetSummary: nil,
+            isRefreshing: isRefreshing,
             appVersion: appVersion,
             storageFormatVersion: storageFormatVersion
         )
@@ -3609,6 +3631,140 @@ enum AppGroupStoreError: LocalizedError, Equatable {
             return "Cross-process write conflict: observed revision \(observed), but current revision is \(actual)."
         }
     }
+}
+
+// MARK: - Data Freshness State
+
+/// Unified freshness state for the main app and Widget.
+/// Each case has a succinct title (reason) and a recovery action.
+/// Concrete builders derive the correct state from whatever runtime
+/// context is available (RefreshPhase, SnapshotTrustAssessment,
+/// WidgetLoadState, SharedSnapshotPersistenceState, etc.)
+/// without requiring callers to import multiple enums.
+enum DataFreshnessState: Equatable, Sendable {
+    /// Data is current and fresh — everything works.
+    case normal(reason: String)
+    /// A refresh is in progress.
+    case refreshing(reason: String)
+    /// Data exists but is stale/expired — needs refresh.
+    case stale(reason: String)
+    /// Data came from recovery, migration, or partial read.
+    case degraded(reason: String)
+    /// A real failure occurred — no usable data.
+    case failed(reason: String)
+
+    var label: String {
+        switch self {
+        case .normal:    return "正常"
+        case .refreshing: return "刷新中"
+        case .stale:     return "数据过期"
+        case .degraded:  return "读取降级"
+        case .failed:    return "读取失败"
+        }
+    }
+
+    /// Concise one-line recovery suggestion.
+    var recoveryAction: String {
+        switch self {
+        case .normal:
+            return "无需操作"
+        case .refreshing:
+            return "等待刷新完成"
+        case .stale:
+            return "点按 Rescan Now 重新刷新"
+        case .degraded:
+            return "点按 Rescan 重新确认"
+        case .failed:
+            return "检查 Settings › Diagnostics 后重试"
+        }
+    }
+}
+
+/// Builds a unified DataFreshnessState from available runtime context.
+/// Every path produces one of the 5 canonical states so the app and Widget
+/// share the same vocabulary for reasons and recovery actions.
+enum DataFreshnessBuilder {
+
+    /// Derive from app-side context (ScanScheduler has all state).
+    static func build(
+        refreshPhase: RefreshPhase,
+        trustAssessment: SnapshotTrustAssessment,
+        persistenceState: SharedSnapshotPersistenceState,
+        repositories: [RepositorySnapshot],
+        isRefreshing: Bool
+    ) -> DataFreshnessState {
+        // 1. Refreshing takes priority — a running scan means we are in that
+        //    state until the pipeline finishes, regardless of previous data.
+        if isRefreshing || refreshPhase == .refreshing {
+            let errorCount = repositories.filter {
+                $0.resolvedDataSource != .current || $0.status == .error
+            }.count
+            if errorCount > 0 {
+                return .refreshing(reason: "刷新中，\(errorCount) 个仓库等待重试")
+            }
+            return .refreshing(reason: "正在更新仓库状态")
+        }
+
+        // 2. Persistence provenance — migrated/recovered means the payload
+        //    is not from a freshly confirmed scan.
+        if persistenceState != .committed {
+            let detail: String
+            switch persistenceState {
+            case .migrated:
+                detail = "快照从旧版迁移，待重新确认"
+            case .recovered:
+                detail = "使用备份恢复的数据，待重新确认"
+            case .committed:
+                detail = ""
+            }
+            return .degraded(reason: detail)
+        }
+
+        // 3. Pipeline-level failure / degraded.
+        switch refreshPhase {
+        case .failure:
+            return .failed(reason: trustAssessment.title)
+        case .degraded:
+            let unavailableCount = repositories.filter {
+                $0.resolvedDataSource != .current || $0.status == .error
+            }.count
+            if unavailableCount > 0 {
+                return .degraded(reason: "\(unavailableCount) 个仓库读取降级")
+            }
+            return .degraded(reason: "部分数据来自上次成功快照")
+        case .refreshing:
+            // Already handled above.
+            return .refreshing(reason: "正在更新仓库状态")
+        case .idle, .success:
+            break
+        }
+
+        // 4. Time-based freshness of the snapshot.
+        switch trustAssessment.state {
+        case .fresh:
+            let allCurrent = repositories.allSatisfy {
+                $0.resolvedDataSource == .current
+            }
+            if allCurrent {
+                return .normal(reason: trustAssessment.title)
+            }
+            // Some repos are degraded even though the snapshot is fresh
+            // (shouldn't happen in practice, but handle gracefully).
+            return .degraded(reason: "部分仓库数据来自上次成功快照")
+        case .stale:
+            return .stale(reason: trustAssessment.title)
+        case .expired:
+            return .stale(reason: trustAssessment.title)
+        case .degraded:
+            return .degraded(reason: trustAssessment.title)
+        case .unknown:
+            return .failed(reason: trustAssessment.title)
+        case .failed:
+            return .failed(reason: trustAssessment.title)
+        }
+    }
+
+
 }
 
 // MARK: - Scan-location toggle

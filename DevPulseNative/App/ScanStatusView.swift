@@ -84,20 +84,24 @@ struct ScanStatusView: View {
     }
 
     private var statusTint: Color {
-        switch scheduler.refreshPhase {
-        case .failure:
-            return .red
-        case .degraded:
-            return .orange
+        let freshness = DataFreshnessBuilder.build(
+            refreshPhase: scheduler.refreshPhase,
+            trustAssessment: scheduler.refreshTrustAssessment,
+            persistenceState: scheduler.lastResult.persistenceState,
+            repositories: scheduler.lastResult.repositories,
+            isRefreshing: scheduler.isScanning
+        )
+        switch freshness {
+        case .normal:
+            return .secondary
         case .refreshing:
             return .secondary
-        case .idle, .success:
-            switch scheduler.snapshotFreshness {
-            case .stale, .expired, .unknown:
-                return .orange
-            case .fresh, .none:
-                return .secondary
-            }
+        case .stale:
+            return .orange
+        case .degraded:
+            return .orange
+        case .failed:
+            return .red
         }
     }
 }
