@@ -150,4 +150,37 @@ struct BuildConfigConsistencyTests {
         #expect(active != missing)
         #expect(embedded != missing)
     }
+
+    // ────────────────────────────────────────────────────────────────
+    // MARK: - UnifiedLifecycleSchema derives from RepositorySnapshotSchema
+    // ────────────────────────────────────────────────────────────────
+
+    @Test("UnifiedLifecycleSchema values are derived from RepositorySnapshotSchema")
+    func unifiedSchemaDerivation() {
+        #expect(
+            UnifiedLifecycleSchema.schemaVersion == RepositorySnapshotSchema.version,
+            "UnifiedLifecycleSchema.schemaVersion must equal RepositorySnapshotSchema.version"
+        )
+        #expect(
+            UnifiedLifecycleSchema.oldestMigratableSchemaVersion == RepositorySnapshotSchema.oldestMigratableVersion,
+            "oldestMigratable versions must match"
+        )
+        #expect(
+            UnifiedLifecycleSchema.storageFormatVersion == RepositorySnapshotSchema.storageFormatVersion,
+            "storageFormatVersion must match"
+        )
+        #expect(
+            UnifiedLifecycleSchema.supportedStorageFormatVersion >= RepositorySnapshotSchema.storageFormatVersion,
+            "supportedStorageFormatVersion must be >= current storageFormatVersion"
+        )
+    }
+
+    @Test("SharedSnapshotStore and Widget use the same schema constant")
+    func crossTargetSchemaConsistency() {
+        // The snapshot schema version compiled into Core/Models.swift
+        // must be used by both the app and Widget extension.
+        #expect(RepositorySnapshotSchema.version == 3,
+                "Current schema version is 3 — update this test when bumping")
+        #expect(UnifiedLifecycleSchema.schemaVersion == RepositorySnapshotSchema.version)
+    }
 }

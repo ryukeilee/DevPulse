@@ -337,4 +337,40 @@ struct WidgetDegradedRenderingTests {
         #expect(primary != backup)
         #expect(migrated != backup)
     }
+
+    // ────────────────────────────────────────────────────────────────
+    // MARK: - Auto-rebuild scenario: Widget loading after corruption
+    // ────────────────────────────────────────────────────────────────
+
+    @Test("WidgetSharedSnapshotStore auto-rebuild produces loadable snapshot")
+    func widgetAutoRebuildScenario() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devpulse-widget-rebuild-\\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let store = SharedSnapshotStore(
+            directoryURL: directory,
+            fileName: "test-rebuild.json",
+            now: { Date(timeIntervalSince1970: 1_700_000_000) }
+        )
+
+        // Write garbage to simulate corruption
+        try "corrupted data".data(using: .utf8)!.write(to: store.primaryURL)
+
+        // Auto-rebuild triggers and produces a valid snapshot
+        let read = try #require(try? store.load().get())
+        #expect(read.snapshot.schemaVersion == RepositorySnapshotSchema.version)
+        #expect(read.snapshot.persistenceState == .recovered)
+        #expect(read.snapshot.repositories.isEmpty)
+
+        // Widget would render this as a degraded-but-functional state
+        let feed = ActivityTimelineBuilder.build(from: read.snapshot)
+        let entry = WidgetEntry.content(snapshot: read.snapshot, feed: feed)
+        #expect(entry.loadState == .ready)
+        #expect(entry.trustAssessment != nil)
+        // Degraded trust because persistenceState is .recovered
+        let assessment = try #require(entry.trustAssessment)
+        #expect(assessment.state != .fresh)
+    }
 }

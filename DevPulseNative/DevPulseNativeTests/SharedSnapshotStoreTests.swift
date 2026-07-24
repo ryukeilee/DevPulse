@@ -186,7 +186,7 @@ struct SharedSnapshotStoreTests {
         #expect(read.snapshot.repositories.first?.workspaceKind == nil)
     }
 
-    @Test func structurallyInvalidSchemaV1CannotBeMigratedAsTrustedData() throws {
+    @Test func structurallyInvalidSchemaV1TriggersAutoRebuild() throws {
         let directory = try temporaryDirectory()
         defer { removeTemporaryDirectory(directory) }
 
@@ -206,17 +206,22 @@ struct SharedSnapshotStoreTests {
         let snapshotStore = store(in: directory, now: date("2026-07-18T10:00:00Z"))
         try invalidBytes.write(to: snapshotStore.primaryURL)
 
-        switch snapshotStore.load() {
-        case .success:
-            Issue.record("Structurally invalid schema-v1 data was incorrectly migrated.")
-        case .failure:
-            break
-        }
-        #expect(try Data(contentsOf: snapshotStore.primaryURL) == invalidBytes)
-        #expect(FileManager.default.fileExists(atPath: snapshotStore.backupURL.path) == false)
+        // Auto-rebuild: corrupted data creates a minimal recovery snapshot
+        let read = try requireSuccess(snapshotStore.load())
+        #expect(read.source == .migratedPrimary)
+        #expect(read.snapshot.persistenceState == .recovered)
+        #expect(read.snapshot.schemaVersion == RepositorySnapshotSchema.version)
+        #expect(read.snapshot.repositories.isEmpty)
+        #expect(read.snapshot.storageRevision > 0)
+
+        // Primary file is now the rebuilt valid snapshot, not the original
+        let primaryBytes = try Data(contentsOf: snapshotStore.primaryURL)
+        #expect(primaryBytes != invalidBytes)
+        // Backup was created during auto-rebuild commit
+        #expect(FileManager.default.fileExists(atPath: snapshotStore.backupURL.path))
     }
 
-    @Test func schemaV1WithNegativeRepositoryCountsCannotBeMigrated() throws {
+    @Test func schemaV1WithNegativeRepositoryCountsTriggersAutoRebuild() throws {
         let directory = try temporaryDirectory()
         defer { removeTemporaryDirectory(directory) }
 
@@ -236,17 +241,20 @@ struct SharedSnapshotStoreTests {
         let snapshotStore = store(in: directory, now: date("2026-07-18T10:00:00Z"))
         try invalidBytes.write(to: snapshotStore.primaryURL)
 
-        switch snapshotStore.load() {
-        case .success:
-            Issue.record("Schema-v1 data with negative counts was incorrectly migrated.")
-        case .failure:
-            break
-        }
-        #expect(try Data(contentsOf: snapshotStore.primaryURL) == invalidBytes)
-        #expect(FileManager.default.fileExists(atPath: snapshotStore.backupURL.path) == false)
+        // Auto-rebuild: corrupted legacy data creates a minimal recovery snapshot
+        let read = try requireSuccess(snapshotStore.load())
+        #expect(read.source == .migratedPrimary)
+        #expect(read.snapshot.persistenceState == .recovered)
+        #expect(read.snapshot.schemaVersion == RepositorySnapshotSchema.version)
+        #expect(read.snapshot.repositories.isEmpty)
+        #expect(read.snapshot.storageRevision > 0)
+
+        let primaryBytes = try Data(contentsOf: snapshotStore.primaryURL)
+        #expect(primaryBytes != invalidBytes)
+        #expect(FileManager.default.fileExists(atPath: snapshotStore.backupURL.path))
     }
 
-    @Test func schemaV1CrossRepositoryCountOverflowIsRejectedBeforeMigration() throws {
+    @Test func schemaV1CrossRepositoryCountOverflowTriggersAutoRebuild() throws {
         let directory = try temporaryDirectory()
         defer { removeTemporaryDirectory(directory) }
 
@@ -256,16 +264,19 @@ struct SharedSnapshotStoreTests {
         )
         try invalidBytes.write(to: snapshotStore.primaryURL)
 
-        switch snapshotStore.load() {
-        case .success:
-            Issue.record("Overflowing schema-v1 repository totals were incorrectly migrated.")
-        case .failure:
-            break
-        }
-        #expect(try Data(contentsOf: snapshotStore.primaryURL) == invalidBytes)
+        // Auto-rebuild: overflow data creates a minimal recovery snapshot
+        let read = try requireSuccess(snapshotStore.load())
+        #expect(read.source == .migratedPrimary)
+        #expect(read.snapshot.persistenceState == .recovered)
+        #expect(read.snapshot.schemaVersion == RepositorySnapshotSchema.version)
+        #expect(read.snapshot.repositories.isEmpty)
+        #expect(read.snapshot.storageRevision > 0)
+
+        let primaryBytes = try Data(contentsOf: snapshotStore.primaryURL)
+        #expect(primaryBytes != invalidBytes)
     }
 
-    @Test func schemaV2CrossRepositoryCountOverflowIsRejectedWithoutTrap() throws {
+    @Test func corruptedCurrentSchemaTriggersAutoRebuild() throws {
         let directory = try temporaryDirectory()
         defer { removeTemporaryDirectory(directory) }
 
@@ -275,13 +286,16 @@ struct SharedSnapshotStoreTests {
         )
         try invalidBytes.write(to: snapshotStore.primaryURL)
 
-        switch snapshotStore.load() {
-        case .success:
-            Issue.record("Overflowing schema-v2 repository totals were incorrectly accepted.")
-        case .failure:
-            break
-        }
-        #expect(try Data(contentsOf: snapshotStore.primaryURL) == invalidBytes)
+        // Auto-rebuild: corrupted current-schema data creates a minimal recovery snapshot
+        let read = try requireSuccess(snapshotStore.load())
+        #expect(read.source == .migratedPrimary)
+        #expect(read.snapshot.persistenceState == .recovered)
+        #expect(read.snapshot.schemaVersion == RepositorySnapshotSchema.version)
+        #expect(read.snapshot.repositories.isEmpty)
+        #expect(read.snapshot.storageRevision > 0)
+
+        let primaryBytes = try Data(contentsOf: snapshotStore.primaryURL)
+        #expect(primaryBytes != invalidBytes)
     }
 
     @Test func schemaV2MissingPersistenceStateCannotBeTreatedAsCommitted() throws {
@@ -323,7 +337,7 @@ struct SharedSnapshotStoreTests {
         #expect(read.snapshot.repositories.first?.resolvedDataSource != .current)
     }
 
-    @Test func corruptedPrimaryAndBackupFailWithoutOverwritingEitherFileOrCreatingEmptySnapshot() throws {
+    @Test func corruptedPrimaryAndBackupTriggersAutoRebuild() throws {
         let directory = try temporaryDirectory()
         defer { removeTemporaryDirectory(directory) }
 
@@ -336,15 +350,20 @@ struct SharedSnapshotStoreTests {
         try damagedPrimary.write(to: snapshotStore.primaryURL)
         try damagedBackup.write(to: snapshotStore.backupURL)
 
-        switch snapshotStore.load() {
-        case .success:
-            Issue.record("Two damaged snapshots unexpectedly produced data.")
-        case .failure:
-            break
-        }
+        // Auto-rebuild: both files corrupted creates a minimal recovery snapshot
+        let read = try requireSuccess(snapshotStore.load())
+        #expect(read.source == .migratedPrimary)
+        #expect(read.snapshot.persistenceState == .recovered)
+        #expect(read.snapshot.schemaVersion == RepositorySnapshotSchema.version)
+        #expect(read.snapshot.repositories.isEmpty)
+        #expect(read.snapshot.storageRevision > 0)
 
-        #expect(try Data(contentsOf: snapshotStore.primaryURL) == damagedPrimary)
-        #expect(try Data(contentsOf: snapshotStore.backupURL) == damagedBackup)
+        // Primary and backup now contain the rebuilt valid snapshot
+        let primaryBytes = try Data(contentsOf: snapshotStore.primaryURL)
+        #expect(primaryBytes != damagedPrimary)
+        // Backup exists after auto-rebuild commit
+        let backupExists = FileManager.default.fileExists(atPath: snapshotStore.backupURL.path)
+        #expect(backupExists)
         #expect(temporaryFiles(in: directory, prefix: snapshotStore.temporaryFilePrefix).isEmpty)
     }
 
@@ -788,6 +807,81 @@ struct SharedSnapshotStoreTests {
 
     private func date(_ iso8601: String) -> Date {
         Self.date(iso8601)
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // MARK: - Auto-rebuild regression tests
+    // ────────────────────────────────────────────────────────────────
+
+    @Test func autoRebuildSnapshotHasValidMetadata() throws {
+        let directory = try temporaryDirectory()
+        defer { removeTemporaryDirectory(directory) }
+
+        let store = self.store(in: directory, now: date("2026-07-18T10:00:00Z"))
+        try "not valid json".data(using: .utf8)!.write(to: store.primaryURL)
+
+        let read = try requireSuccess(store.load())
+        #expect(read.source == .migratedPrimary)
+        #expect(read.snapshot.schemaVersion == RepositorySnapshotSchema.version)
+        #expect(read.snapshot.persistenceState == .recovered)
+        #expect(read.snapshot.storageRevision > 0)
+        #expect(read.snapshot.generatedAt != nil)
+        #expect(read.snapshot.writtenAt != nil)
+        #expect(read.snapshot.scanSummary.totalRepositories == 0)
+        #expect(read.snapshot.repositories.isEmpty)
+        #expect(read.snapshot.appVersion != nil)
+        #expect(read.snapshot.storageFormatVersion == RepositorySnapshotSchema.storageFormatVersion)
+    }
+
+    @Test func autoRebuildDoesNotCorruptExistingValidValidSnapshot() throws {
+        let directory = try temporaryDirectory()
+        defer { removeTemporaryDirectory(directory) }
+
+        let store = self.store(in: directory, now: date("2026-07-18T10:00:00Z"))
+        let payload = fixture(label: "valid", timestamp: "2026-07-18T09:00:00Z")
+        try requireSuccess(store.commit(payload))
+
+        let originalPrimaryBytes = try Data(contentsOf: store.primaryURL)
+        #expect(try Data(contentsOf: store.backupURL) == originalPrimaryBytes)
+
+        // Load should return primary data, not trigger auto-rebuild
+        let read = try requireSuccess(store.load())
+        #expect(read.source == .primary)
+        #expect(read.snapshot.repositories.first?.id == "valid")
+        #expect(read.snapshot.persistenceState == .committed)
+
+        // Files remain unchanged
+        #expect(try Data(contentsOf: store.primaryURL) == originalPrimaryBytes)
+        #expect(try Data(contentsOf: store.backupURL) == originalPrimaryBytes)
+    }
+
+    @Test func autoRebuildWithOnlyLegacyBackupSucceeds() throws {
+        let directory = try temporaryDirectory()
+        defer { removeTemporaryDirectory(directory) }
+
+        let store = self.store(in: directory, now: date("2026-07-18T10:00:00Z"))
+
+        // Write an old v1 schema backup with invalid data
+        let snapshot = fixture(label: "old-backup", timestamp: "2026-07-18T09:00:00Z")
+        var legacy = try #require(
+            JSONSerialization.jsonObject(with: legacyV1JSON(from: snapshot))
+                as? [String: Any]
+        )
+        var repositories = try #require(legacy["repositories"] as? [[String: Any]])
+        repositories[0]["lastScannedAt"] = "corrupted"
+        legacy["repositories"] = repositories
+        let invalidBytes = try JSONSerialization.data(
+            withJSONObject: legacy,
+            options: [.sortedKeys]
+        )
+        try invalidBytes.write(to: store.backupURL)
+
+        // Primary missing, backup invalid → auto-rebuild
+        let read = try requireSuccess(store.load())
+        #expect(read.source == .migratedPrimary)
+        #expect(read.snapshot.persistenceState == .recovered)
+        #expect(read.snapshot.repositories.isEmpty)
+        #expect(read.snapshot.storageRevision > 0)
     }
 }
 

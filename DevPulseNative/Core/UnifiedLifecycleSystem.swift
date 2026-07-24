@@ -25,18 +25,23 @@ import WidgetKit
 //  MARK: - Constants
 // ══════════════════════════════════════════════════════════════════════
 
+/// Schema constants unified with RepositorySnapshotSchema.
+///
+/// Every value is derived from RepositorySnapshotSchema to prevent
+/// drift between the two definitions — if a schema constant is updated
+/// in Models.swift, this enum automatically picks up the change.
 enum UnifiedLifecycleSchema {
     /// The current storage format version. Increment when adding new
     /// required fields to the snapshot metadata header that every reader
     /// must recognise.
-    static let storageFormatVersion = 1
+    static let storageFormatVersion = RepositorySnapshotSchema.storageFormatVersion
 
     /// The maximum storage format version this process can read.
-    static let supportedStorageFormatVersion = 1
+    static let supportedStorageFormatVersion = RepositorySnapshotSchema.storageFormatVersion
 
     /// Current schema version for AppGroupData payload.
-    static let schemaVersion = 3
-    static let oldestMigratableSchemaVersion = 1
+    static let schemaVersion = RepositorySnapshotSchema.version
+    static let oldestMigratableSchemaVersion = RepositorySnapshotSchema.oldestMigratableVersion
 }
 
 // ══════════════════════════════════════════════════════════════════════

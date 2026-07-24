@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import OSLog
 
 enum SharedSnapshotReadSource: Equatable {
     case primary
@@ -38,6 +39,10 @@ final class SharedSnapshotStore: @unchecked Sendable {
     private let fileManager: FileManager
     private let now: () -> Date
     private let failureInjector: ((SharedSnapshotCommitPhase) throws -> Void)?
+    private let logger = Logger(
+        subsystem: "local.devpulse.app",
+        category: "SharedSnapshotStore"
+    )
 
     init(
         directoryURL: URL,
@@ -147,10 +152,84 @@ final class SharedSnapshotStore: @unchecked Sendable {
         if primaryFailure == .missing, backupFailure == .missing {
             throw AppGroupStoreError.snapshotMissing
         }
-        throw AppGroupStoreError.recoveryFailed(
-            primary: primaryFailure.description,
-            backup: backupFailure.description
+
+        // 同时损坏或不兼容: 自动重建最小可信快照。
+        // 这确保首次安装后无快照可读取、覆盖升级后旧快照无法解码、
+        // 或者文件损坏时，主应用与 Widget 都能获得有效数据，
+        // 无需用户手动点击 Refresh Data。
+        logger.warning("""
+            Shared snapshot files are both unreadable. \
+            Auto-rebuilding a minimal recovery snapshot. \
+            primary=\(primaryFailure.description) backup=\(backupFailure.description)
+            """)
+        return try autoRebuildUnlocked(
+            reason: "共享快照主文件和备份均不可读，已自动重建。等待再次刷新确认。",
+            primaryFailure: primaryFailure,
+            backupFailure: backupFailure
         )
+    }
+
+    /// Build and commit a minimal valid snapshot when both primary and backup
+    /// are unreadable (corrupted, empty, incompatible schema, etc.).
+    ///
+    /// The rebuilt snapshot uses `persistenceState == .recovered` and empty
+    /// repository data so the Widget can render a degraded-but-functional
+    /// display instead of a blank or opaque error. A subsequent successful
+    /// scan from the main app replaces this placeholder with real data.
+    ///
+    /// This method is intentionally not called for future-schema failures or
+    /// when both files are simply missing — those cases are handled by
+    /// dedicated error paths above.
+    private func autoRebuildUnlocked(
+        reason: String,
+        primaryFailure: SnapshotFileFailure,
+        backupFailure: SnapshotFileFailure
+    ) throws -> SharedSnapshotRead {
+        // Remove unreadable artifacts so `commitUnlocked` starts clean.
+        for url in [primaryURL, backupURL] where fileManager.fileExists(atPath: url.path) {
+            try? fileManager.removeItem(at: url)
+        }
+
+        let nowValue = now()
+        let nowTimestamp = DateFormatting.isoString(from: nowValue)
+
+        let emptyData = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: nowTimestamp,
+            writtenAt: nowTimestamp,
+            lastSuccessfulRefreshAt: nil,
+            scanSummary: ScanSummary(
+                totalRepositories: 0,
+                changedRepositories: 0,
+                totalChangedFiles: 0,
+                errorRepositories: 0
+            ),
+            repositories: [],
+            recentActivityEvents: nil,
+            repositoryUnavailableSinceByPath: nil,
+            storageRevision: 0,
+            persistenceState: .recovered,
+            pendingItemWidgetSummary: nil,
+            appVersion: RepositorySnapshotSchema.currentAppVersion,
+            storageFormatVersion: RepositorySnapshotSchema.storageFormatVersion
+        )
+
+        _ = try commitUnlocked(emptyData, observedStorageRevision: nil)
+
+        // Re-read the freshly committed recovery snapshot.
+        let freshResult = decodeFile(at: primaryURL)
+        guard case .success(let decoded) = freshResult else {
+            throw AppGroupStoreError.recoveryFailed(
+                primary: primaryFailure.description,
+                backup: backupFailure.description
+            )
+        }
+
+        let recovered = decoded.snapshot.downgradedForPersistenceRecovery(
+            reason: reason,
+            state: .recovered
+        )
+        return SharedSnapshotRead(snapshot: recovered, source: .migratedPrimary)
     }
 
     private func decodeFile(at url: URL) -> Result<DecodedFile, SnapshotFileFailure> {
