@@ -24,7 +24,7 @@ struct SnapshotStoreRecoveryTests {
             workspaceKind: nil,
             branch: "main",
             status: .clean,
-            modifiedFileCount: 0,
+            modifiedFileCount: 1,
             addedFileCount: 0,
             deletedFileCount: 0,
             untrackedFileCount: 0,
@@ -34,7 +34,7 @@ struct SnapshotStoreRecoveryTests {
             aheadCount: nil,
             behindCount: nil,
             hasUpstream: nil,
-            changedFileCount: 0,
+            changedFileCount: 1,
             changedFilesPreview: ["\(label).swift"],
             risk: .low,
             lastScannedAt: timestamp,
@@ -346,7 +346,8 @@ struct SnapshotStoreRecoveryTests {
         let feed = ActivityTimelineFeed(state: .neverScanned, items: [])
         let entry = WidgetEntry.content(snapshot: snapshot, feed: feed)
 
-        #expect(entry.loadState == .loadFailed)
+        // Recovered snapshot is loadable (.ready) with degraded trust assessment.
+        #expect(entry.loadState == .ready)
         #expect(entry.loadFailure != nil)
         #expect(entry.loadFailure?.title == "数据已恢复")
     }

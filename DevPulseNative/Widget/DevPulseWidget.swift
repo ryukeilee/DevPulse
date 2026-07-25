@@ -177,23 +177,22 @@ struct WidgetEntry: TimelineEntry {
     static func content(snapshot: AppGroupData,
                         feed: ActivityTimelineFeed) -> WidgetEntry {
         let trustAssessment = RefreshStatusFormatter.snapshotAssessment(snapshot: snapshot)
-        let adjustedLoadState: WidgetLoadState
-        if snapshot.persistenceState == .recovered || snapshot.persistenceState == .migrated {
-            // A recovered or migrated snapshot should be treated as degraded
-            // rather than stale — the data was reconstructed from backup,
-            // not verified by a fresh scan. This ensures the widget shows
-            // an appropriate recovery indicator instead of appearing normal.
-            adjustedLoadState = .loadFailed
-        } else {
-            adjustedLoadState = .ready
-        }
+        // Recovered or migrated snapshots ARE loadable — the data was
+        // reconstructed from backup or migrated from an older schema.
+        // The trust assessment (below) correctly captures the degraded
+        // freshness, so the widget shows recovery context without
+        // pretending no data was loaded.
+        let adjustedLoadState: WidgetLoadState = .ready
+
+        let isDegraded = snapshot.persistenceState == .recovered
+            || snapshot.persistenceState == .migrated
 
         return WidgetEntry(
             date: Date(),
             snapshot: snapshot,
             feed: feed,
             loadState: adjustedLoadState,
-            loadFailure: adjustedLoadState == .loadFailed
+            loadFailure: isDegraded
                 ? WidgetLoadFailurePresentation(
                     title: snapshot.persistenceState == .recovered
                         ? "数据已恢复"

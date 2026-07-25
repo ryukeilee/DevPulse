@@ -1429,6 +1429,11 @@ final class ScanScheduler: ObservableObject {
                 return
             }
 
+            // Wake-triggered scan should not depend on backgroundScanningEnabled.
+            // The background flag controls the periodic timer, not lifecycle
+            // events. After sleep the snapshot may be stale regardless of
+            // whether background scanning was requested, so we always
+            // evaluate the wake refresh decision directly.
             let decision = ScanSchedulerPolicy.wakeRefreshDecision(
                 lastScanAt: lastSuccessfulRefreshAt,
                 refreshPhase: refreshPhase,
@@ -1437,7 +1442,7 @@ final class ScanScheduler: ObservableObject {
                 refreshCompletedAt: diagnostics.lastRefreshCompletedAt,
                 now: now
             )
-            if backgroundScanningEnabled, decision.shouldRefreshImmediately {
+            if decision.shouldRefreshImmediately {
                 // When a full scan is needed, skip individual path-level
                 // retries — the full scan will handle all repositories.
                 // This prevents the scan from being blocked by retries.
