@@ -372,6 +372,9 @@ struct RefreshEngineIntegrationTests {
             .filter { $0.arguments.first == "status" }
             .map { $0.workingDirectory }
 
+        // Freshly-created repos have HEAD/index mtimes equal to last scan time, so the
+        // fast filesystem skip (< strict comparison) does not apply here.
+        // All 3 repos are read in priority order.
         #expect(statusPaths.count == 3, "Expected 3 status calls, got \(statusPaths.count)")
 
         if statusPaths.count == 3 {

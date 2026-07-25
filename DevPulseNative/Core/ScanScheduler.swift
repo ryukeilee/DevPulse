@@ -1499,8 +1499,11 @@ final class ScanScheduler: ObservableObject {
             source: source
         )
         if let deferredScanRefresh {
-            mergedRequest = deferredScanRefresh.merging(
-                forceRepositoryDiscovery: forceRepositoryDiscovery,
+            // Use incoming source to preserve retry semantics: merging() may upcast
+            // the source via rawValue comparison (e.g. .configuration over .timer),
+            // causing enqueueScanRequest to incorrectly set waitsForRepositoryRetries.
+            mergedRequest = DeferredScanRefresh(
+                forceRepositoryDiscovery: deferredScanRefresh.forceRepositoryDiscovery || forceRepositoryDiscovery,
                 source: source
             )
         }
@@ -3350,6 +3353,8 @@ final class ScanScheduler: ObservableObject {
         pendingItemsLoadingAttempted = false
         pendingItems = []
         pendingItemWidgetSummary = .empty()
+        workspaceLoadingAttempted = false
+        workspaces = []
     }
 
     private func startMemoryPressureMonitoring() {

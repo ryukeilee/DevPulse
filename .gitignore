@@ -71,3 +71,4 @@ Thumbs.db
 
 # AI agent session artifacts
 pi-session-*.html
+.pi/

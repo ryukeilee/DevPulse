@@ -31,6 +31,7 @@ struct ScanMetrics: Sendable, Equatable {
     let discoveryElapsed: TimeInterval
     let discoveredRepositoryCount: Int
     let repositoryReadCount: Int
+    let repositorySkippedCount: Int
     let reusedRepositorySnapshotCount: Int
     let gitCommandCount: Int
     let gitStatusCommandCount: Int
@@ -65,6 +66,7 @@ final class ScanMetricsCollector: @unchecked Sendable {
         var discoveryElapsed: TimeInterval = 0
         var discoveredRepositoryCount = 0
         var repositoryReadCount = 0
+        var repositorySkippedCount = 0
         var reusedRepositorySnapshotCount = 0
         var gitCommandCount = 0
         var gitStatusCommandCount = 0
@@ -158,6 +160,13 @@ final class ScanMetricsCollector: @unchecked Sendable {
         lock.unlock()
     }
 
+    func recordRepositorySkipped(count: Int = 1) {
+        guard count > 0 else { return }
+        lock.lock()
+        state.repositorySkippedCount += count
+        lock.unlock()
+    }
+
     func recordReusedRepositorySnapshot(count: Int = 1) {
         guard count > 0 else { return }
         lock.lock()
@@ -225,6 +234,7 @@ final class ScanMetricsCollector: @unchecked Sendable {
             discoveryElapsed: snapshotState.discoveryElapsed,
             discoveredRepositoryCount: snapshotState.discoveredRepositoryCount,
             repositoryReadCount: snapshotState.repositoryReadCount,
+            repositorySkippedCount: snapshotState.repositorySkippedCount,
             reusedRepositorySnapshotCount: snapshotState.reusedRepositorySnapshotCount,
             gitCommandCount: snapshotState.gitCommandCount,
             gitStatusCommandCount: snapshotState.gitStatusCommandCount,

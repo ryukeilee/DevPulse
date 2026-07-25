@@ -312,13 +312,19 @@ struct RepositoryHealthEngineTests {
     }
 
     @Test func testSufficientHistoryNoSignals() {
-        let entries = (0..<5).map { i in
-            RepositoryHistoryEntry(
+        // Use dates within the last 2 days to avoid stale activity threshold (> 7 days)
+        let now = Date()
+        let calendar = Calendar(identifier: .gregorian)
+        let formatter = ISO8601DateFormatter()
+        var entries: [RepositoryHistoryEntry] = []
+        for i in 0..<5 {
+            let date = calendar.date(byAdding: .hour, value: -i * 2, to: now) ?? now
+            entries.append(RepositoryHistoryEntry(
                 repositoryID: "repo1",
-                recordedAt: "2026-07-\(String(format: "%02d", 22 - i))T10:00:00Z",
+                recordedAt: formatter.string(from: date),
                 kind: .scanRecord,
                 state: HistoryStatePoint(snapshot: makeSnapshot(name: "test", branch: "main", changedCount: 0))
-            )
+            ))
         }
 
         let assessment = RepositoryHealthEngine.assess(

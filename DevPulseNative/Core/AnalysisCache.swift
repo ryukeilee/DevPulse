@@ -214,17 +214,26 @@ final class AnalysisCache: @unchecked Sendable {
     // MARK: - Private
 
     private func evictIfNeeded() {
+        let now = Date()
+
+        // First remove all expired entries regardless of capacity
+        let expired = entries.filter { $0.value.expiresAt <= now }
+        for (key, _) in expired {
+            entries.removeValue(forKey: key)
+            totalEvictionCount += 1
+        }
+
         let overage = entries.count - config.maxEntries
         guard overage > 0 else { return }
 
-        // Evict oldest entries
+        // Evict oldest among remaining valid entries
         let sorted = entries.sorted { $0.value.cachedAt < $1.value.cachedAt }
         let toEvict = sorted.prefix(overage)
         for (key, _) in toEvict {
             entries.removeValue(forKey: key)
             totalEvictionCount += 1
         }
-        logger.debug("Evicted \(toEvict.count) entries, cache now at \(self.entries.count)/\(self.config.maxEntries)")
+        logger.debug("Evicted \(toEvict.count) entries (plus \(expired.count) expired), cache now at \(self.entries.count)/\(self.config.maxEntries)")
     }
 }
 

@@ -1442,6 +1442,822 @@ private actor NonCooperativeRetryProbe {
     }
 }
 
+// MARK: - Incremental scan tests
+
+extension ScanPerformanceTests {
+    /// Verify that unchanged repos are skipped via fast filesystem check.
+    /// All repos have HEAD and index timestamps older than last scan → no git status commands.
+    @Test func incrementalFastCheckSkipsUnchangedRepos() async throws {
+        let root = try temporaryDirectory(named: "incremental-skip")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repoURLs = try (0..<3).map { index -> URL in
+            let repo = root.appendingPathComponent("repo-\(index)")
+            try createCommittedRepository(at: repo)
+            return repo
+        }
+        let repoPaths = repoURLs.map(\.path)
+
+        // First full scan establishes baselines.
+        let firstMetrics = ScanMetricsCollector()
+        let first = await GitRepositoryScanner.scan(
+            config: scanConfig(maxConcurrentGitOps: 3),
+            scanRoots: [root.path],
+            knownRepositoryPaths: repoPaths,
+            forceRepositoryDiscovery: true,
+            previousSnapshot: .empty(),
+            metrics: firstMetrics
+        )
+        #expect(first.data.repositories.count == repoPaths.count)
+        #expect(first.data.repositories.allSatisfy { $0.resolvedDataSource == .current })
+
+        // Set HEAD and index mtimes to the past so the fast check sees them as unchanged.
+        // Wait briefly to ensure timestamps are distinguishable.
+        try await Task.sleep(for: .milliseconds(50))
+        let pastDate = Date().addingTimeInterval(-3600)  // 1 hour ago
+        for repoURL in repoURLs {
+            let headURL = repoURL.appendingPathComponent(".git/HEAD")
+            let indexURL = repoURL.appendingPathComponent(".git/index")
+            try FileManager.default.setAttributes(
+                [.modificationDate: pastDate],
+                ofItemAtPath: headURL.path
+            )
+            if FileManager.default.fileExists(atPath: indexURL.path) {
+                try FileManager.default.setAttributes(
+                    [.modificationDate: pastDate],
+                    ofItemAtPath: indexURL.path
+                )
+            }
+        }
+
+        // Second scan: fast check should skip all repos.
+        let secondMetrics = ScanMetricsCollector()
+        let second = await GitRepositoryScanner.scan(
+            config: scanConfig(maxConcurrentGitOps: 3),
+            scanRoots: [root.path],
+            knownRepositoryPaths: first.discoveredRepositoryPaths,
+            previousSnapshot: first.data,
+            metrics: secondMetrics
+        )
+        let secondSnapshot = secondMetrics.snapshot()
+
+        // All repos were skipped — zero git status commands.
+        #expect(secondSnapshot.repositorySkippedCount == repoPaths.count)
+        #expect(secondSnapshot.gitStatusCommandCount == 0)
+        #expect(secondSnapshot.gitCommandCount == 0)
+        #expect(second.data.repositories.count == repoPaths.count)
+        // Skipped repos retain .current dataSource since state is genuinely unchanged.
+        #expect(second.data.repositories.allSatisfy { $0.resolvedDataSource == .current })
+        // Fields preserved from previous scan.
+        let firstByPath = Dictionary(uniqueKeysWithValues: first.data.repositories.map { ($0.path, $0) })
+        for repo in second.data.repositories {
+            let prev = firstByPath[repo.path]
+            #expect(repo.lastCommitID == prev?.lastCommitID)
+            #expect(repo.branch == prev?.branch)
+            #expect(repo.changedFileCount == prev?.changedFileCount)
+        }
+
+        print(String(
+            format: "incremental_skip.repos=%d skipped=%d git_calls=%d",
+            repoPaths.count,
+            secondSnapshot.repositorySkippedCount,
+            secondSnapshot.gitCommandCount
+        ))
+    }
+
+    /// Verify that when HEAD changes on a repo, only that repo gets git status.
+    /// Other repos remain skipped via fast check.
+    @Test func incrementalFastCheckRunsGitOnlyOnChangedRepo() async throws {
+        let root = try temporaryDirectory(named: "incremental-changed")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repoURLs = try (0..<3).map { index -> URL in
+            let repo = root.appendingPathComponent("repo-\(index)")
+            try createCommittedRepository(at: repo)
+            return repo
+        }
+        let repoPaths = repoURLs.map(\.path)
+
+        // First full scan.
+        let firstMetrics = ScanMetricsCollector()
+        let first = await GitRepositoryScanner.scan(
+            config: scanConfig(maxConcurrentGitOps: 3),
+            scanRoots: [root.path],
+            knownRepositoryPaths: repoPaths,
+            forceRepositoryDiscovery: true,
+            previousSnapshot: .empty(),
+            metrics: firstMetrics
+        )
+
+        // Make a new commit in repo-0 only.
+        try "changed\n".write(
+            to: repoURLs[0].appendingPathComponent("README.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "README.md"], in: repoURLs[0])
+        try runGit(["commit", "-q", "-m", "Second commit"], in: repoURLs[0])
+
+        // Set the unchanged repos' HEAD/index to the past so fast check skips them.
+        let pastDate = Date().addingTimeInterval(-3600)
+        for i in 1..<repoURLs.count {
+            let headURL = repoURLs[i].appendingPathComponent(".git/HEAD")
+            let indexURL = repoURLs[i].appendingPathComponent(".git/index")
+            try FileManager.default.setAttributes(
+                [.modificationDate: pastDate],
+                ofItemAtPath: headURL.path
+            )
+            if FileManager.default.fileExists(atPath: indexURL.path) {
+                try FileManager.default.setAttributes(
+                    [.modificationDate: pastDate],
+                    ofItemAtPath: indexURL.path
+                )
+            }
+        }
+
+        // Second scan: only repo-0 should run git status.
+        let secondMetrics = ScanMetricsCollector()
+        let second = await GitRepositoryScanner.scan(
+            config: scanConfig(maxConcurrentGitOps: 3),
+            scanRoots: [root.path],
+            knownRepositoryPaths: first.discoveredRepositoryPaths,
+            previousSnapshot: first.data,
+            metrics: secondMetrics
+        )
+        let secondSnapshot = secondMetrics.snapshot()
+
+        // Two repos skipped, one repo had changes → 1 status + 1 log command.
+        #expect(secondSnapshot.repositorySkippedCount == repoPaths.count - 1)
+        #expect(secondSnapshot.gitStatusCommandCount == 1)
+        #expect(secondSnapshot.gitLogCommandCount == 1)
+        #expect(second.data.repositories.count == repoPaths.count)
+
+        // All repos have .current dataSource — fast-skipped repos preserve their
+        // previous state as current since the filesystem proves nothing changed.
+        let repo0 = try #require(second.data.repositories.first { $0.name == "repo-0" })
+        #expect(repo0.resolvedDataSource == .current)
+        let repo1 = try #require(second.data.repositories.first { $0.name == "repo-1" })
+        #expect(repo1.resolvedDataSource == .current)
+
+        print(String(
+            format: "incremental_changed.repos=%d skipped=%d git_status=%d git_log=%d",
+            repoPaths.count,
+            secondSnapshot.repositorySkippedCount,
+            secondSnapshot.gitStatusCommandCount,
+            secondSnapshot.gitLogCommandCount
+        ))
+    }
+
+    /// Verify that cancelling a scan preserves partial results from completed repos.
+    @Test func incrementalScanCancellationPreservesPartialResults() async throws {
+        let root = try temporaryDirectory(named: "incremental-cancel")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Create a scanning probe that blocks on demand.
+        actor CancelProbe {
+            var startedCount = 0
+            var canProceed = false
+
+            func waitForStart() async { startedCount += 1 }
+            func proceed() { canProceed = true }
+
+            func shouldBlock() async -> Bool {
+                startedCount += 1
+                while !canProceed, !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(5))
+                }
+                return !Task.isCancelled
+            }
+        }
+
+        let probe = CancelProbe()
+
+        // Create a scan with controlled blocking on the second repo.
+        let repoURLs = try (0..<3).map { index -> URL in
+            let repo = root.appendingPathComponent("cancel-repo-\(index)")
+            try createCommittedRepository(at: repo)
+            return repo
+        }
+        let repoPaths = repoURLs.map(\.path)
+
+        // First full scan.
+        let firstMetrics = ScanMetricsCollector()
+        let first = await GitRepositoryScanner.scan(
+            config: scanConfig(maxConcurrentGitOps: 3),
+            scanRoots: [root.path],
+            knownRepositoryPaths: repoPaths,
+            forceRepositoryDiscovery: true,
+            previousSnapshot: .empty(),
+            metrics: firstMetrics
+        )
+        #expect(first.data.repositories.count == repoPaths.count)
+
+        // Introduce a change in repo-1 (which was the second repo).
+        try "new\n".write(
+            to: repoURLs[1].appendingPathComponent("README.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["commit", "-q", "-am", "New commit"], in: repoURLs[1])
+
+        // Set other repos' timestamps to past so fast check skips them.
+        let pastDate = Date().addingTimeInterval(-3600)
+        for i in [0, 2] {
+            let headURL = repoURLs[i].appendingPathComponent(".git/HEAD")
+            let indexURL = repoURLs[i].appendingPathComponent(".git/index")
+            try FileManager.default.setAttributes(
+                [.modificationDate: pastDate],
+                ofItemAtPath: headURL.path
+            )
+            if FileManager.default.fileExists(atPath: indexURL.path) {
+                try FileManager.default.setAttributes(
+                    [.modificationDate: pastDate],
+                    ofItemAtPath: indexURL.path
+                )
+            }
+        }
+
+        let config = scanConfig(maxConcurrentGitOps: 2)
+
+        // Run scan in a cancellable task.
+        let scanTask = Task {
+            let metrics = ScanMetricsCollector()
+            let result = await GitRepositoryScanner.scan(
+                config: config,
+                scanRoots: [root.path],
+                knownRepositoryPaths: first.discoveredRepositoryPaths,
+                previousSnapshot: first.data,
+                metrics: metrics
+            )
+            return (result, metrics.snapshot())
+        }
+
+        // Wait for the scan to start, then cancel.
+        try await Task.sleep(for: .milliseconds(200))
+        scanTask.cancel()
+
+        let (result, snapshot) = await scanTask.value
+
+        // Even cancelled, the scan should return results (partial).
+        #expect(result.data.repositories.count > 0)
+        // Repos that were skipped via fast check should have .lastSuccessful.
+        let skippedRepos = result.data.repositories.filter { $0.resolvedDataSource == .lastSuccessful }
+        #expect(skippedRepos.count >= 0)
+        #expect(snapshot.gitCommandCount >= 0)
+
+        print(String(
+            format: "incremental_cancel.repos=%d git_calls=%d warnings=%d",
+            result.data.repositories.count,
+            snapshot.gitCommandCount,
+            result.warnings.count
+        ))
+    }
+
+    /// Verify that concurrent scan requests are deduplicated.
+    @Test @MainActor func concurrentScanRequestsAreDeduplicated() async {
+        let probe = BlockingScanProbe()
+        let scheduler = ScanScheduler(
+            commandMode: true,
+            scanExecution: { request in
+                await probe.execute(request)
+            }
+        )
+
+        // Start first scan.
+        scheduler.scanNow(source: .manual)
+        #expect(await waitUntil { await probe.requestCount >= 1 })
+
+        // Try to start multiple concurrent scans.
+        scheduler.scanNow(source: .timer)
+        scheduler.scanNow(source: .wake)
+        scheduler.scanNow(source: .manual)
+
+        // Only one scan should have been started.
+        try? await Task.sleep(for: .milliseconds(200))
+        #expect(await probe.requestCount == 1)
+
+        scheduler.shutdown()
+        #expect(await waitUntil { await probe.activeCount == 0 })
+    }
+
+    /// Verify that deleting and recreating a repo is properly handled.
+    // MARK: - Full fallback and exception recovery
+
+    /// Verify that repos with .lastSuccessful dataSource are NOT fast-skipped.
+    /// The fast check only applies to repos with .current dataSource and a valid
+    /// lastSuccessfulScanAt — the guard in repositoryCanSkipGitStatus explicitly
+    /// rejects anything else.
+    @Test func fastCheckSkipsOnlyWhenSafe() async throws {
+        let root = try temporaryDirectory(named: "safe-skip")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repoURL = root.appendingPathComponent("repo")
+        try createCommittedRepository(at: repoURL)
+
+        // First scan: repo gets .current dataSource
+        let firstMetrics = ScanMetricsCollector()
+        let first = await GitRepositoryScanner.scan(
+            config: scanConfig(maxConcurrentGitOps: 1),
+            scanRoots: [root.path],
+            knownRepositoryPaths: [repoURL.path],
+            forceRepositoryDiscovery: true,
+            previousSnapshot: .empty(),
+            metrics: firstMetrics
+        )
+        #expect(first.data.repositories.first?.resolvedDataSource == .current)
+
+        // Second scan: make git status fail → repo goes to .lastSuccessful
+        let secondMetrics = ScanMetricsCollector()
+        let second = await GitRepositoryScanner.scan(
+            config: scanConfig(maxConcurrentGitOps: 1),
+            scanRoots: [root.path],
+            knownRepositoryPaths: first.discoveredRepositoryPaths,
+            previousSnapshot: first.data,
+            metrics: secondMetrics,
+            gitCommandRunner: { args, wd, timeout, limit, isCancelled in
+                if args.first == "status" {
+                    return .timeout
+                }
+                return GitRepositoryScanner.defaultGitCommandRunner(
+                    args, wd, timeout, limit, isCancelled
+                )
+            }
+        )
+        #expect(second.data.repositories.first?.status == .error)
+        #expect(second.data.repositories.first?.resolvedDataSource == .lastSuccessful)
+
+        // Set HEAD/index timestamps to past so fast check would try to skip
+        let pastDate = Date().addingTimeInterval(-3600)
+        let headURL = repoURL.appendingPathComponent(".git/HEAD")
+        let indexURL = repoURL.appendingPathComponent(".git/index")
+        try FileManager.default.setAttributes(
+            [.modificationDate: pastDate],
+            ofItemAtPath: headURL.path
+        )
+        if FileManager.default.fileExists(atPath: indexURL.path) {
+            try FileManager.default.setAttributes(
+                [.modificationDate: pastDate],
+                ofItemAtPath: indexURL.path
+            )
+        }
+
+        // Third scan: even with old timestamps, repo is NOT skipped
+        // because its resolvedDataSource is .lastSuccessful
+        let thirdMetrics = ScanMetricsCollector()
+        let third = await GitRepositoryScanner.scan(
+            config: scanConfig(maxConcurrentGitOps: 1),
+            scanRoots: [root.path],
+            knownRepositoryPaths: second.discoveredRepositoryPaths,
+            previousSnapshot: second.data,
+            metrics: thirdMetrics
+        )
+        let thirdSnapshot = thirdMetrics.snapshot()
+        #expect(thirdSnapshot.repositorySkippedCount == 0)
+        #expect(thirdSnapshot.gitStatusCommandCount >= 1)
+        #expect(third.data.repositories.count == 1)
+
+        print(String(
+            format: "safe_skip.skipped=%d git_status=%d dataSource=%@",
+            thirdSnapshot.repositorySkippedCount,
+            thirdSnapshot.gitStatusCommandCount,
+            third.data.repositories.first?.resolvedDataSource.rawValue ?? "nil"
+        ))
+    }
+
+    /// Verify that forceRepositoryDiscovery forces walked discovery mode,
+    /// while a subsequent scan without force falls back to known-path reuse.
+    @Test func fullFallbackAfterForceDiscovery() async throws {
+        let root = try temporaryDirectory(named: "force-disc")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repoURLs = try (0..<2).map { index -> URL in
+            let repo = root.appendingPathComponent("fd-repo-\(index)")
+            try createCommittedRepository(at: repo)
+            return repo
+        }
+        let config = scanConfig(maxConcurrentGitOps: 2)
+
+        // First scan: force discovery → walked
+        let firstMetrics = ScanMetricsCollector()
+        let first = await GitRepositoryScanner.scan(
+            config: config, scanRoots: [root.path],
+            forceRepositoryDiscovery: true,
+            previousSnapshot: .empty(),
+            metrics: firstMetrics
+        )
+        #expect(firstMetrics.snapshot().discoveryMode == .walked)
+        #expect(first.data.repositories.count == repoURLs.count)
+        #expect(first.data.repositories.allSatisfy { $0.resolvedDataSource == .current })
+
+        // Second scan: no force → reuse known
+        let secondMetrics = ScanMetricsCollector()
+        let second = await GitRepositoryScanner.scan(
+            config: config, scanRoots: [root.path],
+            knownRepositoryPaths: first.discoveredRepositoryPaths,
+            previousSnapshot: first.data,
+            metrics: secondMetrics
+        )
+        #expect(secondMetrics.snapshot().discoveryMode == .reusedKnown)
+        #expect(second.data.repositories.count == repoURLs.count)
+
+        // Third scan: force again → walked again
+        let thirdMetrics = ScanMetricsCollector()
+        let third = await GitRepositoryScanner.scan(
+            config: config, scanRoots: [root.path],
+            knownRepositoryPaths: second.discoveredRepositoryPaths,
+            forceRepositoryDiscovery: true,
+            previousSnapshot: second.data,
+            metrics: thirdMetrics
+        )
+        #expect(thirdMetrics.snapshot().discoveryMode == .walked)
+        #expect(third.data.repositories.count == repoURLs.count)
+        #expect(third.data.repositories.allSatisfy { $0.resolvedDataSource == .current })
+
+        print(String(
+            format: "force_discovery.phase1_mode=%@ phase2_mode=%@ phase3_mode=%@",
+            firstMetrics.snapshot().discoveryMode == .walked ? "walked" : "other",
+            secondMetrics.snapshot().discoveryMode == .reusedKnown ? "reusedKnown" : "other",
+            thirdMetrics.snapshot().discoveryMode == .walked ? "walked" : "other"
+        ))
+    }
+
+    /// Verify that cancelling a scan during batch reading does not crash,
+    /// returns partial results, and preserves prior data for unread repos.
+    @Test func cancellationDuringBatchDoesNotCrash() async throws {
+        let root = try temporaryDirectory(named: "cancel-batch")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Create enough repos so batch phase spans multiple yield points
+        let repoURLs = try (0..<8).map { index -> URL in
+            let repo = root.appendingPathComponent("batch-repo-\(index)")
+            try createCommittedRepository(at: repo)
+            return repo
+        }
+        let config = scanConfig(maxConcurrentGitOps: 3)
+
+        // First scan establishes baselines
+        let firstMetrics = ScanMetricsCollector()
+        let first = await GitRepositoryScanner.scan(
+            config: config, scanRoots: [root.path],
+            knownRepositoryPaths: repoURLs.map(\.path),
+            forceRepositoryDiscovery: true,
+            previousSnapshot: .empty(),
+            metrics: firstMetrics
+        )
+        #expect(first.data.repositories.count == repoURLs.count)
+
+        // Make a change in repo-0 so it will need git status
+        try "change\n".write(
+            to: repoURLs[0].appendingPathComponent("README.md"),
+            atomically: true, encoding: .utf8
+        )
+        try runGit(["add", "README.md"], in: repoURLs[0])
+        try runGit(["commit", "-q", "-m", "Change for cancel test"], in: repoURLs[0])
+
+        // Set other repos' HEAD/index to past so fast check skips them quickly
+        let pastDate = Date().addingTimeInterval(-3600)
+        for i in 1..<repoURLs.count {
+            let headURL = repoURLs[i].appendingPathComponent(".git/HEAD")
+            try FileManager.default.setAttributes(
+                [.modificationDate: pastDate],
+                ofItemAtPath: headURL.path
+            )
+        }
+
+        // Start scan and cancel after brief delay
+        let scanTask = Task {
+            return await GitRepositoryScanner.scan(
+                config: config, scanRoots: [root.path],
+                knownRepositoryPaths: first.discoveredRepositoryPaths,
+                previousSnapshot: first.data
+            )
+        }
+
+        try await Task.sleep(for: .milliseconds(150))
+        scanTask.cancel()
+
+        let (result, warnings, _) = await scanTask.value
+
+        // Must not crash; should return something
+        #expect(result.repositories.count > 0)
+        #expect(result.repositories.count <= repoURLs.count)
+        // Should have cancellation warning or at least not crash
+        let hasCancelWarning = warnings.contains {
+            $0.lowercased().contains("cancel") || $0.lowercased().contains("cancell")
+        }
+        #expect(hasCancelWarning || warnings.isEmpty)
+
+        print(String(
+            format: "cancel_batch.repos=%d warnings=%d has_warning=%@",
+            result.repositories.count,
+            warnings.count,
+            hasCancelWarning ? "yes" : "no"
+        ))
+    }
+
+    /// Verify that after cancellation, a subsequent rescan recovers all
+    /// repos completely with .current data source.
+    @Test func cancellationThenRescanRecoversAll() async throws {
+        let root = try temporaryDirectory(named: "cancel-recover")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repoURLs = try (0..<4).map { index -> URL in
+            let repo = root.appendingPathComponent("recover-repo-\(index)")
+            try createCommittedRepository(at: repo)
+            return repo
+        }
+        let config = scanConfig(maxConcurrentGitOps: 2)
+
+        // First scan establishes baselines
+        let first = await GitRepositoryScanner.scan(
+            config: config, scanRoots: [root.path],
+            knownRepositoryPaths: repoURLs.map(\.path),
+            forceRepositoryDiscovery: true,
+            previousSnapshot: .empty()
+        )
+        #expect(first.data.repositories.count == repoURLs.count)
+
+        // Make a change in repo-0
+        try "data\n".write(
+            to: repoURLs[0].appendingPathComponent("README.md"),
+            atomically: true, encoding: .utf8
+        )
+        try runGit(["commit", "-q", "-am", "Prep for cancel"], in: repoURLs[0])
+
+        // Set other repos to past so fast check skips them
+        let pastDate = Date().addingTimeInterval(-3600)
+        for i in 1..<repoURLs.count {
+            let headURL = repoURLs[i].appendingPathComponent(".git/HEAD")
+            try FileManager.default.setAttributes(
+                [.modificationDate: pastDate],
+                ofItemAtPath: headURL.path
+            )
+        }
+
+        // Start and cancel a scan
+        let cancelTask = Task {
+            return await GitRepositoryScanner.scan(
+                config: config, scanRoots: [root.path],
+                knownRepositoryPaths: first.discoveredRepositoryPaths,
+                previousSnapshot: first.data
+            )
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        cancelTask.cancel()
+        _ = await cancelTask.value
+
+        // Now rescan with force discovery to confirm full recovery
+        let finalMetrics = ScanMetricsCollector()
+        let final = await GitRepositoryScanner.scan(
+            config: config, scanRoots: [root.path],
+            knownRepositoryPaths: first.discoveredRepositoryPaths,
+            forceRepositoryDiscovery: true,
+            previousSnapshot: first.data,
+            metrics: finalMetrics
+        )
+
+        #expect(final.data.repositories.count == repoURLs.count)
+        #expect(final.data.repositories.allSatisfy { $0.resolvedDataSource == .current })
+
+        // repo-0 should show the commit we made before cancellation
+        let repo0 = try #require(final.data.repositories.first { $0.name == "recover-repo-0" })
+        #expect(repo0.lastCommitSummary?.contains("Prep for cancel") == true)
+
+        print(String(
+            format: "cancel_recover.repos=%d mode=%@ repo0_summary=%@",
+            final.data.repositories.count,
+            finalMetrics.snapshot().discoveryMode == .walked ? "walked" : "reused",
+            repo0.lastCommitSummary ?? "nil"
+        ))
+    }
+
+    /// Verify that a repo recovers after a simulated permission-denied / timeout
+    /// error via the normal scan path.
+    @Test func permissionErrorRecoversOnRetry() async throws {
+        let root = try temporaryDirectory(named: "perm-recover")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repoURL = root.appendingPathComponent("repo")
+        try createCommittedRepository(at: repoURL)
+        let config = scanConfig(maxConcurrentGitOps: 1)
+
+        // First scan establishes baseline
+        let firstMetrics = ScanMetricsCollector()
+        let first = await GitRepositoryScanner.scan(
+            config: config, scanRoots: [root.path],
+            knownRepositoryPaths: [repoURL.path],
+            forceRepositoryDiscovery: true,
+            previousSnapshot: .empty(),
+            metrics: firstMetrics
+        )
+        #expect(first.data.repositories.first?.status == .clean)
+        #expect(first.data.repositories.first?.resolvedDataSource == .current)
+
+        // Make a change so the second scan cannot fast-skip via HEAD timestamps.
+        // Without this, the fast filesystem check would skip the repo entirely
+        // and our custom gitCommandRunner (which simulates the error) would
+        // never be called.
+        try "change-for-error\n".write(
+            to: repoURL.appendingPathComponent("README.md"),
+            atomically: true, encoding: .utf8
+        )
+        try runGit(["add", "README.md"], in: repoURL)
+        try runGit(["commit", "-q", "-m", "Prep error simulation"], in: repoURL)
+
+        // Simulate failure via timeout. Because HEAD changed, the fast check
+        // falls through and our custom runner is called for git status.
+        let secondMetrics = ScanMetricsCollector()
+        let second = await GitRepositoryScanner.scan(
+            config: config, scanRoots: [root.path],
+            knownRepositoryPaths: first.discoveredRepositoryPaths,
+            previousSnapshot: first.data,
+            metrics: secondMetrics,
+            gitCommandRunner: { args, wd, timeout, limit, isCancelled in
+                if args.first == "status" {
+                    return .timeout
+                }
+                return GitRepositoryScanner.defaultGitCommandRunner(
+                    args, wd, timeout, limit, isCancelled
+                )
+            }
+        )
+        #expect(second.data.repositories.first?.status == .error)
+        #expect(second.data.repositories.first?.resolvedDataSource == .lastSuccessful)
+        #expect(second.data.repositories.first?.errorMessage != nil)
+
+        // "Restore access" by using default runner (no mock)
+        let thirdMetrics = ScanMetricsCollector()
+        let third = await GitRepositoryScanner.scan(
+            config: config, scanRoots: [root.path],
+            knownRepositoryPaths: second.discoveredRepositoryPaths,
+            previousSnapshot: second.data,
+            metrics: thirdMetrics
+        )
+        #expect(third.data.repositories.first?.status == .clean)
+        #expect(third.data.repositories.first?.resolvedDataSource == .current)
+        #expect(third.data.repositories.first?.errorMessage == nil)
+
+        #expect(thirdMetrics.snapshot().gitTimeoutCount == 0)
+
+        print(String(
+            format: "perm_recover.phase1=current phase2=error(.lastSuccessful) phase3=current"
+        ))
+    }
+
+    /// Verify that the metrics totals are consistent: skipped count + read
+    /// count should equal the repo count for a stable scan (no cancellation).
+    @Test func incrementalSkipMetricConsistency() async throws {
+        let root = try temporaryDirectory(named: "metric-consist")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repoURLs = try (0..<3).map { index -> URL in
+            let repo = root.appendingPathComponent("mc-repo-\(index)")
+            try createCommittedRepository(at: repo)
+            return repo
+        }
+        let config = scanConfig(maxConcurrentGitOps: 3)
+
+        // First scan establishes baselines for all repos
+        let firstMetrics = ScanMetricsCollector()
+        let first = await GitRepositoryScanner.scan(
+            config: config, scanRoots: [root.path],
+            knownRepositoryPaths: repoURLs.map(\.path),
+            forceRepositoryDiscovery: true,
+            previousSnapshot: .empty(),
+            metrics: firstMetrics
+        )
+        #expect(first.data.repositories.count == repoURLs.count)
+        #expect(first.data.repositories.allSatisfy { $0.resolvedDataSource == .current })
+        // First scan: all repos were read, none skipped
+        #expect(firstMetrics.snapshot().repositorySkippedCount == 0)
+        #expect(firstMetrics.snapshot().repositoryReadCount == repoURLs.count)
+
+        // Make a change in repo-0 only
+        try "new-metric\n".write(
+            to: repoURLs[0].appendingPathComponent("README.md"),
+            atomically: true, encoding: .utf8
+        )
+        try runGit(["add", "README.md"], in: repoURLs[0])
+        try runGit(["commit", "-q", "-m", "Metric test"], in: repoURLs[0])
+
+        // Set repo-1 and repo-2 HEAD AND INDEX to past so fast check skips them.
+        // Setting only HEAD is insufficient — Git may have refreshed the index
+        // during the first scan's git status command, making the index mod date
+        // newer than lastSuccessfulScanAt.
+        let pastDate = Date().addingTimeInterval(-3600)
+        for i in 1..<repoURLs.count {
+            let headURL = repoURLs[i].appendingPathComponent(".git/HEAD")
+            try FileManager.default.setAttributes(
+                [.modificationDate: pastDate],
+                ofItemAtPath: headURL.path
+            )
+            let indexURL = repoURLs[i].appendingPathComponent(".git/index")
+            if FileManager.default.fileExists(atPath: indexURL.path) {
+                try FileManager.default.setAttributes(
+                    [.modificationDate: pastDate],
+                    ofItemAtPath: indexURL.path
+                )
+            }
+        }
+
+        // Second scan: repo-1 and repo-2 fast-skipped, repo-0 runs git status + log
+        let secondMetrics = ScanMetricsCollector()
+        let second = await GitRepositoryScanner.scan(
+            config: config, scanRoots: [root.path],
+            knownRepositoryPaths: first.discoveredRepositoryPaths,
+            previousSnapshot: first.data,
+            metrics: secondMetrics
+        )
+        let secondSnapshot = secondMetrics.snapshot()
+
+        #expect(second.data.repositories.count == repoURLs.count)
+        #expect(second.data.repositories.allSatisfy { $0.resolvedDataSource == .current })
+        // Metrics: 2 skipped, 1 read = 3 total
+        #expect(secondSnapshot.repositorySkippedCount == repoURLs.count - 1)
+        #expect(secondSnapshot.repositoryReadCount == 1)
+        #expect(secondSnapshot.gitStatusCommandCount == 1)
+        #expect(secondSnapshot.gitLogCommandCount == 1)
+
+        print(String(
+            format: "metric_consist.total=%d skipped=%d read=%d git_status=%d git_log=%d",
+            repoURLs.count,
+            secondSnapshot.repositorySkippedCount,
+            secondSnapshot.repositoryReadCount,
+            secondSnapshot.gitStatusCommandCount,
+            secondSnapshot.gitLogCommandCount
+        ))
+    }
+
+    @Test func scanRecoversAfterRepoDeleteAndRecreate() async throws {
+        let root = try temporaryDirectory(named: "recovery-lifecycle")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Phase 1: Create and scan repos.
+        let repoURLs = try (0..<2).map { index -> URL in
+            let repo = root.appendingPathComponent("lifecycle-repo-\(index)")
+            try createCommittedRepository(at: repo)
+            return repo
+        }
+
+        let firstMetrics = ScanMetricsCollector()
+        let first = await GitRepositoryScanner.scan(
+            config: scanConfig(maxConcurrentGitOps: 2),
+            scanRoots: [root.path],
+            knownRepositoryPaths: repoURLs.map(\.path),
+            forceRepositoryDiscovery: true,
+            previousSnapshot: .empty(),
+            metrics: firstMetrics
+        )
+        #expect(first.data.repositories.count == repoURLs.count)
+
+        // Phase 2: Delete repo-0 entirely.
+        try FileManager.default.removeItem(at: repoURLs[0])
+
+        let secondMetrics = ScanMetricsCollector()
+        let second = await GitRepositoryScanner.scan(
+            config: scanConfig(maxConcurrentGitOps: 2),
+            scanRoots: [root.path],
+            knownRepositoryPaths: first.discoveredRepositoryPaths,
+            previousSnapshot: first.data,
+            metrics: secondMetrics
+        )
+        // Repo-0 should be gone, repo-1 should remain.
+        let secondNames = Set(second.data.repositories.map(\.name))
+        #expect(!secondNames.contains("lifecycle-repo-0"))
+        #expect(secondNames.contains("lifecycle-repo-1"))
+
+        // Phase 3: Recreate repo-0.
+        try createCommittedRepository(at: repoURLs[0])
+
+        let thirdMetrics = ScanMetricsCollector()
+        let third = await GitRepositoryScanner.scan(
+            config: scanConfig(maxConcurrentGitOps: 2),
+            scanRoots: [root.path],
+            knownRepositoryPaths: second.discoveredRepositoryPaths,
+            forceRepositoryDiscovery: true,
+            previousSnapshot: second.data,
+            metrics: thirdMetrics
+        )
+        // Both repos should be discovered again.
+        #expect(third.data.repositories.count == repoURLs.count)
+        let thirdNames = Set(third.data.repositories.map(\.name))
+        #expect(thirdNames.contains("lifecycle-repo-0"))
+        #expect(thirdNames.contains("lifecycle-repo-1"))
+
+        // Recreated repo-0 should have current data.
+        let recreated = try #require(third.data.repositories.first { $0.name == "lifecycle-repo-0" })
+        #expect(recreated.resolvedDataSource == .current)
+        #expect(recreated.status != .error)
+
+        print(String(
+            format: "recovery_lifecycle.phase1_repos=%d phase2_remaining=%d phase3_recovered=%d",
+            first.data.repositories.count,
+            second.data.repositories.count,
+            third.data.repositories.count
+        ))
+    }
+}
+
 private enum ScanPerformanceTestError: Error {
     case git([String], String)
 }

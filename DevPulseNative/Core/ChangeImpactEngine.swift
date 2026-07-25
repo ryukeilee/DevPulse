@@ -87,6 +87,9 @@ actor ChangeImpactEngine {
         var wasCancelled = false
         var timedOut = false
 
+        // Advance cache generation to invalidate previous cycle's entries
+        cache.advanceGeneration()
+
         // Determine which repos to analyze
         let reposToAnalyze: [RepositorySnapshot]
         if forceFull || triggerMode == .afterEveryScan {

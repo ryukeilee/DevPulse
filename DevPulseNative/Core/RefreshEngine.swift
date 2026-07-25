@@ -517,6 +517,29 @@ extension RefreshEngine {
         let concurrency = min(config.maxConcurrentGitOps, paths.count)
         var snapshotsByIndex: [Int: RepositorySnapshot] = [:]
         var counters = (status: 0, timeout: 0, cancelled: 0, failed: 0, peak: 0)
+        var skippedCount = 0
+
+        // Pre-scan: identify repos whose filesystem state hasn't changed
+        var skipIndices = Set<Int>()
+        for (idx, entry) in paths.enumerated() {
+            let canonical = RepositoryIdentity.canonicalPath(entry.path)
+            let lastSuccessfulScanAt: String?
+            if let prev = previousByPath[canonical] {
+                lastSuccessfulScanAt = prev.resolvedDataSource == .current
+                    ? prev.lastSuccessfulScanAt
+                    : nil
+            } else {
+                lastSuccessfulScanAt = entry.previousSnapshot?.lastSuccessfulScanAt
+            }
+            if GitRepositoryScanner.repositoryCanSkipGitStatus(
+                at: canonical,
+                lastSuccessfulScanAt: lastSuccessfulScanAt,
+                previousSnapshot: previousByPath[canonical] ?? entry.previousSnapshot
+            ) {
+                skipIndices.insert(idx)
+                skippedCount += 1
+            }
+        }
 
         // Process in priority order but with bounded concurrency
         await withTaskGroup(of: (Int, ProcessReadResult?).self) { group in
@@ -528,6 +551,45 @@ extension RefreshEngine {
                 let idx = nextIdx
                 let entry = paths[idx]
                 nextIdx += 1
+
+                // Fast skip: reuse previous snapshot without git commands.
+                if skipIndices.contains(idx) {
+                    if let previous = previousByPath[RepositoryIdentity.canonicalPath(entry.path)] {
+                        // Preserve .current dataSource since the repo is genuinely
+                        // unchanged — the fast filesystem check proves it.
+                        let retained = RepositorySnapshot(
+                            id: previous.id, name: previous.name, path: previous.path,
+                            workspaceKind: previous.workspaceKind,
+                            branch: previous.branch, status: previous.status,
+                            modifiedFileCount: previous.modifiedFileCount,
+                            addedFileCount: previous.addedFileCount,
+                            deletedFileCount: previous.deletedFileCount,
+                            untrackedFileCount: previous.untrackedFileCount,
+                            stagedFileCount: previous.stagedFileCount,
+                            unstagedFileCount: previous.unstagedFileCount,
+                            conflictedFileCount: previous.conflictedFileCount,
+                            aheadCount: previous.aheadCount, behindCount: previous.behindCount,
+                            hasUpstream: previous.hasUpstream,
+                            changedFileCount: previous.changedFileCount,
+                            changedFilesPreview: previous.changedFilesPreview,
+                            risk: previous.risk,
+                            lastScannedAt: previous.lastScannedAt,
+                            dataSource: .current,
+                            lastSuccessfulScanAt: previous.lastSuccessfulScanAt,
+                            lastChangedAt: previous.lastChangedAt,
+                            lastCommitID: previous.lastCommitID,
+                            lastCommitSummary: previous.lastCommitSummary,
+                            lastCommitMetadataAvailable: previous.lastCommitMetadataAvailable,
+                            lastActivityAt: previous.lastActivityAt,
+                            errorMessage: nil,
+                            isPinned: previous.isPinned
+                        )
+                        snapshotsByIndex[idx] = retained
+                    }
+                    counters.status += 1
+                    return
+                }
+
                 pendingCount += 1
 
                 let statusGenNum = generation.generation
@@ -567,10 +629,17 @@ extension RefreshEngine {
 
             for _ in 0..<min(concurrency, paths.count) { submit() }
 
+            var yieldCounter = 0
             while let (idx, read) = await group.next() {
                 pendingCount -= 1
                 counters.peak = max(counters.peak, pendingCount + 1)
                 defer { submit() }
+
+                // Periodically yield to keep the UI responsive.
+                yieldCounter += 1
+                if yieldCounter % 8 == 0 {
+                    await Task.yield()
+                }
 
                 // Cross-generation check: if the generation advanced while
                 // we were awaiting, discard the result and stop.
