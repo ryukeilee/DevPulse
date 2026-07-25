@@ -790,6 +790,9 @@ final class ScanScheduler: ObservableObject {
     private var repositoryRetryDrainTask: Task<Void, Never>?
     private var repositoryRetryDrainGeneration = 0
     private var repositoryRetryDrainWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Timeout in seconds for waiting on repository retry drain before
+    /// proceeding with a new scan regardless.
+    private static let repositoryRetryDrainTimeout: TimeInterval = 2.0
     private let activityEventStore: ActivityEventStore?
     let historyStore: RepositoryHistoryStore?
     private var workspaceLoadingAttempted = false
@@ -2115,10 +2118,17 @@ final class ScanScheduler: ObservableObject {
         repositoryRetryTasks.removeAll()
         retryingRepositoryIDs.removeAll()
 
+        // Cancel any ongoing drain task before creating a new one.
+        // This prevents stale drain tasks from holding references
+        // to cancelled retry tasks after the generation has advanced.
+        repositoryRetryDrainTask?.cancel()
+
         repositoryRetryDrainGeneration &+= 1
         let generation = repositoryRetryDrainGeneration
         let drainTask = Task.detached(priority: .utility) { [weak self] in
             for task in tasks {
+                // If the drain task itself was cancelled, stop waiting.
+                guard !Task.isCancelled else { break }
                 await task.value
             }
             await MainActor.run { [weak self] in
@@ -2132,12 +2142,15 @@ final class ScanScheduler: ObservableObject {
         guard repositoryRetryDrainGeneration == generation else { return }
         repositoryRetryDrainTask = nil
         resumeRepositoryRetryDrainWaiters()
+        // After drain completes, resume pending work regardless of
+        // termination — the termination path clears state separately.
         if !terminating {
             startNextCoalescedScanIfNeeded()
             drainPendingRepositoryRefreshes()
         }
     }
 
+    /// Wait for the repository retry drain to complete.
     private func waitForRepositoryRetryDrain() async {
         guard repositoryRetryDrainTask != nil else { return }
         await withCheckedContinuation { continuation in

@@ -306,11 +306,16 @@ enum ProcessRunner {
         guard timeout.isFinite, timeout > 0 else { return .timeout }
         guard outputLimit > 0 else { return .outputLimit }
 
+        // Check cancellation before every I/O operation during setup.
+        guard !isCancelled() else { return .cancelled }
+
         let executablePath = executable ?? gitExecutablePath()
         guard let executablePath,
               FileManager.default.isExecutableFile(atPath: executablePath) else {
             return .unavailable
         }
+
+        guard !isCancelled() else { return .cancelled }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
@@ -331,6 +336,10 @@ enum ProcessRunner {
         }
 
         do {
+            guard !isCancelled() else {
+                stopDraining(stdoutPipe: stdoutPipe, stderrPipe: stderrPipe)
+                return .cancelled
+            }
             try process.run()
         } catch {
             stopDraining(stdoutPipe: stdoutPipe, stderrPipe: stderrPipe)

@@ -91,6 +91,7 @@ targets:
     platform: macOS
     sources:
       - path: DevPulseNativeTests
+      - path: DevPulseNativeTests/ScanConcurrencyTests.swift
       - path: Widget/DevPulseWidget.swift
     settings:
       base:
