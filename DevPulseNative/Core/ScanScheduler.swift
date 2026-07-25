@@ -771,6 +771,7 @@ final class ScanScheduler: ObservableObject {
     nonisolated(unsafe) private var calendarDayChangedObserver: NSObjectProtocol?
     nonisolated(unsafe) private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var lastSystemSleepAt: Date?
+    private var lastWakeScanSubmittedAt: Date?
     private(set) var lastFreshnessRecalculationAt: Date?
     private var refreshCoordinator = ScanRefreshCoordinator()
     private var scanTask: Task<Void, Never>?
@@ -1149,6 +1150,9 @@ final class ScanScheduler: ObservableObject {
     private static let noChangeThreshold2 = 8  // scans w/o change → 20 min
     private static let noChangeThreshold3 = 15 // scans w/o change → maxInterval
     private static let refreshCoalescingNanoseconds: UInt64 = 200_000_000
+    /// Minimum interval between wake-triggered scan submissions.
+    /// Prevents excessive full scans during rapid sleep/wake cycles.
+    private static let minimumWakeScanInterval: TimeInterval = 15
 
     @Published private(set) var config: ScanConfig = .default
 
@@ -1415,6 +1419,16 @@ final class ScanScheduler: ObservableObject {
             )
 
         case .wake:
+            // Throttle wake-triggered scan submissions to prevent repeated
+            // full scans during rapid sleep/wake cycles (e.g. lid close/open
+            // spam). The snapshot freshness check inside the decision already
+            // suppresses scans when data is fresh, but when stale we still
+            // want at most one scan per minimumWakeScanInterval.
+            if let lastWakeScanSubmittedAt,
+               now.timeIntervalSince(lastWakeScanSubmittedAt) < Self.minimumWakeScanInterval {
+                return
+            }
+
             let decision = ScanSchedulerPolicy.wakeRefreshDecision(
                 lastScanAt: lastSuccessfulRefreshAt,
                 refreshPhase: refreshPhase,
@@ -1423,18 +1437,26 @@ final class ScanScheduler: ObservableObject {
                 refreshCompletedAt: diagnostics.lastRefreshCompletedAt,
                 now: now
             )
-            let recoveredCount = requestPathAvailabilityRefreshes(
-                under: nil,
-                isAvailable: true
-            )
-            if backgroundScanningEnabled,
-               !(recoveredCount > 0 && freshness(at: now) == .fresh),
-               decision.shouldRefreshImmediately {
+            if backgroundScanningEnabled, decision.shouldRefreshImmediately {
+                // When a full scan is needed, skip individual path-level
+                // retries — the full scan will handle all repositories.
+                // This prevents the scan from being blocked by retries.
                 submitScanRequest(
                     forceRepositoryDiscovery: decision.forceRepositoryDiscovery,
                     source: .wake,
                     coalescingNanoseconds: Self.refreshCoalescingNanoseconds
                 )
+                lastWakeScanSubmittedAt = now
+            } else {
+                // No full scan needed — only recover individual repos
+                // whose paths were previously unavailable.
+                let recoveredCount = requestPathAvailabilityRefreshes(
+                    under: nil,
+                    isAvailable: true
+                )
+                if recoveredCount > 0, freshness(at: now) == .fresh {
+                    return
+                }
             }
 
         case .pathAvailabilityChanged(let rootPath, let isAvailable):
@@ -1529,9 +1551,16 @@ final class ScanScheduler: ObservableObject {
     private func enqueueScanRequest(_ request: DeferredScanRefresh) {
         guard !terminating else { return }
 
-        let waitsForRepositoryRetries = request.source.isAutomatic
+        // Wake and path-recovery scans must not wait for individual
+        // repository retries — they need a fresh full scan to supersede
+        // stale retry state. All other automatic scans (timer, startup,
+        // etc.) wait for in-flight retries to avoid redundant work.
+        let shouldCancelRetries = !request.source.isAutomatic
+            || request.source == .wake
+            || request.source == .pathRecovery
+        let waitsForRepositoryRetries = !shouldCancelRetries
             && (!repositoryRetryTasks.isEmpty || repositoryRetryDrainTask != nil)
-        if !waitsForRepositoryRetries {
+        if shouldCancelRetries {
             cancelRepositoryRetries()
         }
         // Lightweight signature from configured paths, no file-system access.
