@@ -432,7 +432,22 @@ actor SelfHealingRunner {
                 operation: { await Self.measuredCheck(.pendingItemStore, Self.pendingItemStoreCheck()) },
                 deadline: &deadline
             )
-            if case .success(let pendingCheck) = pendingResult { checks.append(pendingCheck) }
+            if case .success(let pendingCheck) = pendingResult {
+                checks.append(pendingCheck)
+                if pendingCheck.recovered { recoveredCount += 1 }
+            }
+        }
+
+        // Phase 11: Pending item notification store
+        if budgetRemaining() {
+            let notifResult = await recoveryContext.run(
+                operation: { await Self.measuredCheck(.pendingItemNotificationStore, Self.pendingItemNotificationStoreCheck()) },
+                deadline: &deadline
+            )
+            if case .success(let notifCheck) = notifResult {
+                checks.append(notifCheck)
+                if notifCheck.recovered { recoveredCount += 1 }
+            }
         }
 
         return finalize(checks: checks, recoveredCount: recoveredCount,
@@ -736,15 +751,67 @@ actor SelfHealingRunner {
                 durationMs: 0
             )
         case .failure(let error):
-            // Attempt recovery by re-creating the store
+            // Attempt recovery by replacing the corrupt file with an empty archive.
+            // Invalidate the in-memory cache first so the next load re-reads from disk.
             store.invalidateCache()
+            // Write an empty archive to disk to replace the corrupt file.
+            let emptyArchive = PendingItemArchive()
+            let saveResult = store.save(emptyArchive)
+            switch saveResult {
+            case .success:
+                return CheckReport(
+                    category: .pendingItemStore,
+                    passed: false,
+                    detail: "Pending item store corrupt: \(error.localizedDescription). Replaced with empty archive.",
+                    recovered: true,
+                    durationMs: 0
+                )
+            case .failure(let saveError):
+                return CheckReport(
+                    category: .pendingItemStore,
+                    passed: false,
+                    detail: "Pending item store failed: \(error.localizedDescription), recovery save failed: \(saveError.localizedDescription).",
+                    recovered: false,
+                    durationMs: 0
+                )
+            }
+        }
+    }
+
+    private static func pendingItemNotificationStoreCheck() -> CheckReport {
+        let store = PendingItemNotificationStore.live()
+        switch store.load() {
+        case .success:
             return CheckReport(
-                category: .pendingItemStore,
-                passed: false,
-                detail: "Pending item store failed: \(error.localizedDescription). Cache invalidated.",
-                recovered: true,
+                category: .pendingItemNotificationStore,
+                passed: true,
+                detail: "Pending item notification store loaded successfully",
+                recovered: false,
                 durationMs: 0
             )
+        case .failure(let error):
+            // Attempt recovery by replacing the corrupt file with an empty archive.
+            store.invalidateCache()
+            let emptyArchive = PendingItemNotificationArchive()
+            let saveResult = store.save(emptyArchive)
+            switch saveResult {
+            case .success:
+                return CheckReport(
+                    category: .pendingItemNotificationStore,
+                    passed: false,
+                    detail: "Pending item notification store corrupt: \(error.localizedDescription). Replaced with empty archive.",
+                    recovered: true,
+                    durationMs: 0
+                )
+            case .failure(let saveError):
+                return CheckReport(
+                    category: .pendingItemNotificationStore,
+                    passed: false,
+                    detail: "Pending item notification store failed: \(error.localizedDescription), recovery save failed: \(saveError.localizedDescription).",
+                    recovered: false,
+                    durationMs: 0
+                )
+            }
         }
     }
 

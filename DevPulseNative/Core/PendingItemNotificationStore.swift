@@ -82,14 +82,25 @@ final class PendingItemNotificationStore: @unchecked Sendable {
                 data = try Data(contentsOf: fileURL)
             } catch {
                 logger.warning("pending notif read failed, recovering: \(error.localizedDescription)")
+                logger.warning("replacing corrupt notification file with empty archive")
                 let empty = PendingItemNotificationArchive()
+                // Persist the empty archive to disk so the same corrupt data
+                // is not re-read on the next load.
+                if case .failure(let writeError) = saveUnsafe(empty) {
+                    logger.error("failed to replace corrupt notification file: \(writeError.localizedDescription)")
+                }
                 cachedArchive = empty
                 return .success(empty)
             }
 
             guard let archive = try? JSONDecoder().decode(PendingItemNotificationArchive.self, from: data) else {
-                logger.warning("pending notif decode failed, recovering with empty")
+                logger.warning("pending notif decode failed, recovering with empty — replacing corrupt file")
                 let empty = PendingItemNotificationArchive()
+                // Persist the empty archive to disk so the same corrupt data
+                // is not re-read on the next load.
+                if case .failure(let writeError) = saveUnsafe(empty) {
+                    logger.error("failed to replace corrupt notification file: \(writeError.localizedDescription)")
+                }
                 cachedArchive = empty
                 return .success(empty)
             }

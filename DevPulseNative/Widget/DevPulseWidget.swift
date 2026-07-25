@@ -177,13 +177,34 @@ struct WidgetEntry: TimelineEntry {
     static func content(snapshot: AppGroupData,
                         feed: ActivityTimelineFeed) -> WidgetEntry {
         let trustAssessment = RefreshStatusFormatter.snapshotAssessment(snapshot: snapshot)
+        let adjustedLoadState: WidgetLoadState
+        if snapshot.persistenceState == .recovered || snapshot.persistenceState == .migrated {
+            // A recovered or migrated snapshot should be treated as degraded
+            // rather than stale — the data was reconstructed from backup,
+            // not verified by a fresh scan. This ensures the widget shows
+            // an appropriate recovery indicator instead of appearing normal.
+            adjustedLoadState = .loadFailed
+        } else {
+            adjustedLoadState = .ready
+        }
 
         return WidgetEntry(
             date: Date(),
             snapshot: snapshot,
             feed: feed,
-            loadState: .ready,
-            loadFailure: nil,
+            loadState: adjustedLoadState,
+            loadFailure: adjustedLoadState == .loadFailed
+                ? WidgetLoadFailurePresentation(
+                    title: snapshot.persistenceState == .recovered
+                        ? "数据已恢复"
+                        : "数据已迁移",
+                    detail: snapshot.persistenceState == .recovered
+                        ? "共享快照已从备份恢复，需要重新扫描确认最新状态。"
+                        : "共享快照已从旧版迁移，需要重新扫描确认最新状态。",
+                    icon: "clock.arrow.circlepath",
+                    footerText: "正在等待刷新…"
+                )
+                : nil,
             trustAssessment: trustAssessment
         )
     }

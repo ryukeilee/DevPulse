@@ -420,7 +420,16 @@ final class RepositoryHistoryStore: @unchecked Sendable {
             }
             return .success(fresh)
         } catch {
-            return .failure(.readFailed(error.localizedDescription))
+            // I/O read failure — attempt recovery by starting fresh
+            logger.warning("history archive read failed, recovering: \(error.localizedDescription)")
+            _diagnostics.lastRecoveryCount = (_diagnostics.lastRecoveryCount ?? 0) + 1
+            let fresh = RepositoryHistoryArchive(entries: [])
+            if case .failure(let saveError) = saveUnlocked(archive: fresh) {
+                return .failure(.readFailed(
+                    "read failed: \(error.localizedDescription), recovery save failed: \(saveError.localizedDescription)"
+                ))
+            }
+            return .success(fresh)
         }
     }
 

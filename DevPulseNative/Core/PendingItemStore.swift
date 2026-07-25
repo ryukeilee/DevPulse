@@ -125,16 +125,27 @@ final class PendingItemStore: @unchecked Sendable {
                 data = try Data(contentsOf: fileURL)
             } catch {
                 logger.warning("pending items read failed: \(error.localizedDescription)")
-                logger.warning("recovering with empty archive")
+                logger.warning("recovering with empty archive — replacing corrupt file")
                 let empty = PendingItemArchive()
+                // Persist the empty archive to disk so the same corrupt data
+                // is not re-read on the next load, preventing repeated failures
+                // after a crash or partial write.
+                if case .failure(let writeError) = saveUnsafe(empty) {
+                    logger.error("failed to replace corrupt pending items file: \(writeError.localizedDescription)")
+                }
                 cachedArchive = empty
                 return .success(empty)
             }
 
             let decoder = JSONDecoder()
             guard let archive = try? decoder.decode(PendingItemArchive.self, from: data) else {
-                logger.warning("pending items decode failed, recovering with empty archive")
+                logger.warning("pending items decode failed, recovering with empty archive — replacing corrupt file")
                 let empty = PendingItemArchive()
+                // Persist the empty archive to disk so the same corrupt data
+                // is not re-read on the next load.
+                if case .failure(let writeError) = saveUnsafe(empty) {
+                    logger.error("failed to replace corrupt pending items file: \(writeError.localizedDescription)")
+                }
                 cachedArchive = empty
                 return .success(empty)
             }
