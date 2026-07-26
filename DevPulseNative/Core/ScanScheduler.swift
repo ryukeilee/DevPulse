@@ -1574,8 +1574,15 @@ final class ScanScheduler: ObservableObject {
                 + scanLocationConfiguration.customDirectories.map(\.path)
         )
         let signature = ScanSchedulerPolicy.scanRootsSignature(lightweightRoots)
+        // Wake and path-recovery scans must always force a new scan even when
+        // the same-signature check would otherwise deduplicate them — after
+        // sleep or device reconnection the filesystem state may have changed
+        // and the previous in-flight scan result would be stale.
+        let mustForceRequest = request.forceRepositoryDiscovery
+            || request.source == .wake
+            || request.source == .pathRecovery
         let queued: Bool
-        if request.forceRepositoryDiscovery {
+        if mustForceRequest {
             queued = refreshCoordinator.requestForced(
                 signature: signature,
                 source: request.source
@@ -2919,12 +2926,18 @@ final class ScanScheduler: ObservableObject {
             )
         let prevSnapshot = previousSnapshot ?? lastResult
 
+        // Capture the storage revision observed before the async write
+        // so the commit can reject a cross-process or inter-scan race
+        // where another writer advanced the on-disk revision past what
+        // we saw when this sync was initiated.
+        let observedStorageRevision = (previousSnapshot ?? lastResult).storageRevision
+
         diagnostics.lastSnapshotStoreTrigger = reason
         diagnostics.lastSnapshotStoreState = .idle
         diagnostics.lastSnapshotStoreDetail = "正在把 \(snapshotToWrite.repositories.count) 个仓库写入共享快照…"
 
         Task.detached(priority: .utility) { @Sendable [weak self] in
-            let writeResult = AppGroupStore.write(snapshotToWrite)
+            let writeResult = AppGroupStore.write(snapshotToWrite, observedStorageRevision: observedStorageRevision)
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 switch writeResult {
