@@ -46,23 +46,126 @@ Bundle identifiers, App Group wiring, signing settings, entitlements, deployment
 
 ## Build and Test
 
-Run commands from this directory.
+Run commands from this directory (or use `./scripts/verify.sh` from the repository root).
 
-Build without requiring local signing:
+### Unified verification script (recommended)
 
-```sh
-xcodebuild -project DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
-```
-
-Run the native test suite with disposable DerivedData outside the repository:
+The repository root provides `./scripts/verify.sh` which orchestrates the entire
+workflow with a single shared DerivedData cache, `build-for-testing` + `test-without-building`,
+timeouts, and failure log capture:
 
 ```sh
-xcodebuild -project DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug -derivedDataPath /tmp/devpulse-build -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test
+# Build once (compile app + test bundle)
+./scripts/verify.sh build
+
+# Run targeted tests (no recompilation)
+./scripts/verify.sh test DevPulseTests/ActivityEventTests
+./scripts/verify.sh test DevPulseTests/CommitReadinessEngineTests
+
+# Full acceptance gate: build + full test suite
+./scripts/verify.sh final
+
+# WidgetKit wiring check
+./scripts/verify.sh widgetkit
 ```
 
-For small logic changes, run the narrowest relevant test first when feasible, then broaden according to risk. Changes to project configuration, the Widget target, App Group storage, shared models, or snapshot encoding require at least a host-app build and the relevant native tests. Real Widget launch also requires a correctly signed local build and may need manual confirmation in macOS.
+### Build-for-testing (compile once)
 
-If runtime logs report `No matching profile found` or `no eligible provisioning profiles found`, record an Apple provisioning-profile/environment blocker. Do not modify app logic, identifiers, or entitlements merely to bypass local signing state.
+```sh
+xcodebuild -project DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug \
+  -destination 'platform=macOS' \
+  -derivedDataPath /tmp/devpulse-build \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+  build-for-testing
+```
+
+### Test-without-building (reuse pre-built bundle — seconds, not minutes)
+
+Run the full suite:
+
+```sh
+xcodebuild -project DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug \
+  -derivedDataPath /tmp/devpulse-build \
+  -destination 'platform=macOS' \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+  test-without-building
+```
+
+Run a targeted test class:
+
+```sh
+xcodebuild -project DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug \
+  -derivedDataPath /tmp/devpulse-build \
+  -destination 'platform=macOS' \
+  -only-testing:DevPulseTests/SharedSnapshotStoreTests \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+  test-without-building
+```
+
+> **Note:** Build and test **share the same DerivedData** (`-derivedDataPath /tmp/devpulse-build`).
+> This ensures incremental compilation is preserved across build and test invocations.
+> The old approach (build without `-derivedDataPath`, test with one) used two separate
+> caches, causing full recompilation for each test.
+
+### Targeted testing flow
+
+After modifying source code:
+1. Run `verify.sh build` or the raw `build-for-testing` command once.
+2. Run `verify.sh test DevPulseTests/AffectedTest` repeatedly while iterating.
+3. At final acceptance, run `verify.sh final` for the full suite.
+
+Each `verify.sh test` call completes in seconds because it reuses the pre-built
+bundle — no recompilation, re-linking, or re-indexing.
+
+| Source area                      | Targeted test class                              |
+|----------------------------------|--------------------------------------------------|
+| `Core/ActivityEvent.swift`       | `DevPulseTests/ActivityEventTests`               |
+| `Core/CommitReadiness*.swift`    | `DevPulseTests/CommitReadinessEngineTests`       |
+| `Core/LaunchAtLoginController.swift` | `DevPulseTests/LaunchAtLoginControllerTests`  |
+| `Core/Models.swift`              | `DevPulseTests/SharedSnapshotStoreTests`, `DevPulseTests/ActivityEventTests` |
+| `Core/PendingItem*.swift`        | `DevPulseTests/PendingItemStaleLifecycleTests`   |
+| `Core/SharedSnapshotStore.swift` | `DevPulseTests/SharedSnapshotStoreTests`         |
+| `Core/RefreshEngine.swift`       | `DevPulseTests/RefreshEngineIntegrationTests`    |
+| `Core/ScanScheduler.swift`       | `DevPulseTests/CommitReadinessEngineTests`       |
+| repository discovery             | `DevPulseTests/RepositoryDiscoveryExperienceTests` |
+| scanning / performance           | `DevPulseTests/ScanPerformanceTests`             |
+| data consistency                 | `DevPulseTests/ScanDataConsistencyTests`         |
+| Widget extension                 | `DevPulseTests/WidgetDegradedRenderingTests`, `DevPulseTests/WidgetLifecycleScenariosTests` |
+| Lifecycle / sleep-wake           | `DevPulseTests/LifecycleIntegrationTests`, `DevPulseTests/LifecycleSystemTests` |
+| Build config consistency         | `DevPulseTests/BuildConfigConsistencyTests`      |
+
+### Timeouts and failure logs
+
+- `verify.sh` imposes a **5-minute build timeout** and a **10-minute test timeout**
+  by default (overridable via `BUILD_TIMEOUT` / `TEST_TIMEOUT`).
+- Logs are captured to temp files; on failure, the last 120–200 lines are printed
+  and the full log path is reported.
+- When using raw `xcodebuild`, wrap with `timeout` in CI or scripts:
+
+```sh
+timeout 300 xcodebuild … build-for-testing
+timeout 600 xcodebuild … test-without-building
+```
+
+### Widget and high-risk changes
+
+Changes to project configuration, the Widget target, App Group storage, shared models,
+or snapshot encoding require at least a host-app build and the relevant native tests.
+Real Widget launch also requires a correctly signed local build and may need manual
+confirmation in macOS.
+
+If runtime logs report `No matching profile found` or `no eligible provisioning
+profiles found`, record an Apple provisioning-profile/environment blocker. Do not
+modify app logic, identifiers, or entitlements merely to bypass local signing state.
+
+## 验证策略
+
+- 构建与测试必须复用同一个 DerivedData 路径，避免重复编译。
+- 修改后优先运行受影响的定向测试，不得每次都直接运行完整测试套件。
+- 最终验收阶段才运行一次完整测试。
+- 优先使用 `build-for-testing` 配合 `test-without-building`，避免测试阶段重新构建。
+- 测试超时时必须保留失败日志，并判断是测试卡死、模拟器问题还是单纯耗时过长。
+- 不得仅通过延长超时时间掩盖重复编译或测试进程不退出的问题。
 
 ## Change Discipline
 

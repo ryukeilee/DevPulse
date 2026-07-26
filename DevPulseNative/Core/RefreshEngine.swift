@@ -225,29 +225,33 @@ actor RefreshEngine {
             coreSnapshots: extendedResult.snapshots.count > 0 ? extendedResult.snapshots : coreResult.snapshots,
             previousSnapshot: previousSnapshot
         )
-        let sorted = RepositorySorter.sort(mergeResult.snapshots)
         let mergeElapsed = ProcessInfo.processInfo.systemUptime - stage4Start
         let mergeBudgetExhausted = mergeElapsed > stage4Slice
         logger.debug("Stage .merge finished elapsed_ms=\(Int(mergeElapsed * 1000)) exhausted=\(mergeBudgetExhausted)")
 
-        let summary = ScanSummary.build(from: sorted, totalRepositories: sorted.count)
+        // NOTE: Sorting is deferred to ScanScheduler.applyPins() which
+        // always re-sorts after pin resolution and ignored-repo filtering.
+        // Performing the sort here would be wasted work since it is
+        // immediately recomputed by the caller.
+        let mergeSnapshots = mergeResult.snapshots
+        let summary = ScanSummary.build(from: mergeSnapshots, totalRepositories: mergeSnapshots.count)
         let mergedData = AppGroupData(
             schemaVersion: RepositorySnapshotSchema.version,
             generatedAt: DateFormatting.nowISO(),
             writtenAt: nil,
             lastSuccessfulRefreshAt: previousSnapshot?.lastSuccessfulRefreshAt,
             scanSummary: summary,
-            repositories: sorted,
+            repositories: mergeSnapshots,
             repositoryUnavailableSinceByPath: mergeResult.unavailableSinceByPath.isEmpty
                 ? nil : mergeResult.unavailableSinceByPath,
             storageRevision: previousSnapshot?.storageRevision ?? 0,
             persistenceState: .committed
         )
         let retainedPaths = Array(Set(
-            sorted.map { $0.path } + Array(mergeResult.unavailableSinceByPath.keys)
+            mergeSnapshots.map { $0.path } + Array(mergeResult.unavailableSinceByPath.keys)
         )).sorted()
 
-        publishProgress(stage: .merge, total: sorted.count, completed: sorted.count,
+        publishProgress(stage: .merge, total: mergeSnapshots.count, completed: mergeSnapshots.count,
                         elapsed: mergeElapsed, finished: true, startedAt: overallStart)
 
         // ── Stage 5: Persistence ─────────────────────────────────────────
@@ -354,11 +358,11 @@ actor RefreshEngine {
                     totalGitTimeouts: coreResult.gitTimeoutCount,
                     totalGitCancellations: coreResult.gitCancelledCount,
                     totalGitFailures: coreResult.gitFailureCount,
-                    totalRepositoryCount: sorted.count,
-                    currentRepositoryCount: sorted.filter { $0.resolvedDataSource == .current }.count,
+                    totalRepositoryCount: mergeSnapshots.count,
+                    currentRepositoryCount: mergeSnapshots.filter { $0.resolvedDataSource == .current }.count,
                     reusedSnapshotCount: extendedResult.reusedMetadataCount,
-                    snapshotReuseRatio: sorted.count > 0
-                        ? Double(extendedResult.reusedMetadataCount) / Double(sorted.count) : 0,
+                    snapshotReuseRatio: mergeSnapshots.count > 0
+                        ? Double(extendedResult.reusedMetadataCount) / Double(mergeSnapshots.count) : 0,
                     peakGitConcurrency: coreResult.peakConcurrency,
                     cancelled: false,
                     timedOut: false,
@@ -367,8 +371,8 @@ actor RefreshEngine {
             ),
             overallElapsed: totalElapsed,
             overallTimedOut: false,
-            totalRepositoryCount: sorted.count,
-            currentRepositoryCount: sorted.filter { $0.resolvedDataSource == .current }.count,
+            totalRepositoryCount: mergeSnapshots.count,
+            currentRepositoryCount: mergeSnapshots.filter { $0.resolvedDataSource == .current }.count,
             reusedSnapshotCount: extendedResult.reusedMetadataCount,
             repositoryRetryCount: 0,
             coreMetrics: coreResult,
@@ -797,7 +801,7 @@ extension RefreshEngine {
             return currentStatus == .changed ? scannedAt : nil
         }
         let changed = prev.branch != currentBranch
-            || prev.modifiedFileCount != currentTotal
+            || prev.changedFileCount != currentTotal
             || prev.status != currentStatus
         if changed { return scannedAt }
         return prev.lastActivityAt ?? prev.lastChangedAt

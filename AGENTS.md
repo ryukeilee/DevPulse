@@ -100,22 +100,73 @@ Do not commit DerivedData, build products, installed app bundles, or Xcode user 
 
 Run commands from the repository root unless stated otherwise.
 
+### Unified verification script (recommended)
+
+`./scripts/verify.sh` orchestrates the entire build/test workflow with a single
+shared DerivedData cache, avoiding redundant compilation:
+
+```sh
+# Build once (compile app + test bundle)
+./scripts/verify.sh build
+
+# Run targeted tests (no recompilation — uses pre-built bundle)
+./scripts/verify.sh test DevPulseTests/ActivityEventTests
+./scripts/verify.sh test DevPulseTests/CommitReadinessEngineTests
+./scripts/verify.sh test DevPulseTests/SharedSnapshotStoreTests
+
+# Full acceptance gate: build + full test suite
+./scripts/verify.sh final
+
+# WidgetKit wiring check
+./scripts/verify.sh widgetkit
+
+# Activity timeline logic check
+./scripts/verify-activity-timeline.sh
+```
+
+The script uses `build-for-testing` (compile once) and `test-without-building`
+(reuse pre-built bundle) internally, so test iterations after the initial build
+skip recompilation entirely.
+
+Override defaults via environment:
+
+```sh
+DERIVED_DATA_PATH=/tmp/devpulse-custom BUILD_TIMEOUT=600 ./scripts/verify.sh final
+```
+
+### Raw xcodebuild commands (for CI or advanced workflows)
+
+Build and test **share the same DerivedData** so incremental compilation is preserved:
+
 ```sh
 # Build native app (no signing)
+DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-/tmp/devpulse-build}"
 xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj \
   -scheme DevPulse -configuration Debug \
   -destination 'platform=macOS' \
-  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+  -derivedDataPath "$DERIVED_DATA_PATH" \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+  build-for-testing
 
-# Run native tests
+# Run targeted tests (reuses the build above — no recompilation)
 xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj \
   -scheme DevPulse -configuration Debug \
-  -derivedDataPath /tmp/devpulse-build \
+  -derivedDataPath "$DERIVED_DATA_PATH" \
   -destination 'platform=macOS' \
-  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test
+  -only-testing:DevPulseTests/ActivityEventTests \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+  test-without-building
+
+# Run full test suite
+xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj \
+  -scheme DevPulse -configuration Debug \
+  -derivedDataPath "$DERIVED_DATA_PATH" \
+  -destination 'platform=macOS' \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+  test-without-building
 
 # Widget wiring check
-./scripts/verify-widgetkit.sh
+DERIVED_DATA_PATH="$DERIVED_DATA_PATH" ./scripts/verify-widgetkit.sh
 
 # Activity timeline logic check
 ./scripts/verify-activity-timeline.sh
@@ -124,7 +175,51 @@ xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj \
 ./scripts/install-and-self-check.sh
 ```
 
-For small logic changes, run the narrowest relevant test first, then broaden according to risk.
+### Targeted testing
+
+After modifying source code, run the narrowest affected test class first.
+The `verify.sh build` step is needed only once per session — subsequent
+`verify.sh test <TestClass>` calls use `test-without-building` and complete
+in seconds.
+
+| Source area                     | Targeted test class                          |
+|---------------------------------|----------------------------------------------|
+| `Core/ActivityEvent.swift`      | `DevPulseTests/ActivityEventTests`           |
+| `Core/CommitReadinessEngine.swift` | `DevPulseTests/CommitReadinessEngineTests` |
+| `Core/LaunchAtLoginController.swift` | `DevPulseTests/LaunchAtLoginControllerTests` |
+| `Core/Models.swift`             | `DevPulseTests/SharedSnapshotStoreTests`, `DevPulseTests/ActivityEventTests` |
+| `Core/PendingItem*.swift`       | `DevPulseTests/PendingItemStaleLifecycleTests` |
+| `Core/SharedSnapshotStore.swift` | `DevPulseTests/SharedSnapshotStoreTests`   |
+| `Core/RefreshEngine.swift`      | `DevPulseTests/RefreshEngineIntegrationTests` |
+| `Core/ScanScheduler.swift`      | `DevPulseTests/CommitReadinessEngineTests`  |
+| repository discovery            | `DevPulseTests/RepositoryDiscoveryExperienceTests` |
+| scanning / performance          | `DevPulseTests/ScanPerformanceTests`        |
+| data consistency                | `DevPulseTests/ScanDataConsistencyTests`    |
+| Widget extension                | `DevPulseTests/WidgetDegradedRenderingTests`, `DevPulseTests/WidgetLifecycleScenariosTests` |
+| Lifecycle / sleep-wake          | `DevPulseTests/LifecycleIntegrationTests`, `DevPulseTests/LifecycleSystemTests` |
+| Build config consistency        | `DevPulseTests/BuildConfigConsistencyTests` |
+
+### Timeouts and failure logs
+
+- `verify.sh` applies a **5-minute build timeout** and a **10-minute test timeout**
+  by default, configurable via `BUILD_TIMEOUT` / `TEST_TIMEOUT`.
+- Build and test logs are captured to temporary files; on failure, the last
+  120–200 lines are printed and the full log path is reported.
+- Raw `xcodebuild` commands should be wrapped with `timeout` in CI:
+
+```sh
+timeout 300 xcodebuild … build-for-testing
+timeout 600 xcodebuild … test-without-building
+```
+
+## 验证策略
+
+- 构建与测试必须复用同一个 DerivedData 路径，避免重复编译。
+- 修改后优先运行受影响的定向测试，不得每次都直接运行完整测试套件。
+- 最终验收阶段才运行一次完整测试。
+- 优先使用 `build-for-testing` 配合 `test-without-building`，避免测试阶段重新构建。
+- 测试超时时必须保留失败日志，并判断是测试卡死、模拟器问题还是单纯耗时过长。
+- 不得仅通过延长超时时间掩盖重复编译或测试进程不退出的问题。
 
 ## Project Configuration
 

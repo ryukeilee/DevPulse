@@ -133,9 +133,18 @@ enum RepositoryListQuery {
 enum RepositorySorter {
     /// Sort the shared action queue from the canonical repository decision.
     /// Explicit pins remain a user-controlled override.
+    ///
+    /// Uses an explicit stable sort — when two repositories have equal priority
+    /// under `RepositoryDecisionOrdering.precedes`, their original relative
+    /// order is preserved. This prevents UI flickering between refreshes when
+    /// repos rank identically on all meaningful criteria.
     static func sort(_ repos: [RepositorySnapshot]) -> [RepositorySnapshot] {
-        repos.sorted { lhs, rhs in
-            RepositoryDecisionOrdering.precedes(lhs, rhs)
-        }
+        repos.enumerated().sorted { lhs, rhs in
+            let (lIdx, lRepo) = lhs
+            let (rIdx, rRepo) = rhs
+            if RepositoryDecisionOrdering.precedes(lRepo, rRepo) { return true }
+            if RepositoryDecisionOrdering.precedes(rRepo, lRepo) { return false }
+            return lIdx < rIdx
+        }.map(\.element)
     }
 }

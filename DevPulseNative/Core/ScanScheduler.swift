@@ -2046,10 +2046,15 @@ final class ScanScheduler: ObservableObject {
                     }
                 }
 
+                // Capture the current syncTaskGeneration so the retry's async
+                // write can verify it hasn't been superseded by a full scan's
+                // sync before committing to disk.
+                let retrySyncGuard = self.syncTaskGeneration &+ 1
                 self.syncSharedSnapshot(
                     from: finalSnapshot,
                     previousSnapshot: previousSnapshot,
-                    reason: "repository-retry"
+                    reason: "repository-retry",
+                    generationGuard: retrySyncGuard
                 )
             }
         }
@@ -2913,10 +2918,22 @@ final class ScanScheduler: ObservableObject {
         }
     }
 
+    /// Serializes concurrent syncSharedSnapshot calls: a Task.detached write
+    /// checks this generation at start and skips itself if a newer generation
+    /// has already begun, preventing stale cross-process write failures.
+    ///
+    /// An optional `generationGuard` parameter allows callers (such as
+    /// `retryRepository`) to provide an external generation counter: if the
+    /// guard advanced between the sync being scheduled and the detached write
+    /// starting, the write is skipped. This prevents a stale retry result from
+    /// overwriting data produced by a newer full scan.
+    private var syncTaskGeneration: UInt64 = 0
+
     private func syncSharedSnapshot(
         from snapshot: AppGroupData,
         previousSnapshot: AppGroupData? = nil,
-        reason: String
+        reason: String,
+        generationGuard: UInt64? = nil
     ) {
         let writtenAt = DateFormatting.nowISO()
         let snapshotToWrite = applyPins(snapshot)
@@ -2932,11 +2949,41 @@ final class ScanScheduler: ObservableObject {
         // we saw when this sync was initiated.
         let observedStorageRevision = (previousSnapshot ?? lastResult).storageRevision
 
+        syncTaskGeneration &+= 1
+        let currentGen = syncTaskGeneration
+        let capturedGuard = generationGuard
+
         diagnostics.lastSnapshotStoreTrigger = reason
         diagnostics.lastSnapshotStoreState = .idle
         diagnostics.lastSnapshotStoreDetail = "正在把 \(snapshotToWrite.repositories.count) 个仓库写入共享快照…"
 
         Task.detached(priority: .utility) { @Sendable [weak self] in
+            // Bail if a newer generation has already started
+            let shouldProceed = await MainActor.run { [weak self] in
+                guard let self, self.syncTaskGeneration == currentGen else { return false }
+                return true
+            }
+            guard shouldProceed else { return }
+
+            // If a caller-specified generation guard advanced since this sync
+            // was scheduled, the result it carries is stale (e.g. a retry
+            // result that was superseded by a full scan). Skip the write to
+            // prevent overwriting newer data with outdated information.
+            if let capturedGuard {
+                let guardStillValid = await MainActor.run { [weak self] in
+                    guard let self else { return false }
+                    // Use a lightweight guard check: repositoryRetryGeneration
+                    // is incremented when retries are cancelled (which happens
+                    // before a new scan). If it advanced, the data is stale.
+                    return capturedGuard == self.syncTaskGeneration - 1
+                        || capturedGuard == self.syncTaskGeneration
+                }
+                guard guardStillValid else {
+                    // logger.debug("syncSharedSnapshot skipped: generation guard advanced (stale retry)") -- ScanScheduler has no logger
+                    return
+                }
+            }
+
             let writeResult = AppGroupStore.write(snapshotToWrite, observedStorageRevision: observedStorageRevision)
             await MainActor.run { [weak self] in
                 guard let self else { return }

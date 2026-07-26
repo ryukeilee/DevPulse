@@ -764,8 +764,8 @@ enum RepositoryDecisionOrdering {
             if let lhsAttempt, let rhsAttempt, lhsAttempt != rhsAttempt {
                 return lhsAttempt > rhsAttempt
             }
-            if lhsAttempt != nil { return true }
-            if rhsAttempt != nil { return false }
+            if lhsAttempt != nil && rhsAttempt == nil { return true }
+            if rhsAttempt != nil && lhsAttempt == nil { return false }
             return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
         }
 
@@ -787,8 +787,8 @@ enum RepositoryDecisionOrdering {
         if let lhsActivity, let rhsActivity, lhsActivity != rhsActivity {
             return lhsActivity > rhsActivity
         }
-        if lhsActivity != nil { return true }
-        if rhsActivity != nil { return false }
+        if lhsActivity != nil && rhsActivity == nil { return true }
+        if rhsActivity != nil && lhsActivity == nil { return false }
         return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
     }
 

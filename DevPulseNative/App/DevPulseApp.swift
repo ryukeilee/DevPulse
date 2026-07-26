@@ -41,7 +41,17 @@ struct DevPulseApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("DevPulse", systemImage: "waveform.path.ecg") {
+        // Window scene so the user sees the app on launch,
+        // even when the MenuBarExtra icon doesn't render.
+        WindowGroup {
+            ContentView()
+                .environmentObject(scheduler)
+                .environmentObject(launchAtLoginController)
+        }
+        .windowResizability(.contentMinSize)
+        .windowStyle(.hiddenTitleBar)
+
+        MenuBarExtra("DevPulse", systemImage: "list.bullet") {
             Button {
                 openMainWindow()
             } label: {
@@ -59,8 +69,6 @@ struct DevPulseApp: App {
             .disabled(scheduler.isScanning)
 
             Divider()
-
-
 
             Button {
                 NSApp.terminate(nil)
