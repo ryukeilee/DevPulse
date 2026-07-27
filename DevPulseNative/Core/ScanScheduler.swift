@@ -1659,7 +1659,12 @@ final class ScanScheduler: ObservableObject {
             storageFormatVersion: refreshingData.storageFormatVersion
         )
         switch AppGroupStore.write(refreshingSnapshot) {
-        case .success:
+        case .success(let written):
+            // Update lastResult's storageRevision to match the on-disk value
+            // so subsequent syncSharedSnapshot calls use the correct observed
+            // revision. Without this, every post-scan write would be rejected
+            // by the cross-process guard (observed != actual).
+            lastResult = lastResult.withStorageRevision(written.storageRevision)
             diagnostics.sharedDataWriteError = nil
             diagnostics.lastSharedWriteAt = Date()
             diagnostics.lastSnapshotStoreTrigger = "refresh-start"

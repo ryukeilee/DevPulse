@@ -1680,6 +1680,27 @@ struct AppGroupData: Codable, Equatable {
         )
     }
 
+    func withStorageRevision(_ revision: UInt64) -> AppGroupData {
+        AppGroupData(
+            schemaVersion: schemaVersion,
+            generatedAt: generatedAt,
+            writtenAt: writtenAt,
+            lastSuccessfulRefreshAt: lastSuccessfulRefreshAt,
+            historySchemaVersion: historySchemaVersion,
+            historyRecordingEnabled: historyRecordingEnabled,
+            scanSummary: scanSummary,
+            repositories: repositories,
+            recentActivityEvents: recentActivityEvents,
+            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
+            storageRevision: revision,
+            persistenceState: persistenceState,
+            pendingItemWidgetSummary: pendingItemWidgetSummary,
+            isRefreshing: isRefreshing,
+            appVersion: appVersion,
+            storageFormatVersion: storageFormatVersion
+        )
+    }
+
     func withWrittenAt(_ writtenAt: String) -> AppGroupData {
         AppGroupData(
             schemaVersion: schemaVersion,

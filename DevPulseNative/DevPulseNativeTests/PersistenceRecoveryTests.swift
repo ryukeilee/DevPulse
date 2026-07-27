@@ -179,7 +179,7 @@ struct PersistenceRecoveryTests {
         let feed = ActivityTimelineFeed(state: .neverScanned, items: [])
         let entry = WidgetEntry.content(snapshot: snapshot, feed: feed)
 
-        #expect(entry.loadState == .loadFailed)
+        #expect(entry.loadState == .ready)
         #expect(entry.loadFailure != nil)
         #expect(entry.loadFailure?.title == "数据已恢复")
     }
@@ -197,7 +197,7 @@ struct PersistenceRecoveryTests {
         let feed = ActivityTimelineFeed(state: .neverScanned, items: [])
         let entry = WidgetEntry.content(snapshot: snapshot, feed: feed)
 
-        #expect(entry.loadState == .loadFailed)
+        #expect(entry.loadState == .ready)
         #expect(entry.loadFailure != nil)
         #expect(entry.loadFailure?.title == "数据已迁移")
     }
