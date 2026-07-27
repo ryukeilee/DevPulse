@@ -207,12 +207,18 @@ enum RepositoryIdentity {
             generatedAt: data.generatedAt,
             writtenAt: data.writtenAt,
             lastSuccessfulRefreshAt: data.lastSuccessfulRefreshAt,
+            historySchemaVersion: data.historySchemaVersion,
+            historyRecordingEnabled: data.historyRecordingEnabled,
             scanSummary: summary,
             repositories: repositories,
             recentActivityEvents: recentActivityEvents,
             repositoryUnavailableSinceByPath: unavailableSinceByPath.isEmpty ? nil : unavailableSinceByPath,
             storageRevision: data.storageRevision,
-            persistenceState: data.persistenceState
+            persistenceState: data.persistenceState,
+            pendingItemWidgetSummary: data.pendingItemWidgetSummary,
+            isRefreshing: data.isRefreshing,
+            appVersion: data.appVersion,
+            storageFormatVersion: data.storageFormatVersion
         )
     }
 
@@ -305,6 +311,8 @@ enum RepositoryIdentityMigration {
             generatedAt: normalizedSnapshot.generatedAt,
             writtenAt: normalizedSnapshot.writtenAt,
             lastSuccessfulRefreshAt: normalizedSnapshot.lastSuccessfulRefreshAt,
+            historySchemaVersion: normalizedSnapshot.historySchemaVersion,
+            historyRecordingEnabled: normalizedSnapshot.historyRecordingEnabled,
             scanSummary: normalizedSnapshot.scanSummary,
             repositories: normalizedSnapshot.repositories.map { repository in
                 var copy = repository
@@ -314,7 +322,11 @@ enum RepositoryIdentityMigration {
             recentActivityEvents: normalizedSnapshot.recentActivityEvents,
             repositoryUnavailableSinceByPath: normalizedSnapshot.repositoryUnavailableSinceByPath,
             storageRevision: normalizedSnapshot.storageRevision,
-            persistenceState: normalizedSnapshot.persistenceState
+            persistenceState: normalizedSnapshot.persistenceState,
+            pendingItemWidgetSummary: normalizedSnapshot.pendingItemWidgetSummary,
+            isRefreshing: normalizedSnapshot.isRefreshing,
+            appVersion: normalizedSnapshot.appVersion,
+            storageFormatVersion: normalizedSnapshot.storageFormatVersion
         )
 
         return RepositoryIdentityMigrationResult(
@@ -417,6 +429,8 @@ enum RepositoryScope {
             generatedAt: data.generatedAt,
             writtenAt: data.writtenAt,
             lastSuccessfulRefreshAt: data.lastSuccessfulRefreshAt,
+            historySchemaVersion: data.historySchemaVersion,
+            historyRecordingEnabled: data.historyRecordingEnabled,
             scanSummary: ScanSummary.build(from: repositories),
             repositories: repositories,
             recentActivityEvents: data.recentActivityEvents?.filter {
@@ -424,7 +438,11 @@ enum RepositoryScope {
             },
             repositoryUnavailableSinceByPath: unavailability,
             storageRevision: data.storageRevision,
-            persistenceState: data.persistenceState
+            persistenceState: data.persistenceState,
+            pendingItemWidgetSummary: data.pendingItemWidgetSummary,
+            isRefreshing: data.isRefreshing,
+            appVersion: data.appVersion,
+            storageFormatVersion: data.storageFormatVersion
         )
         return RepositoryIdentity.normalize(filtered)
     }

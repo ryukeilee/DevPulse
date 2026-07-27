@@ -1598,6 +1598,7 @@ extension AppGroupData {
             storageRevision: storageRevision,
             persistenceState: persistenceState,
             pendingItemWidgetSummary: pendingItemWidgetSummary,
+            isRefreshing: nil,
             appVersion: appVersion,
             storageFormatVersion: storageFormatVersion
         )

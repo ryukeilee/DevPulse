@@ -482,13 +482,19 @@ enum GitRepositoryScanner {
             generatedAt: DateFormatting.nowISO(),
             writtenAt: nil,
             lastSuccessfulRefreshAt: previous?.lastSuccessfulRefreshAt,
+            historySchemaVersion: previous?.historySchemaVersion,
+            historyRecordingEnabled: previous?.historyRecordingEnabled,
             scanSummary: summary,
             repositories: sorted,
             repositoryUnavailableSinceByPath: mergeResult.unavailableSinceByPath.isEmpty
                 ? nil
                 : mergeResult.unavailableSinceByPath,
             storageRevision: previous?.storageRevision ?? 0,
-            persistenceState: .committed
+            persistenceState: .committed,
+            pendingItemWidgetSummary: previous?.pendingItemWidgetSummary,
+            isRefreshing: previous?.isRefreshing,
+            appVersion: previous?.appVersion ?? RepositorySnapshotSchema.currentAppVersion,
+            storageFormatVersion: previous?.storageFormatVersion ?? RepositorySnapshotSchema.storageFormatVersion
         )
 
         let retainedDiscoveryPaths = Array(Set(
@@ -559,13 +565,19 @@ enum GitRepositoryScanner {
                 generatedAt: DateFormatting.nowISO(),
                 writtenAt: nil,
                 lastSuccessfulRefreshAt: previousSnapshot?.lastSuccessfulRefreshAt,
+                historySchemaVersion: previousSnapshot?.historySchemaVersion,
+                historyRecordingEnabled: previousSnapshot?.historyRecordingEnabled,
                 scanSummary: summary,
                 repositories: sorted,
                 repositoryUnavailableSinceByPath: mergeResult.unavailableSinceByPath.isEmpty
                     ? nil
                     : mergeResult.unavailableSinceByPath,
                 storageRevision: previousSnapshot?.storageRevision ?? 0,
-                persistenceState: .committed
+                persistenceState: .committed,
+                pendingItemWidgetSummary: previousSnapshot?.pendingItemWidgetSummary,
+                isRefreshing: previousSnapshot?.isRefreshing,
+                appVersion: previousSnapshot?.appVersion ?? RepositorySnapshotSchema.currentAppVersion,
+                storageFormatVersion: previousSnapshot?.storageFormatVersion ?? RepositorySnapshotSchema.storageFormatVersion
             ),
             warnings,
             Array(Set(

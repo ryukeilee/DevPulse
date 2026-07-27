@@ -1999,6 +1999,8 @@ final class ScanScheduler: ObservableObject {
                     generatedAt: previousSnapshot.generatedAt,
                     writtenAt: previousSnapshot.writtenAt,
                     lastSuccessfulRefreshAt: previousSnapshot.lastSuccessfulRefreshAt,
+                    historySchemaVersion: previousSnapshot.historySchemaVersion,
+                    historyRecordingEnabled: previousSnapshot.historyRecordingEnabled,
                     scanSummary: ScanSummary.build(
                         from: repositories,
                         totalRepositories: max(
@@ -2014,7 +2016,11 @@ final class ScanScheduler: ObservableObject {
                     storageRevision: previousSnapshot.storageRevision,
                     persistenceState: repositories.contains {
                         $0.resolvedDataSource == .current && $0.status != .error
-                    } ? .committed : previousSnapshot.persistenceState
+                    } ? .committed : previousSnapshot.persistenceState,
+                    pendingItemWidgetSummary: previousSnapshot.pendingItemWidgetSummary,
+                    isRefreshing: previousSnapshot.isRefreshing,
+                    appVersion: previousSnapshot.appVersion,
+                    storageFormatVersion: previousSnapshot.storageFormatVersion
                 )
                 let recorded = self.recordActivityEvents(
                     previous: previousSnapshot,
@@ -3259,12 +3265,18 @@ final class ScanScheduler: ObservableObject {
             lastSuccessfulRefreshAt: previousHasRepositoryTrustState
                 ? previousSnapshot.lastSuccessfulRefreshAt
                 : retained.lastSuccessfulRefreshAt,
+            historySchemaVersion: retained.historySchemaVersion,
+            historyRecordingEnabled: retained.historyRecordingEnabled,
             scanSummary: retained.scanSummary,
             repositories: RepositorySorter.sort(retained.repositories),
             recentActivityEvents: retained.recentActivityEvents,
             repositoryUnavailableSinceByPath: retained.repositoryUnavailableSinceByPath,
             storageRevision: retained.storageRevision,
-            persistenceState: retained.persistenceState
+            persistenceState: retained.persistenceState,
+            pendingItemWidgetSummary: retained.pendingItemWidgetSummary,
+            isRefreshing: retained.isRefreshing,
+            appVersion: retained.appVersion,
+            storageFormatVersion: retained.storageFormatVersion
         )
         let pinnedRetained = applyPins(sortedRetained)
         lastResult = recordActivityEvents(
@@ -3698,12 +3710,18 @@ final class ScanScheduler: ObservableObject {
             generatedAt: migration.snapshot.generatedAt,
             writtenAt: migration.snapshot.writtenAt,
             lastSuccessfulRefreshAt: migration.snapshot.lastSuccessfulRefreshAt,
+            historySchemaVersion: migration.snapshot.historySchemaVersion,
+            historyRecordingEnabled: migration.snapshot.historyRecordingEnabled,
             scanSummary: migration.snapshot.scanSummary,
             repositories: repos,
             recentActivityEvents: migration.snapshot.recentActivityEvents,
             repositoryUnavailableSinceByPath: migration.snapshot.repositoryUnavailableSinceByPath,
             storageRevision: migration.snapshot.storageRevision,
-            persistenceState: migration.snapshot.persistenceState
+            persistenceState: migration.snapshot.persistenceState,
+            pendingItemWidgetSummary: migration.snapshot.pendingItemWidgetSummary,
+            isRefreshing: migration.snapshot.isRefreshing,
+            appVersion: migration.snapshot.appVersion,
+            storageFormatVersion: migration.snapshot.storageFormatVersion
         )
     }
 

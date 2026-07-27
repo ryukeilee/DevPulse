@@ -173,7 +173,8 @@ stop_running_app() {
 }
 
 build_signed_app() {
-    local team="$1"
+    local identity="$1"
+    local team="$2"
 
     info "Building latest DevPulse.app with automatic signing"
     xcodebuild \
@@ -193,9 +194,11 @@ build_signed_app() {
         || fail "Built widget is missing embedded.provisionprofile. WidgetKit will be rejected on this machine."
 
     if [ -d "$BUILD_APP/Contents/PlugIns/DevPulseTests.xctest" ]; then
-        info "Removing test bundle from app product before signing"
+        info "Removing test bundle from app product before install"
         mv "$BUILD_APP/Contents/PlugIns/DevPulseTests.xctest" \
             "${TMPDIR:-/tmp}/DevPulseTests.xctest.$$.bak"
+        # Re-sign after removal since codesign seal is now broken
+        codesign --force --sign "$identity" --timestamp=none --generate-entitlement-der "$BUILD_APP"
     fi
     codesign --verify --deep --strict --verbose=2 "$BUILD_APP"
 }
@@ -315,7 +318,7 @@ main() {
     info "Using Apple Development signing identity: available"
     info "Using automatic signing team: resolved"
 
-    build_signed_app "$team"
+    build_signed_app "$identity" "$team"
     stop_running_app
     install_app
     launch_installed_app

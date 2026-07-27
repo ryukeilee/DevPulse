@@ -240,12 +240,18 @@ actor RefreshEngine {
             generatedAt: DateFormatting.nowISO(),
             writtenAt: nil,
             lastSuccessfulRefreshAt: previousSnapshot?.lastSuccessfulRefreshAt,
+            historySchemaVersion: previousSnapshot?.historySchemaVersion,
+            historyRecordingEnabled: previousSnapshot?.historyRecordingEnabled,
             scanSummary: summary,
             repositories: mergeSnapshots,
             repositoryUnavailableSinceByPath: mergeResult.unavailableSinceByPath.isEmpty
                 ? nil : mergeResult.unavailableSinceByPath,
             storageRevision: previousSnapshot?.storageRevision ?? 0,
-            persistenceState: .committed
+            persistenceState: .committed,
+            pendingItemWidgetSummary: previousSnapshot?.pendingItemWidgetSummary,
+            isRefreshing: previousSnapshot?.isRefreshing,
+            appVersion: previousSnapshot?.appVersion ?? RepositorySnapshotSchema.currentAppVersion,
+            storageFormatVersion: previousSnapshot?.storageFormatVersion ?? RepositorySnapshotSchema.storageFormatVersion
         )
         let retainedPaths = Array(Set(
             mergeSnapshots.map { $0.path } + Array(mergeResult.unavailableSinceByPath.keys)
@@ -1167,11 +1173,17 @@ extension RefreshEngine {
                 schemaVersion: previous?.schemaVersion ?? RepositorySnapshotSchema.version,
                 generatedAt: DateFormatting.nowISO(), writtenAt: nil,
                 lastSuccessfulRefreshAt: previous?.lastSuccessfulRefreshAt,
+                historySchemaVersion: previous?.historySchemaVersion,
+                historyRecordingEnabled: previous?.historyRecordingEnabled,
                 scanSummary: ScanSummary.build(from: sorted),
                 repositories: sorted,
                 repositoryUnavailableSinceByPath: previous?.repositoryUnavailableSinceByPath,
                 storageRevision: previous?.storageRevision ?? 0,
-                persistenceState: .committed
+                persistenceState: .committed,
+                pendingItemWidgetSummary: previous?.pendingItemWidgetSummary,
+                isRefreshing: previous?.isRefreshing,
+                appVersion: previous?.appVersion ?? RepositorySnapshotSchema.currentAppVersion,
+                storageFormatVersion: previous?.storageFormatVersion ?? RepositorySnapshotSchema.storageFormatVersion
             ),
             warnings: warnings,
             discoveredRepositoryPaths: discovery.allPaths,
