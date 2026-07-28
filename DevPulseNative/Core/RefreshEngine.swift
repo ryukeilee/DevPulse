@@ -260,36 +260,21 @@ actor RefreshEngine {
         publishProgress(stage: .merge, total: mergeSnapshots.count, completed: mergeSnapshots.count,
                         elapsed: mergeElapsed, finished: true, startedAt: overallStart)
 
-        // ── Stage 5: Persistence ─────────────────────────────────────────
-        // Captures the on-disk storage revision observed at the time of the
-        // last successful read (or the previous snapshot) so that the commit
-        // can detect a cross-process race — another process wrote a newer
-        // snapshot while we were scanning — and refuse to overwrite it.
+        // ── Stage 5: Persistence (preparation only) ───────────────────────
+        // The snapshot is prepared here but NOT written to disk. Persistence
+        // is exclusively handled by the caller (ScanScheduler.syncSharedSnapshot)
+        // so that the storage revision observed by that call is never stale.
+        // Writing in this stage creates a race: the isRefreshing write at scan
+        // start increments the revision, then this stage's write increments it
+        // again, making the caller's observedRevision stale and triggering a
+        // false crossProcessWriteDetected failure.
         let stage5Start = ProcessInfo.processInfo.systemUptime
         logger.debug("Stage .persistence starting")
         let persistedData = mergedData.withWrittenAt(DateFormatting.nowISO())
-        let observedStorageRevision: UInt64? = previousSnapshot?.storageRevision ?? mergedData.storageRevision
-        var persistError: String?
-        let persistResult = AppGroupStore.write(persistedData, observedStorageRevision: observedStorageRevision)
-        switch persistResult {
-        case .success:
-            break
-        case .failure(AppGroupStoreError.crossProcessWriteDetected(let observed, let actual)):
-            persistError = "cross-process write conflict: observed rev \(observed), on-disk rev \(actual)"
-            warnings.append("共享快照写入冲突: 另一进程在此期间更新了快照。将重试读取最新版本。")
-            // Attempt to re-read the current snapshot to recover.
-            if case .success(let reloaded) = AppGroupStore.readDetailed() {
-                _ = reloaded
-                logger.debug("Re-read snapshot after conflict: rev \(reloaded.snapshot.storageRevision)")
-            }
-        case .failure(let error):
-            persistError = error.localizedDescription
-            warnings.append("共享快照写入失败: \(persistError ?? "unknown")")
-        }
         let persistElapsed = ProcessInfo.processInfo.systemUptime - stage5Start
-        logger.debug("Stage .persistence finished elapsed_ms=\(Int(persistElapsed * 1000)) error=\(persistError ?? "nil")")
+        logger.debug("Stage .persistence finished elapsed_ms=\(Int(persistElapsed * 1000))")
 
-        publishProgress(stage: .persistence, total: 1, completed: persistError == nil ? 1 : 0,
+        publishProgress(stage: .persistence, total: 1, completed: 1,
                         elapsed: persistElapsed, finished: true, startedAt: overallStart)
 
         // ── Stage 6: Widget sync ─────────────────────────────────────────
@@ -384,7 +369,7 @@ actor RefreshEngine {
             coreMetrics: coreResult,
             extendedMetrics: extendedResult,
             timeBudgetExhaustedByStage: timeBudgetExhaustedByStage,
-            persistError: persistError,
+            persistError: nil,
             widgetSyncError: widgetReloadError
         )
 

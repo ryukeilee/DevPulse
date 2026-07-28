@@ -145,20 +145,18 @@ check_codesign() {
 }
 
 check_entitlements() {
-    local app_entitlements widget_entitlements
+    local app_raw widget_raw
 
-    app_entitlements="$(codesign -d --entitlements - "$APP_PATH" 2>/dev/null |
-        plutil -extract com.apple.security.application-groups json - 2>/dev/null || true)"
-    if echo "$app_entitlements" | grep -q "group.local.devpulse"; then
+    app_raw="$(codesign -d --entitlements - "$APP_PATH" 2>/dev/null)"
+    if echo "$app_raw" | grep -q "group.local.devpulse"; then
         pass "App entitlements include App Group 'group.local.devpulse'"
     else
         fail "App entitlements missing App Group 'group.local.devpulse'"
     fi
 
     local widget_path="$APP_PATH/Contents/PlugIns/DevPulseWidgetExtension.appex"
-    widget_entitlements="$(codesign -d --entitlements - "$widget_path" 2>/dev/null |
-        plutil -extract com.apple.security.application-groups json - 2>/dev/null || true)"
-    if echo "$widget_entitlements" | grep -q "group.local.devpulse"; then
+    widget_raw="$(codesign -d --entitlements - "$widget_path" 2>/dev/null)"
+    if echo "$widget_raw" | grep -q "group.local.devpulse"; then
         pass "Widget entitlements include App Group 'group.local.devpulse'"
     else
         fail "Widget entitlements missing App Group 'group.local.devpulse'"
@@ -202,46 +200,56 @@ check_snapshot_structure() {
 
     pass "Found snapshot at $snapshot_file"
 
-    # Schema and metadata fields
-    if plist_value_exists "$snapshot_file" "schemaVersion"; then
+    # Schema and metadata fields (snapshot is JSON, use python3)
+    local json_key_exists json_val
+    json_key_exists() {
+        local f="$1" k="$2"
+        python3 -c "import json; d=json.load(open('$f')); print('yes' if '$k' in d else 'no')" 2>/dev/null
+    }
+    json_val() {
+        local f="$1" k="$2"
+        python3 -c "import json; print(json.load(open('$f')).get('$k', ''))" 2>/dev/null
+    }
+
+    if [ "$(json_key_exists "$snapshot_file" "schemaVersion")" = "yes" ]; then
         local sv
-        sv="$(plist_value "$snapshot_file" "schemaVersion")"
+        sv="$(json_val "$snapshot_file" "schemaVersion")"
         pass "Snapshot schema version: $sv"
     else
         fail "Snapshot missing schemaVersion field"
     fi
 
-    if plist_value_exists "$snapshot_file" "storageFormatVersion"; then
+    if [ "$(json_key_exists "$snapshot_file" "storageFormatVersion")" = "yes" ]; then
         local sfv
-        sfv="$(plist_value "$snapshot_file" "storageFormatVersion")"
+        sfv="$(json_val "$snapshot_file" "storageFormatVersion")"
         pass "Snapshot storage format version: $sfv"
     else
         skip "Snapshot missing storageFormatVersion (may be legacy format)"
     fi
 
-    if plist_value_exists "$snapshot_file" "appVersion"; then
+    if [ "$(json_key_exists "$snapshot_file" "appVersion")" = "yes" ]; then
         local av
-        av="$(plist_value "$snapshot_file" "appVersion")"
+        av="$(json_val "$snapshot_file" "appVersion")"
         pass "Snapshot written by app version: $av"
     else
         skip "Snapshot missing appVersion (may be legacy format)"
     fi
 
-    if plist_value_exists "$snapshot_file" "generatedAt"; then
+    if [ "$(json_key_exists "$snapshot_file" "generatedAt")" = "yes" ]; then
         pass "Snapshot has generatedAt timestamp"
     else
         fail "Snapshot missing generatedAt"
     fi
 
-    if plist_value_exists "$snapshot_file" "writtenAt"; then
+    if [ "$(json_key_exists "$snapshot_file" "writtenAt")" = "yes" ]; then
         pass "Snapshot has writtenAt timestamp"
     else
         skip "Snapshot missing writtenAt (may be in-memory only)"
     fi
 
-    if plist_value_exists "$snapshot_file" "storageRevision"; then
+    if [ "$(json_key_exists "$snapshot_file" "storageRevision")" = "yes" ]; then
         local rev
-        rev="$(plist_value "$snapshot_file" "storageRevision")"
+        rev="$(json_val "$snapshot_file" "storageRevision")"
         if [ "$rev" -gt 0 ] 2>/dev/null; then
             pass "Snapshot storage revision: $rev"
         else
@@ -251,24 +259,24 @@ check_snapshot_structure() {
         fail "Snapshot missing storageRevision"
     fi
 
-    if plist_value_exists "$snapshot_file" "persistenceState"; then
+    if [ "$(json_key_exists "$snapshot_file" "persistenceState")" = "yes" ]; then
         local state
-        state="$(plist_value "$snapshot_file" "persistenceState")"
+        state="$(json_val "$snapshot_file" "persistenceState")"
         pass "Snapshot persistence state: $state"
     else
         fail "Snapshot missing persistenceState"
     fi
 
     # Repository payload
-    if plist_value_exists "$snapshot_file" "repositories"; then
+    if [ "$(json_key_exists "$snapshot_file" "repositories")" = "yes" ]; then
         local repo_count
-        repo_count="$(plutil -extract repositories json "$snapshot_file" 2>/dev/null | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "unknown")"
+        repo_count="$(python3 -c "import json; print(len(json.load(open('$snapshot_file')).get('repositories', [])))" 2>/dev/null || echo "unknown")"
         pass "Snapshot contains $repo_count repositories"
     else
         fail "Snapshot missing repositories array"
     fi
 
-    if plist_value_exists "$snapshot_file" "scanSummary"; then
+    if [ "$(json_key_exists "$snapshot_file" "scanSummary")" = "yes" ]; then
         pass "Snapshot has scanSummary"
     else
         fail "Snapshot missing scanSummary"

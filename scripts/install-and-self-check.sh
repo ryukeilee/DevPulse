@@ -33,8 +33,15 @@ fail() {
 }
 
 xcode_accounts_configured() {
-    defaults read com.apple.dt.Xcode DVTDeveloperAccountManagerAppleIDs >/dev/null 2>&1 \
-        || defaults read com.apple.dt.Xcode DVTDeveloperAccountManagerAppleIDLists >/dev/null 2>&1
+    # 检查 Xcode 是否至少登录了一个 Apple ID（账号列表非空）
+    # defaults read 仅在 key 存在时返回 0，但可能列表为空
+    if defaults read com.apple.dt.Xcode DVTDeveloperAccountManagerAppleIDs >/dev/null 2>&1; then
+        return 0
+    fi
+    # Xcode 16+ 使用 AppleIDLists；检查是否有 identifier 条目（即实际账号）
+    defaults read com.apple.dt.Xcode DVTDeveloperAccountManagerAppleIDLists 2>/dev/null \
+        | grep -q 'identifier' && return 0
+    return 1
 }
 
 first_apple_development_identity_line() {
@@ -42,19 +49,6 @@ first_apple_development_identity_line() {
     security find-identity -v -p codesigning \
         | sed -n '/Apple Development:/p' \
         | head -n 1
-}
-
-resolve_signing_identity() {
-    if [ -n "${DEVPULSE_SIGNING_IDENTITY:-}" ]; then
-        printf '%s\n' "$DEVPULSE_SIGNING_IDENTITY"
-        return
-    fi
-
-    local identity_line identity
-    identity_line="$(first_apple_development_identity_line)"
-    identity="$(printf '%s\n' "$identity_line" | awk '{ print $2 }')"
-    [ -n "$identity" ] || fail "No Apple Development signing identity found. Set DEVPULSE_SIGNING_IDENTITY to a certificate hash first."
-    printf '%s\n' "$identity"
 }
 
 resolve_identity_team() {
@@ -128,7 +122,7 @@ resolve_development_team() {
         return
     fi
 
-    local configured_team identity_line team xcode_team
+    local configured_team identity_line team xcode_team cert_team
     configured_team="$(
         xcodebuild \
             -project "$XCODEPROJ" \
@@ -141,16 +135,19 @@ resolve_development_team() {
         return
     fi
 
-    xcode_team="$(resolve_xcode_team || true)"
-    if [ -n "$xcode_team" ]; then
-        printf '%s\n' "$xcode_team"
-        return
+    # 先从证书提取团队 ID（不会过期）
+    cert_team="$(resolve_identity_team)"
+
+    # 当 Xcode 已登录账号时，用 Xcode 首选项的 teamID
+    if xcode_accounts_configured; then
+        xcode_team="$(resolve_xcode_team || true)"
+        if [ -n "$xcode_team" ]; then
+            printf '%s\n' "$xcode_team"
+            return
+        fi
     fi
 
-    identity_line="$(first_apple_development_identity_line)"
-    team="$(printf '%s\n' "$identity_line" | sed -n 's/.*(\([A-Z0-9]\{10\}\)).*/\1/p')"
-    [ -n "$team" ] || fail "No Development Team found from signing identities. Set DEVPULSE_DEVELOPMENT_TEAM first."
-    printf '%s\n' "$team"
+    printf '%s\n' "$cert_team"
 }
 
 stop_running_app() {
@@ -173,8 +170,7 @@ stop_running_app() {
 }
 
 build_signed_app() {
-    local identity="$1"
-    local team="$2"
+    local team="$1"
 
     info "Building latest DevPulse.app with automatic signing"
     xcodebuild \
@@ -197,9 +193,25 @@ build_signed_app() {
         info "Removing test bundle from app product before install"
         mv "$BUILD_APP/Contents/PlugIns/DevPulseTests.xctest" \
             "${TMPDIR:-/tmp}/DevPulseTests.xctest.$$.bak"
-        # Re-sign after removal since codesign seal is now broken
-        codesign --force --sign "$identity" --timestamp=none --generate-entitlement-der "$BUILD_APP"
+        # Re-sign after removal since codesign seal is now broken.
+        # Extract signing identity from the already-signed app bundle.
+        local cert_name identity_hash
+        cert_name="$(codesign -d -vvvv "$BUILD_APP" 2>&1 | sed -n 's/.*Authority=\(.*\)/\1/p' | head -1 || true)"
+        if [ -z "$cert_name" ]; then
+            # Fallback: derive from keychain identity
+            identity_hash="$(security find-identity -v -p codesigning 2>/dev/null \
+                | awk '/Apple Development:/{print \$2; exit}' || true)"
+        else
+            identity_hash="$(security find-identity -v -p codesigning 2>/dev/null \
+                | grep -F "$cert_name" | awk '{print \$2; exit}' || true)"
+        fi
+        if [ -z "$identity_hash" ]; then
+            fail "Cannot find Apple Development signing identity for re-signing."
+        fi
+        info "Re-signing after test bundle removal"
+        codesign --force --sign "$identity_hash" --timestamp=none --generate-entitlement-der "$BUILD_APP"
     fi
+
     codesign --verify --deep --strict --verbose=2 "$BUILD_APP"
 }
 
@@ -311,14 +323,12 @@ PY
 main() {
     trap cleanup EXIT
 
-    local identity team
-    identity="$(resolve_signing_identity)"
+    local team
     verify_automatic_signing_prerequisites
     team="$(resolve_development_team)"
-    info "Using Apple Development signing identity: available"
     info "Using automatic signing team: resolved"
 
-    build_signed_app "$identity" "$team"
+    build_signed_app "$team"
     stop_running_app
     install_app
     launch_installed_app
