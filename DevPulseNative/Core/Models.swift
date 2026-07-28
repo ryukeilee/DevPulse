@@ -1743,6 +1743,27 @@ struct AppGroupData: Codable, Equatable {
         )
     }
 
+    func withIsRefreshing(_ refreshing: Bool?) -> AppGroupData {
+        AppGroupData(
+            schemaVersion: schemaVersion,
+            generatedAt: generatedAt,
+            writtenAt: writtenAt,
+            lastSuccessfulRefreshAt: lastSuccessfulRefreshAt,
+            historySchemaVersion: historySchemaVersion,
+            historyRecordingEnabled: historyRecordingEnabled,
+            scanSummary: scanSummary,
+            repositories: repositories,
+            recentActivityEvents: recentActivityEvents,
+            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
+            storageRevision: storageRevision,
+            persistenceState: persistenceState,
+            pendingItemWidgetSummary: pendingItemWidgetSummary,
+            isRefreshing: refreshing,
+            appVersion: appVersion,
+            storageFormatVersion: storageFormatVersion
+        )
+    }
+
     func withRecentActivityEvents(_ events: [ActivityEventSummary]) -> AppGroupData {
         AppGroupData(
             schemaVersion: schemaVersion,

@@ -1686,9 +1686,57 @@ final class ScanScheduler: ObservableObject {
         let metricsCollector = ScanMetricsCollector()
         scanGeneration &+= 1
         let generation = scanGeneration
+        let scanTimeoutSeconds = max(30, capturedConfig.scanTimeout)
         recordEvent(.scanStarted, "Scan started")
 
+        // Schedule a watchdog that force-resets scanning state if the scan
+        // task hangs or crashes.  The grace period (scanTimeout + 30 s) gives
+        // Git processes their full timeout plus a cushion for merge/persist.
+        let watchdogTimeout = scanTimeoutSeconds + 30.0
+        let watchdogTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(watchdogTimeout * 1_000_000_000))
+            } catch { return }  // Cancelled — scan finished normally.
+            await MainActor.run { [weak self] in
+                guard let self, self.scanGeneration == generation, self.isScanning else { return }
+                self.recordEvent(.scanFailed, "Scan watchdog fired after \(watchdogTimeout)s — forcing scan completion")
+                self.isScanning = false
+                self.currentProgress = nil
+                self.refreshPhase = .failure
+                self.refreshFailureMessage = "扫描超时，看门狗已强制结束"
+                self.scanTask = nil
+                var safeSnapshot = self.lastResult
+                safeSnapshot = AppGroupData(
+                    schemaVersion: safeSnapshot.schemaVersion,
+                    generatedAt: safeSnapshot.generatedAt,
+                    writtenAt: DateFormatting.nowISO(),
+                    lastSuccessfulRefreshAt: safeSnapshot.lastSuccessfulRefreshAt,
+                    historySchemaVersion: safeSnapshot.historySchemaVersion,
+                    historyRecordingEnabled: safeSnapshot.historyRecordingEnabled,
+                    scanSummary: safeSnapshot.scanSummary,
+                    repositories: safeSnapshot.repositories,
+                    recentActivityEvents: safeSnapshot.recentActivityEvents,
+                    repositoryUnavailableSinceByPath: safeSnapshot.repositoryUnavailableSinceByPath,
+                    storageRevision: safeSnapshot.storageRevision,
+                    persistenceState: safeSnapshot.persistenceState,
+                    pendingItemWidgetSummary: safeSnapshot.pendingItemWidgetSummary,
+                    isRefreshing: false,
+                    appVersion: safeSnapshot.appVersion,
+                    storageFormatVersion: safeSnapshot.storageFormatVersion
+                )
+                switch AppGroupStore.write(safeSnapshot) {
+                case .success:
+                    self.diagnostics.lastSnapshotStoreTrigger = "watchdog-timeout"
+                    AppGroupStore.reloadWidgets()
+                case .failure(let err):
+                    self.recordEvent(.scanFailed, "Watchdog could not write fallback snapshot: \(err)")
+                }
+                self.completeCurrentScanAndDrain()
+            }
+        }
+
         scanTask = Task.detached(priority: request.taskPriority) {
+            defer { watchdogTask.cancel() }
             // ---- Everything below runs OFF the main actor ----
 
             // 1. Git availability check (synchronous file check, off-main).
@@ -1747,6 +1795,8 @@ final class ScanScheduler: ObservableObject {
             // ---- Back on the main actor for result plumbing ----
             await MainActor.run { [weak self] in
                 guard let self else { return }
+                // If a newer scan generation already advanced, our result is
+                // stale — the newer scan owns `isScanning`.
                 guard self.scanGeneration == generation else { return }
                 self.scanTask = nil
                 self.lastScanMetrics = metricsCollector.snapshot()
@@ -1760,6 +1810,13 @@ final class ScanScheduler: ObservableObject {
                     self.refreshPhase = .idle
                     self.refreshFailureMessage = nil
                     self.recordEvent(.scanFailed, "Scan cancelled by a newer refresh request")
+                    // Write back the previous snapshot without isRefreshing so the
+                    // Widget does not remain stuck in "refreshing" state after a
+                    // cancelled scan. If a newer scan already started and advanced
+                    // the on-disk revision this write will be rejected by the
+                    // cross-process guard — that is safe because the new scan will
+                    // produce its own final snapshot.
+                    self.syncSharedSnapshot(from: self.lastResult, reason: "cancel")
                     self.completeCurrentScanAndDrain()
                     return
                 }
@@ -1900,12 +1957,14 @@ final class ScanScheduler: ObservableObject {
                 if hadChanges {
                     self.syncSharedSnapshot(from: recorded, previousSnapshot: previous, reason: "scan")
                 } else {
+                    // Even when no data changed we must still write back the snapshot
+                    // to clear the isRefreshing flag that was set at scan start;
+                    // otherwise the Widget sees isRefreshing == true forever.
+                    self.syncSharedSnapshot(from: recorded, previousSnapshot: previous, reason: "scan-nochanges")
                     self.diagnostics.lastRefreshCompletedAt = Date()
-                    self.diagnostics.lastSnapshotStoreTrigger = "scan"
+                    self.diagnostics.lastSnapshotStoreTrigger = "scan-nochanges"
                     self.diagnostics.lastSnapshotStoreState = .verified
-                    self.diagnostics.lastSnapshotStoreDetail = "仓库状态未变化，保留现有可信快照。"
-                    self.diagnostics.lastWidgetReloadState = .skipped
-                    self.diagnostics.lastWidgetReloadDetail = "仓库状态未变化，本次未写快照或刷新 Widget。"
+                    self.diagnostics.lastSnapshotStoreDetail = "仓库状态未变化，已刷新快照时间戳。"
                 }
                 self.completeCurrentScanAndDrain()
             }
@@ -2838,6 +2897,40 @@ final class ScanScheduler: ObservableObject {
 
             let pinned = applyPins(restoredSnapshot)
             lastResult = pinned
+
+            // If the persisted snapshot has a stale isRefreshing flag (e.g. from
+            // a previous scan that was killed or never completed), clear it now
+            // so the Widget doesn't remain stuck in "refreshing" state across
+            // app restarts.
+            if pinned.isRefreshing == true {
+                var cleared = pinned
+                cleared = AppGroupData(
+                    schemaVersion: pinned.schemaVersion,
+                    generatedAt: pinned.generatedAt,
+                    writtenAt: pinned.writtenAt,
+                    lastSuccessfulRefreshAt: pinned.lastSuccessfulRefreshAt,
+                    historySchemaVersion: pinned.historySchemaVersion,
+                    historyRecordingEnabled: pinned.historyRecordingEnabled,
+                    scanSummary: pinned.scanSummary,
+                    repositories: pinned.repositories,
+                    recentActivityEvents: pinned.recentActivityEvents,
+                    repositoryUnavailableSinceByPath: pinned.repositoryUnavailableSinceByPath,
+                    storageRevision: pinned.storageRevision,
+                    persistenceState: pinned.persistenceState,
+                    pendingItemWidgetSummary: pinned.pendingItemWidgetSummary,
+                    isRefreshing: nil,
+                    appVersion: pinned.appVersion,
+                    storageFormatVersion: pinned.storageFormatVersion
+                )
+                switch AppGroupStore.write(cleared) {
+                case .success:
+                    lastResult = cleared
+                    diagnostics.lastSnapshotStoreDetail = "已清除先前残留的 isRefreshing 状态。"
+                case .failure:
+                    break
+                }
+            }
+
             if pinned.repositories.contains(where: { $0.workspaceKind == nil }) {
                 // Snapshots written before workspace classification existed
                 // need one prompt refresh. The scanner can then inspect the

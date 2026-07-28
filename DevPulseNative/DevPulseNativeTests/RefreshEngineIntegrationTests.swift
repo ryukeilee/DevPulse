@@ -755,6 +755,177 @@ struct RefreshEngineIntegrationTests {
 
     // MARK: - 13. Per-stage time budget exhaustion
 
+    // MARK: - 12. Cancelled scan does not produce isRefreshing snapshot
+
+    @Test func cancelledScanIsRefreshingNil() async throws {
+        let root = reposRoot("cancel-isrefreshing")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repoURLs = try (0..<2).map { i in
+            let url = root.appendingPathComponent("repo-\(i)")
+            try createTempGitRepo(at: url)
+            return url
+        }
+
+        let mock = MockGitCommandRunner()
+        // Make repos 1 poll cancellation so we can cancel mid-scan
+        let repo1Canon = RepositoryIdentity.canonicalPath(repoURLs[1].path)
+        mock.setPollingPath(repo1Canon)
+
+        let engine = RefreshEngine()
+        let executeTask = Task {
+            await engine.execute(
+                config: scanConfig(maxConcurrent: 2, commandTimeout: 5, scanTimeout: 30),
+                scanRoots: [root.path],
+                knownRepositoryPaths: repoURLs.map { RepositoryIdentity.canonicalPath($0.path) },
+                forceRepositoryDiscovery: false,
+                source: .manual,
+                gitCommandRunner: mock.runner()
+            )
+        }
+
+        // Let discovery complete and the first status calls begin
+        try? await Task.sleep(for: .milliseconds(300))
+        await engine.cancel()
+
+        let result = await executeTask.value
+
+        #expect(result.isCancelled)
+        // The cancelled result's data should NOT have isRefreshing == true
+        // (it defaults to nil from previousSnapshot?.isRefreshing which is nil)
+        #expect(result.data.isRefreshing == nil || result.data.isRefreshing == false)
+    }
+
+    // MARK: - 13. Failed scan leaves isRefreshing nil in fallback snapshot
+
+    @Test func failedScanIsRefreshingNil() async throws {
+        let root = reposRoot("fail-isrefreshing")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repoURLs = try (0..<2).map { i in
+            let url = root.appendingPathComponent("repo-\(i)")
+            try createTempGitRepo(at: url)
+            return url
+        }
+
+        let mock = MockGitCommandRunner()
+        // All repos time out -> complete failure
+        for url in repoURLs {
+            let canonical = RepositoryIdentity.canonicalPath(url.path)
+            mock.setStatusResult(.timeout, for: canonical)
+        }
+
+        let engine = RefreshEngine()
+        let result = await engine.execute(
+            config: scanConfig(maxConcurrent: 2, commandTimeout: 1, scanTimeout: 10),
+            scanRoots: [root.path],
+            knownRepositoryPaths: repoURLs.map { RepositoryIdentity.canonicalPath($0.path) },
+            forceRepositoryDiscovery: false,
+            source: .manual,
+            gitCommandRunner: mock.runner()
+        )
+
+        #expect(result.data.isRefreshing == nil || result.data.isRefreshing == false)
+        // Result data should still have entries with error status
+        #expect(result.data.repositories.allSatisfy { $0.status == .error || $0.errorMessage != nil })
+    }
+
+    // MARK: - 14. Multiple successive cancellations produce clean final state
+
+    @Test func multipleCancellationsIsRefreshingNil() async throws {
+        let root = reposRoot("multi-cancel")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repoURLs = try (0..<3).map { i in
+            let url = root.appendingPathComponent("repo-\(i)")
+            try createTempGitRepo(at: url)
+            return url
+        }
+
+        let mock = MockGitCommandRunner()
+        // Both slow repos to ensure we can cancel mid-scan
+        for url in repoURLs {
+            let canonical = RepositoryIdentity.canonicalPath(url.path)
+            mock.setPollingPath(canonical)
+        }
+
+        // First engine: cancelled immediately
+        let engine1 = RefreshEngine()
+        let task1 = Task {
+            await engine1.execute(
+                config: scanConfig(maxConcurrent: 2, commandTimeout: 5, scanTimeout: 30),
+                scanRoots: [root.path],
+                knownRepositoryPaths: repoURLs.map { RepositoryIdentity.canonicalPath($0.path) },
+                forceRepositoryDiscovery: false,
+                source: .manual,
+                gitCommandRunner: mock.runner()
+            )
+        }
+        try? await Task.sleep(for: .milliseconds(100))
+        await engine1.cancel()
+        let result1 = await task1.value
+        #expect(result1.isCancelled)
+        #expect(result1.data.isRefreshing == nil || result1.data.isRefreshing == false)
+
+        // Second engine: cancelled after partial progress
+        let mock2 = MockGitCommandRunner()
+        for url in repoURLs {
+            let canonical = RepositoryIdentity.canonicalPath(url.path)
+            mock2.setPollingPath(canonical)
+        }
+        let engine2 = RefreshEngine()
+        let task2 = Task {
+            await engine2.execute(
+                config: scanConfig(maxConcurrent: 2, commandTimeout: 5, scanTimeout: 30),
+                scanRoots: [root.path],
+                knownRepositoryPaths: repoURLs.map { RepositoryIdentity.canonicalPath($0.path) },
+                forceRepositoryDiscovery: false,
+                previousSnapshot: result1.data,
+                source: .manual,
+                gitCommandRunner: mock2.runner()
+            )
+        }
+        try? await Task.sleep(for: .milliseconds(500))
+        await engine2.cancel()
+        let result2 = await task2.value
+        #expect(result2.isCancelled)
+        #expect(result2.data.isRefreshing == nil || result2.data.isRefreshing == false)
+    }
+
+    // MARK: - 15. Successful scan carries isRefreshing from previous snapshot
+
+    @Test func successfulScanPreservesPreviousIsRefreshing() async throws {
+        let root = reposRoot("success-isrefreshing")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repoURLs = try (0..<2).map { i in
+            let url = root.appendingPathComponent("repo-\(i)")
+            try createTempGitRepo(at: url)
+            return url
+        }
+
+        let mock = MockGitCommandRunner()
+        let engine = RefreshEngine()
+
+        // Previous snapshot had isRefreshing: true
+        let previous = AppGroupData.empty().withIsRefreshing(true)
+
+        let result = await engine.execute(
+            config: scanConfig(),
+            scanRoots: [root.path],
+            knownRepositoryPaths: repoURLs.map { RepositoryIdentity.canonicalPath($0.path) },
+            forceRepositoryDiscovery: false,
+            previousSnapshot: previous,
+            source: .manual,
+            gitCommandRunner: mock.runner()
+        )
+
+        #expect(result.isCancelled == false)
+        #expect(result.data.repositories.count == 2)
+        // The engine copies isRefreshing from the previous snapshot
+        #expect(result.data.isRefreshing == true)
+    }
+
     @Test func perStageTimeBudgetExhaustion() async throws {
         let root = reposRoot("budget")
         defer { try? FileManager.default.removeItem(at: root) }

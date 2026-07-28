@@ -126,7 +126,9 @@
 		FB29D9E09ED33D3ACE700E55 /* FileCategoryClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAB879833D061CF68A12B3FD /* FileCategoryClassifierTests.swift */; };
 		FCE281428C518AFEB049B14D /* BuildConfigConsistencyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47E6795FFA7C4C7B1687D59D /* BuildConfigConsistencyTests.swift */; };
 		FD91F63465149AA13A9675BD /* DevPulseWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 193D9DD3EE1AFEEAD2F6BD9B /* DevPulseWidget.swift */; };
+		B5DF0FFDB8C681016CDA /* RefreshCompletionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7A4BDDBCB0AF1BCDAE7 /* RefreshCompletionTests.swift */; };
 /* End PBXBuildFile section */
+
 
 /* Begin PBXContainerItemProxy section */
 		8296BC3A35D7846C0999A54E /* PBXContainerItemProxy */ = {
@@ -275,7 +277,9 @@
 		F57AB6845B384BF0D02696FE /* CommitReadinessEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommitReadinessEngine.swift; sourceTree = "<group>"; };
 		F8E4EE483D4ED7F6527C3076 /* DevPulse.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DevPulse.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		FD86A623CAC3519AC0C30562 /* GitCommitLogParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitCommitLogParser.swift; sourceTree = "<group>"; };
+		E7A4BDDBCB0AF1BCDAE7 /* RefreshCompletionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RefreshCompletionTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
 
 /* Begin PBXFrameworksBuildPhase section */
 		0BDC3F1DB6B226E087A2A3CC /* Frameworks */ = {
@@ -309,7 +313,8 @@
 				983C7DEA1C0CA551532CEFE4 /* BackupRetentionPolicy.swift */,
 				725EF302FE4452FE8B9A5DB8 /* BackupScheduler.swift */,
 				BA5EEFEFD2B8A1D86CD5A217 /* RestoreManager.swift */,
-			);
+					E7A4BDDBCB0AF1BCDAE7 /* RefreshCompletionTests.swift */,
+);
 			path = Backup;
 			sourceTree = "<group>";
 		};
@@ -599,7 +604,8 @@
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = (
-			);
+					B5DF0FFDB8C681016CDA /* RefreshCompletionTests.swift in Sources */,
+);
 			inputFileListPaths = (
 			);
 			inputPaths = (

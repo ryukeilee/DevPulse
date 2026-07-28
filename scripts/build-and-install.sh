@@ -81,7 +81,41 @@ build_unsigned() {
     ok "Build succeeded"
 }
 
-# ── sign manually ────────────────────────────────────────────────────────
+# ── fix_app_icon ──────────────────────────────────────────────────────────
+
+fix_app_icon() {
+    local source_png="$PROJECT_DIR/Assets.xcassets/AppIcon.appiconset/icon-1024.png"
+    local res_dir="$BUILD_APP/Contents/Resources"
+
+    [ -f "$source_png" ] || { info "  (skip) source icon not found at $source_png"; return; }
+
+    info "Regenerating AppIcon.icns with complete resolution set…"
+
+    # 创建临时 iconset 目录（必须 .iconset 结尾），用 sips 生成所有标准尺寸
+    local iconset_name
+    iconset_name="$(mktemp -u /tmp/devpulse-iconset.XXXXXX)"
+    local iconset_dir="${iconset_name}.iconset"
+    mkdir -p "$iconset_dir"
+
+    sips -z 16 16   "$source_png" --out "$iconset_dir/icon_16x16.png"        >/dev/null 2>&1
+    sips -z 32 32   "$source_png" --out "$iconset_dir/icon_16x16@2x.png"     >/dev/null 2>&1
+    sips -z 32 32   "$source_png" --out "$iconset_dir/icon_32x32.png"        >/dev/null 2>&1
+    sips -z 64 64   "$source_png" --out "$iconset_dir/icon_32x32@2x.png"     >/dev/null 2>&1
+    sips -z 128 128 "$source_png" --out "$iconset_dir/icon_128x128.png"      >/dev/null 2>&1
+    sips -z 256 256 "$source_png" --out "$iconset_dir/icon_128x128@2x.png"   >/dev/null 2>&1
+    sips -z 256 256 "$source_png" --out "$iconset_dir/icon_256x256.png"      >/dev/null 2>&1
+    sips -z 512 512 "$source_png" --out "$iconset_dir/icon_256x256@2x.png"   >/dev/null 2>&1
+    sips -z 512 512 "$source_png" --out "$iconset_dir/icon_512x512.png"      >/dev/null 2>&1
+    cp "$source_png" "$iconset_dir/icon_512x512@2x.png"
+
+    # 用 iconutil 生成完整 icns 并替换 bundle 中的文件
+    iconutil -c icns "$iconset_dir" -o "$res_dir/AppIcon.icns" 2>&1 | sed 's/^/  /'
+    rm -rf "$iconset_dir"
+
+    local new_size
+    new_size="$(stat -f%z "$res_dir/AppIcon.icns" 2>/dev/null || echo 0)"
+    ok "AppIcon.icns regenerated ($new_size bytes)"
+}
 
 sign_bundle() {
     local identity="$1"
@@ -155,6 +189,28 @@ install_app() {
     cp -R "$BUILD_APP" "$INSTALL_APP"
     ok "Installed"
 
+    # 验证安装后图标
+    local icon_file="$INSTALL_APP/Contents/Resources/AppIcon.icns"
+    if [ -f "$icon_file" ]; then
+        ok "AppIcon.icns present ($(stat -f%z "$icon_file") bytes)"
+    else
+        # 没有 .icns 时为 COMBINE_HIDPI_IMAGES=NO 构建，确认 Assets.car 中有图标
+        local car_file="$INSTALL_APP/Contents/Resources/Assets.car"
+        if [ -f "$car_file" ]; then
+            local has_icon
+            has_icon="$(xcrun assetutil --info "$car_file" 2>/dev/null | grep -c '"Name" : "AppIcon"' || true)"
+            [ "$has_icon" -gt 0 ] && ok "AppIcon found in Assets.car" || fail "AppIcon missing from Assets.car"
+        else
+            fail "No icon resource found in app bundle"
+        fi
+    fi
+
+    # 刷新图标缓存 — Launch Services 注册确保 Finder/Dock 重新读取图标
+    local lsregister="/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister"
+    info "Refreshing Launch Services registration…"
+    "$lsregister" -f "$INSTALL_APP" 2>&1 | sed 's/^/  /' || true
+    touch "$INSTALL_APP"
+
     # 验证安装后的签名
     local app_team widget_team
     app_team="$(codesign -dvvv "$INSTALL_APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
@@ -189,6 +245,7 @@ main() {
 
     stop_running_app
     build_unsigned
+    fix_app_icon
     sign_bundle "$identity" "$team"
     install_app
     launch_app
