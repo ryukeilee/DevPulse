@@ -277,35 +277,26 @@ actor RefreshEngine {
         publishProgress(stage: .persistence, total: 1, completed: 1,
                         elapsed: persistElapsed, finished: true, startedAt: overallStart)
 
-        // ── Stage 6: Widget sync ─────────────────────────────────────────
-        // Reload WidgetKit timelines so the widget picks up the newly
-        // persisted snapshot. The scheduler additionally calls reloadWidgets()
-        // for non-scan triggers (e.g. pin toggle), so this stage covers the
-        // primary scan path. Redundant reloads are harmless — WidgetKit
-        // coalesces them.
+        // ── Stage 6: Widget sync (deferred) ──────────────────────────────
+        // Widget timeline reload is intentionally NOT performed here because
+        // the snapshot has NOT been written to disk yet — this stage only
+        // prepares the data. Calling reloadTimelines before persistence would
+        // cause the Widget to read stale data from disk, and WidgetKit may
+        // coalesce a subsequent reload, making the Widget miss the final
+        // snapshot entirely.
+        //
+        // The caller (ScanScheduler.syncSharedSnapshot) handles the actual
+        // write + reload in handleSyncSnapshotSuccess, which also calls
+        // AppGroupStore.reloadWidgets(). Other non-scan triggers (pin toggle,
+        // lifecycle events, manual refresh) go through the same path.
         let stage6Start = ProcessInfo.processInfo.systemUptime
-        logger.debug("Stage .widgetSync starting")
-        let widgetReloadError: String?
-        do {
-            #if canImport(WidgetKit)
-            if #available(macOS 14.0, *) {
-                WidgetCenter.shared.reloadTimelines(ofKind: WidgetIdentity.kind)
-                logger.debug("Widget timelines reloaded for kind \(WidgetIdentity.kind)")
-            } else {
-                logger.debug("Widget reload skipped: macOS < 14.0")
-            }
-            #else
-            logger.debug("Widget reload skipped: WidgetKit not available")
-            #endif
-            widgetReloadError = nil
-        } catch {
-            widgetReloadError = error.localizedDescription
-            warnings.append("Widget timeline reload failed: \(error.localizedDescription)")
-        }
+        logger.debug("Stage .widgetSync (deferred): snapshot not yet persisted, reload handled by caller")
         let widgetElapsed = ProcessInfo.processInfo.systemUptime - stage6Start
-        logger.debug("Stage .widgetSync finished elapsed_ms=\(Int(widgetElapsed * 1000)) error=\(widgetReloadError ?? "nil")")
+        logger.debug("Stage .widgetSync finished elapsed_ms=\(Int(widgetElapsed * 1000))")
+        // No widget reload was attempted (deferred to caller), so error is nil.
+        let widgetReloadError: String? = nil
 
-        publishProgress(stage: .widgetSync, total: 1, completed: widgetReloadError == nil ? 1 : 0,
+        publishProgress(stage: .widgetSync, total: 1, completed: 1,
                         elapsed: widgetElapsed, finished: true, startedAt: overallStart)
 
         progressContinuation.finish()

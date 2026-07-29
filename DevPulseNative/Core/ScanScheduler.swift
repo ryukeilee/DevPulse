@@ -1234,6 +1234,10 @@ final class ScanScheduler: ObservableObject {
         startSleepWakeMonitoring()
         startApplicationLifecycleMonitoring()
         startMemoryPressureMonitoring()
+        // Enable the background scan timer so the widget receives periodic
+        // data updates. refreshIfNeeded: false defers the first scan to the
+        // caller's lifecycle recovery scan, avoiding a redundant scan at startup.
+        startBackgroundScanning(refreshIfNeeded: false)
     }
 
     convenience init(
@@ -1885,7 +1889,7 @@ final class ScanScheduler: ObservableObject {
                         current: trustedResult,
                         observedAt: trustedResult.generatedAt
                     )
-                    : previous
+                    : trustedResult
                 self.cleanupRemovedRepositoryPins(previous: previous, current: recorded)
 
                 if hadChanges {

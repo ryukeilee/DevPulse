@@ -129,7 +129,12 @@ struct Provider: TimelineProvider {
             if entry.snapshot?.isRefreshing == true {
                 nextRefreshInterval = 60
             } else {
-                nextRefreshInterval = 900
+                // Poll every 300 s (5 min) so the widget checks for updates
+                // at least as often as the base scan interval. A longer
+                // interval (900 s) combined with the 600 s stale threshold
+                // creates a visible gap where data is stale but the widget
+                // won't auto-refresh for up to 5 more minutes.
+                nextRefreshInterval = 300
             }
         }
         let nextRefresh = Date().addingTimeInterval(nextRefreshInterval)
