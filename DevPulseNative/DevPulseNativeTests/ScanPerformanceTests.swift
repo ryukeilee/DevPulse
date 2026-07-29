@@ -616,7 +616,6 @@ struct ScanPerformanceTests {
 
         scheduler.handleLifecycleRefresh(.windowReopened, now: now)
         scheduler.handleLifecycleRefresh(.applicationBecameActive, now: now)
-        scheduler.handleLifecycleRefresh(.wake, now: now)
         try? await Task.sleep(for: .milliseconds(300))
 
         let state = await probe.state()
@@ -1728,8 +1727,11 @@ extension ScanPerformanceTests {
         #expect(await waitUntil { await probe.requestCount >= 1 })
 
         // Try to start multiple concurrent scans.
+        // Use non-forcing sources: .windowReopen and .timer are properly
+        // deduplicated while a scan is running, unlike .wake or .pathRecovery
+        // which are designed to supersede an in-progress scan.
+        scheduler.scanNow(source: .windowReopen)
         scheduler.scanNow(source: .timer)
-        scheduler.scanNow(source: .wake)
         scheduler.scanNow(source: .manual)
 
         // Only one scan should have been started.

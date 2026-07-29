@@ -154,7 +154,7 @@ private func snapshotWithRepository(
 // MARK: - Sleep/Wake Lifecycle
 // ─────────────────────────────────────────────────────────────────────
 
-@Suite("Sleep/Wake Lifecycle")
+@Suite("Sleep/Wake Lifecycle", .serialized)
 @MainActor struct SleepWakeLifecycleTests {
 
     // ────────────────────────────────────────────────
@@ -245,21 +245,29 @@ private func snapshotWithRepository(
     @Test("rapid sleep/wake cycles do not cause duplicate scan tasks")
     func rapidSleepWakeCycles() async {
         let executor = MockScanExecutor()
-        executor.setDelay(0.05) // Short scan
+        executor.setDelay(0.5) // Short but measurable scan
         let scheduler = makeTestScheduler(scanExecutor: executor)
+
+        // Ensure background scanning is enabled so wake events trigger scans
+        scheduler.startBackgroundScanning(refreshIfNeeded: false)
+        defer { scheduler.stopBackgroundScanning() }
+
+        // Set an empty snapshot so wake refresh decision triggers
+        scheduler.lastResult = .empty()
 
         // Simulate multiple rapid sleep/wake cycles
         for _ in 0..<5 {
             scheduler.suspendForSleep()
             scheduler.resumeAfterWake()
-            // Yield to let deferred scan flush (200ms coalescing)
-            try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+            // No sleep between cycles — rapid transitions exercise the throttle
+            try? await Task.sleep(nanoseconds: 10_000_000) // 10ms
         }
 
-        // Allow deferred scan to fire
-        try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
+        // Allow any deferred scan (200ms coalescing) to settle
+        try? await Task.sleep(nanoseconds: 500_000_000) // 500ms
 
-        // At most one scan should have completed (or started)
+        // At most one scan should have been triggered (the wake throttle
+        // minimumWakeScanInterval = 15s suppresses subsequent wake events)
         #expect(executor.executionCount <= 1,
                 "Rapid sleep/wake should not cause multiple scans")
     }

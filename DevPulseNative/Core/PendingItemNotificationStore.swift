@@ -86,7 +86,7 @@ final class PendingItemNotificationStore: @unchecked Sendable {
                 let empty = PendingItemNotificationArchive()
                 // Persist the empty archive to disk so the same corrupt data
                 // is not re-read on the next load.
-                if case .failure(let writeError) = saveUnsafe(empty) {
+                if case .failure(let writeError) = saveUnsafeUnlocked(empty) {
                     logger.error("failed to replace corrupt notification file: \(writeError.localizedDescription)")
                 }
                 cachedArchive = empty
@@ -98,7 +98,7 @@ final class PendingItemNotificationStore: @unchecked Sendable {
                 let empty = PendingItemNotificationArchive()
                 // Persist the empty archive to disk so the same corrupt data
                 // is not re-read on the next load.
-                if case .failure(let writeError) = saveUnsafe(empty) {
+                if case .failure(let writeError) = saveUnsafeUnlocked(empty) {
                     logger.error("failed to replace corrupt notification file: \(writeError.localizedDescription)")
                 }
                 cachedArchive = empty
@@ -131,39 +131,45 @@ final class PendingItemNotificationStore: @unchecked Sendable {
 
     private func saveUnsafe(_ archive: PendingItemNotificationArchive) -> Result<PendingItemNotificationArchive, PendingItemStoreError> {
         withFileLock {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data: Data
-            do {
-                data = try encoder.encode(archive)
-            } catch {
-                return .failure(.writeFailed("encode: \(error.localizedDescription)"))
-            }
-
-            let directory = fileURL.deletingLastPathComponent()
-            do {
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            } catch {
-                return .failure(.writeFailed("dir: \(error.localizedDescription)"))
-            }
-
-            let tmpURL = directory.appendingPathComponent(".\(Self.fileName).tmp-\(UUID().uuidString)")
-            defer { try? FileManager.default.removeItem(at: tmpURL) }
-
-            do {
-                try data.write(to: tmpURL, options: [.withoutOverwriting])
-                try fsyncFile(at: tmpURL)
-            } catch {
-                return .failure(.writeFailed("staging: \(error.localizedDescription)"))
-            }
-
-            guard Darwin.rename(tmpURL.path, fileURL.path) == 0 else {
-                return .failure(.writeFailed("rename: \(String(cString: strerror(errno)))"))
-            }
-
-            fsyncDirectory(at: directory)
-            return .success(archive)
+            saveUnsafeUnlocked(archive)
         }
+    }
+
+    /// Write the archive to disk without acquiring any lock.
+    /// Caller must already hold `withFileLock` (processLock + POSIX lock).
+    private func saveUnsafeUnlocked(_ archive: PendingItemNotificationArchive) -> Result<PendingItemNotificationArchive, PendingItemStoreError> {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data: Data
+        do {
+            data = try encoder.encode(archive)
+        } catch {
+            return .failure(.writeFailed("encode: \(error.localizedDescription)"))
+        }
+
+        let directory = fileURL.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            return .failure(.writeFailed("dir: \(error.localizedDescription)"))
+        }
+
+        let tmpURL = directory.appendingPathComponent(".\(Self.fileName).tmp-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+        do {
+            try data.write(to: tmpURL, options: [.withoutOverwriting])
+            try fsyncFile(at: tmpURL)
+        } catch {
+            return .failure(.writeFailed("staging: \(error.localizedDescription)"))
+        }
+
+        guard Darwin.rename(tmpURL.path, fileURL.path) == 0 else {
+            return .failure(.writeFailed("rename: \(String(cString: strerror(errno)))"))
+        }
+
+        fsyncDirectory(at: directory)
+        return .success(archive)
     }
 
     /// Record that a notification was sent for an item.

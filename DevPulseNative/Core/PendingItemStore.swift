@@ -130,7 +130,8 @@ final class PendingItemStore: @unchecked Sendable {
                 // Persist the empty archive to disk so the same corrupt data
                 // is not re-read on the next load, preventing repeated failures
                 // after a crash or partial write.
-                if case .failure(let writeError) = saveUnsafe(empty) {
+                // Use unlocked variant — caller already holds `withFileLock`
+                if case .failure(let writeError) = saveUnsafeUnlocked(empty) {
                     logger.error("failed to replace corrupt pending items file: \(writeError.localizedDescription)")
                 }
                 cachedArchive = empty
@@ -143,7 +144,8 @@ final class PendingItemStore: @unchecked Sendable {
                 let empty = PendingItemArchive()
                 // Persist the empty archive to disk so the same corrupt data
                 // is not re-read on the next load.
-                if case .failure(let writeError) = saveUnsafe(empty) {
+                // Use unlocked variant — caller already holds `withFileLock`
+                if case .failure(let writeError) = saveUnsafeUnlocked(empty) {
                     logger.error("failed to replace corrupt pending items file: \(writeError.localizedDescription)")
                 }
                 cachedArchive = empty
@@ -159,7 +161,8 @@ final class PendingItemStore: @unchecked Sendable {
 
             if archive.schemaVersion < PendingItemArchive.currentSchemaVersion {
                 let migrated = migrate(archive: archive)
-                switch saveUnsafe(migrated) {
+                // Use unlocked variant — caller already holds `withFileLock`
+                switch saveUnsafeUnlocked(migrated) {
                 case .success:
                     cachedArchive = migrated
                     return .success(migrated)
@@ -191,39 +194,45 @@ final class PendingItemStore: @unchecked Sendable {
 
     private func saveUnsafe(_ archive: PendingItemArchive) -> Result<PendingItemArchive, PendingItemStoreError> {
         withFileLock {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data: Data
-            do {
-                data = try encoder.encode(archive)
-            } catch {
-                return .failure(.writeFailed("encode failed: \(error.localizedDescription)"))
-            }
-
-            let directory = fileURL.deletingLastPathComponent()
-            do {
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            } catch {
-                return .failure(.writeFailed("directory creation: \(error.localizedDescription)"))
-            }
-
-            let tmpURL = directory.appendingPathComponent(".pending-items.tmp-\(UUID().uuidString)")
-            defer { try? FileManager.default.removeItem(at: tmpURL) }
-
-            do {
-                try data.write(to: tmpURL, options: [.withoutOverwriting])
-                try fsyncFile(at: tmpURL)
-            } catch {
-                return .failure(.writeFailed("staging: \(error.localizedDescription)"))
-            }
-
-            guard Darwin.rename(tmpURL.path, fileURL.path) == 0 else {
-                return .failure(.writeFailed("atomic rename: \(String(cString: strerror(errno)))"))
-            }
-
-            fsyncDirectory(at: directory)
-            return .success(archive)
+            saveUnsafeUnlocked(archive)
         }
+    }
+
+    /// Write the archive to disk without acquiring any lock.
+    /// Caller must already hold `withFileLock` (processLock + POSIX lock).
+    private func saveUnsafeUnlocked(_ archive: PendingItemArchive) -> Result<PendingItemArchive, PendingItemStoreError> {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data: Data
+        do {
+            data = try encoder.encode(archive)
+        } catch {
+            return .failure(.writeFailed("encode failed: \(error.localizedDescription)"))
+        }
+
+        let directory = fileURL.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            return .failure(.writeFailed("directory creation: \(error.localizedDescription)"))
+        }
+
+        let tmpURL = directory.appendingPathComponent(".pending-items.tmp-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+        do {
+            try data.write(to: tmpURL, options: [.withoutOverwriting])
+            try fsyncFile(at: tmpURL)
+        } catch {
+            return .failure(.writeFailed("staging: \(error.localizedDescription)"))
+        }
+
+        guard Darwin.rename(tmpURL.path, fileURL.path) == 0 else {
+            return .failure(.writeFailed("atomic rename: \(String(cString: strerror(errno)))"))
+        }
+
+        fsyncDirectory(at: directory)
+        return .success(archive)
     }
 
     // MARK: - Mutations

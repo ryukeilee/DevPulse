@@ -56,7 +56,7 @@ fail()  { printf '\033[31m[verify] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 build_for_testing() {
     info "Building for testing (shared DerivedData: $DERIVED_DATA_PATH)…"
     local log_file
-    log_file="$(mktemp "${TMPDIR:-/tmp}/devpulse-build.XXXXXX.log")"
+    log_file="$(mktemp "${TMPDIR:-/tmp}/devpulse-build.XXXXXX")"
 
     if timeout "$BUILD_TIMEOUT" xcodebuild \
         "${COMMON_ARGS[@]}" \
@@ -88,7 +88,7 @@ run_tests() {
     fi
 
     local log_file
-    log_file="$(mktemp "${TMPDIR:-/tmp}/devpulse-test.XXXXXX.log")"
+    log_file="$(mktemp "${TMPDIR:-/tmp}/devpulse-test.XXXXXX")"
 
     if timeout "$TEST_TIMEOUT" xcodebuild \
         "${test_args[@]}" \

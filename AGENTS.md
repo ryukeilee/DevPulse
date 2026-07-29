@@ -35,20 +35,26 @@ git config core.hooksPath .githooks
 │   ├── pre-commit            # runs scripts/secret-scan.sh staged
 │   └── pre-push              # runs scripts/secret-scan.sh tracked
 ├── DevPulseNative/           # ⬅ primary product (see DevPulseNative/AGENTS.md)
-│   ├── App/                  # SwiftUI views (DevPulseApp, ContentView, settings, etc.)
-│   ├── Core/                 # scanning, models, readiness, risk, activity, snapshots
+│   ├── App/                  # SwiftUI views (DevPulseApp, ContentView, settings, diagnostics, etc.)
+│   ├── Core/                 # scanning, models, readiness, risk, activity, snapshots, backup
+│   │   └── Backup/           # backup/restore engine, migration, privacy filter, retention
 │   ├── Utilities/            # ProcessRunner, DateFormatting
-│   ├── Widget/               # WidgetKit extension
-│   ├── DevPulseNativeTests/  # Swift Testing coverage
+│   ├── Widget/               # WidgetKit extension (DevPulseWidget.swift, entitlements, plist)
+│   ├── DevPulseNativeTests/  # Swift Testing coverage (30+ test files)
 │   ├── Assets.xcassets/      # app icon
 │   ├── project.yml           # XcodeGen declarative project spec
 │   └── AGENTS.md             # detailed native-app agent guidelines
 ├── scripts/
-│   ├── verify-widgetkit.sh
-│   ├── verify-activity-timeline.sh
-│   ├── install-and-self-check.sh
-│   ├── secret-scan.sh
-│   └── generate-icon.mjs
+│   ├── verify.sh                    # unified build/test/acceptance script
+│   ├── install-and-self-check.sh    # signed install + runtime self-check
+│   ├── verify-install-upgrade.sh    # upgrade integrity verification
+│   ├── verify-upgrade.sh            # upgrade path verification
+│   ├── verify-build-consistency.sh  # build config consistency checks
+│   ├── verify-widgetkit.sh          # WidgetKit wiring verification
+│   ├── verify-activity-timeline.sh  # activity timeline logic check
+│   ├── secret-scan.sh               # secrets scanning (staged/tracked)
+│   ├── generate-icon.mjs            # app icon generation
+│   └── build-and-install.sh.disabled  # replaced by install-and-self-check.sh
 ├── docs/
 │   └── widgetkit-troubleshooting.md
 ├── CLAUDE.md
@@ -63,38 +69,149 @@ Do not commit DerivedData, build products, installed app bundles, or Xcode user 
 
 ## Core files (DevPulseNative/Core/)
 
+### Scanning & Discovery
+
+| File | Purpose |
+|------|---------|
+| `GitRepositoryScanner.swift` | actor-based repo discovery + batched git-status read + slow-repo tracking |
+| `GitStatusParser.swift` | parse `git status --short` output |
+| `GitCommitLogParser.swift` | parse `git log` output for recent commits |
+| `ScanLocationProvider.swift` | scan root resolution |
+| `ExcludedDirectoryRules.swift` | directory exclusion rules |
+| `ScanScheduler.swift` | timer-based scan scheduling; manages pending item lifecycle |
+
+### Models & Persistence
+
 | File | Purpose |
 |------|---------|
 | `Models.swift` | RepositorySnapshot, RiskLevel, AppGroupData, WidgetRepositoryEntry, ScanSummary |
-| `GitRepositoryScanner.swift` | actor-based repo discovery + batched git-status read + slow-repo tracking |
-| `GitStatusParser.swift` | parse `git status --short` output |
-| `AppGroupStore.swift` | read/write AppGroupData to shared container |
+| `AppGroupStore.swift` | read/write AppGroupData to shared container (JSON-based) |
 | `SharedSnapshotStore.swift` | atomic snapshot persistence for app + Widget sharing |
-| `ActivityEvent.swift` | activity event model and derivation |
-| `RepositorySorter.swift` | sort repos by recency, dirtiness, branch |
-| `RiskHintEngine.swift` | flag risky changes |
-| `CommitReadinessEngine.swift` | rules-based readiness assessment |
-| `CommitReadinessBadge.swift` | badge rendering logic for readiness |
-| `ScanScheduler.swift` | timer-based scan scheduling; manages pending item lifecycle |
-| `ScanLocationProvider.swift` | scan root resolution |
-| `ExcludedDirectoryRules.swift` | directory exclusion rules |
-| `LaunchAtLoginController.swift` | ServiceManagement-based launch-at-login |
 | `PendingItem.swift` | pending item model, severity/lifecycle enums, notification strategy, widget summary |
 | `PendingItemStore.swift` | atomic persistence for pending items, user action management, schema migration |
 | `PendingItemNotificationStore.swift` | notification state persistence, cooldown tracking |
 | `PendingItemEvaluator.swift` | 12-rule engine for repository and workspace anomaly detection |
+| `RepositoryHistoryEntry.swift` | repository history entry model |
+| `RepositoryHistoryStore.swift` | repository history persistence |
+
+### Readiness & Risk
+
+| File | Purpose |
+|------|---------|
+| `CommitReadinessEngine.swift` | rules-based readiness assessment |
+| `CommitReadinessBadge.swift` | badge rendering logic for readiness |
+| `ReleaseReadinessEngine.swift` | release readiness assessment |
+| `RiskHintEngine.swift` | flag risky changes |
+| `RepositoryHealthEngine.swift` | repository health analysis |
+| `RegressionGate.swift` | regression detection |
+
+### Activity & Events
+
+| File | Purpose |
+|------|---------|
+| `ActivityEvent.swift` | activity event model and derivation |
+| `RepositorySorter.swift` | sort repos by recency, dirtiness, branch |
+
+### Refresh & Lifecycle
+
+| File | Purpose |
+|------|---------|
+| `RefreshEngine.swift` | orchestrates full refresh pipeline (discovery → scan → analysis → persistence → widget sync) |
+| `RefreshObservation.swift` | refresh observation helpers |
+| `RefreshStage.swift` | refresh stage enum and timing |
+| `UnifiedLifecycleSystem.swift` | unified lifecycle management (app → widget coordination) |
+| `StartupDiagnostics.swift` | startup diagnostic checks |
+| `BaselineManager.swift` | performance baseline management |
+| `PerformanceBaseline.swift` | performance baseline data model |
+
+### Impact Analysis
+
+| File | Purpose |
+|------|---------|
+| `ChangeImpactEngine.swift` | change impact analysis engine |
+| `ChangeImpactModels.swift` | change impact data models |
+| `ChangeImpactStore.swift` | change impact persistence |
+| `ChangeImpactDiagnostics.swift` | change impact diagnostic reporting |
+| `ImpactPropagationEngine.swift` | impact propagation graph analysis |
+| `DependencyInferenceEngine.swift` | dependency inference from file structure |
+| `FileCategoryClassifier.swift` | file type classification |
+
+### Backup & Restore
+
+| File | Purpose |
+|------|---------|
+| `Backup/BackupManager.swift` | backup orchestration |
+| `Backup/BackupModels.swift` | backup data models |
+| `Backup/BackupMigrationEngine.swift` | backup schema migration |
+| `Backup/BackupMergeResolver.swift` | merge conflict resolution for backups |
+| `Backup/BackupPrivacyFilter.swift` | privacy filter for exported backups |
+| `Backup/BackupRetentionPolicy.swift` | retention policy enforcement |
+| `Backup/BackupScheduler.swift` | scheduled backup triggers |
+| `Backup/RestoreManager.swift` | restore orchestration |
+
+### Diagnostics & Tooling
+
+| File | Purpose |
+|------|---------|
+| `DiagnosticReport.swift` | structured diagnostic report generation |
+| `DiagnosticMigration.swift` | diagnostic data migration |
+| `FaultInjector.swift` | fault injection for resilience testing |
+| `BenchmarkSuite.swift` | benchmark suite for performance regression |
+| `ScenarioGenerator.swift` | scenario generation for integration tests |
+| `AnalysisCache.swift` | analysis result caching |
+| `AnalysisPipeline.swift` | analysis pipeline orchestration |
+
+### Workspace
+
+| File | Purpose |
+|------|---------|
+| `WorkspaceModel.swift` | workspace data model |
+| `WorkspaceAggregationEngine.swift` | aggregate repos into workspaces |
+| `WorkspaceAutoSuggestEngine.swift` | auto-suggest workspace groupings |
+| `WorkspaceMigration.swift` | workspace data migration |
+
+### Misc
+
+| File | Purpose |
+|------|---------|
+| `LaunchAtLoginController.swift` | ServiceManagement-based launch-at-login |
 
 ## Test files (DevPulseNative/DevPulseNativeTests/)
 
 | File | Coverage |
 |------|----------|
 | `ActivityEventTests.swift` | activity event derivation |
+| `AnalysisCacheTests.swift` | analysis cache behavior |
+| `BackupEngineTests.swift` | backup/restore engine |
+| `BuildConfigConsistencyTests.swift` | build config consistency |
+| `ChangeImpactDataModelTests.swift` | change impact data models |
 | `CommitReadinessEngineTests.swift` | readiness rules |
+| `CrossProcessConcurrencyTests.swift` | cross-process concurrency safety |
+| `CrossProcessPipelineTests.swift` | cross-process pipeline integrity |
+| `DataFreshnessStateTests.swift` | data freshness state management |
+| `FileCategoryClassifierTests.swift` | file classification |
+| `ImpactPropagationEngineTests.swift` | impact propagation |
 | `LaunchAtLoginControllerTests.swift` | login item registration |
+| `LifecycleIntegrationTests.swift` | lifecycle integration |
+| `LifecyclePerformanceTests.swift` | lifecycle performance |
+| `LifecycleSleepWakeTests.swift` | sleep/wake cycle handling |
+| `LifecycleSystemTests.swift` | lifecycle system scenarios |
+| `PendingItemStaleLifecycleTests.swift` | pending item staleness lifecycle |
+| `PersistenceRecoveryTests.swift` | persistence corruption recovery |
+| `RefreshCompletionTests.swift` | refresh completion handling |
+| `RefreshEngineIntegrationTests.swift` | refresh engine integration |
+| `ReleaseReadinessEngineTests.swift` | release readiness rules |
+| `ReliabilityLabTests.swift` | reliability stress tests |
 | `RepositoryDiscoveryExperienceTests.swift` | discovery flow |
+| `RepositoryHistoryStoreTests.swift` | repository history persistence |
+| `ScanConcurrencyTests.swift` | scan concurrency |
+| `ScanDataConsistencyTests.swift` | scan data consistency |
 | `ScanPerformanceTests.swift` | scanning performance |
 | `SharedSnapshotStoreTests.swift` | snapshot persistence |
-| `PendingItemTests.swift` | pending item model, state machine, deduplication (when added) |
+| `SnapshotStoreRecoveryTests.swift` | snapshot store recovery |
+| `WidgetDegradedRenderingTests.swift` | widget degraded state rendering |
+| `WidgetLifecycleScenariosTests.swift` | widget lifecycle scenarios |
+| `WorkspaceModelTests.swift` | workspace model |
 
 ## Build and Verification
 
@@ -182,22 +299,35 @@ The `verify.sh build` step is needed only once per session — subsequent
 `verify.sh test <TestClass>` calls use `test-without-building` and complete
 in seconds.
 
-| Source area                     | Targeted test class                          |
-|---------------------------------|----------------------------------------------|
-| `Core/ActivityEvent.swift`      | `DevPulseTests/ActivityEventTests`           |
+| Source area | Targeted test class |
+|---|---|
+| `Core/ActivityEvent.swift` | `DevPulseTests/ActivityEventTests` |
+| `Core/AnalysisCache.swift` | `DevPulseTests/AnalysisCacheTests` |
+| `Core/Backup/*.swift` | `DevPulseTests/BackupEngineTests` |
+| `Core/ChangeImpact*.swift` | `DevPulseTests/ChangeImpactDataModelTests` |
 | `Core/CommitReadinessEngine.swift` | `DevPulseTests/CommitReadinessEngineTests` |
+| `Core/FileCategoryClassifier.swift` | `DevPulseTests/FileCategoryClassifierTests` |
+| `Core/ImpactPropagationEngine.swift` | `DevPulseTests/ImpactPropagationEngineTests` |
 | `Core/LaunchAtLoginController.swift` | `DevPulseTests/LaunchAtLoginControllerTests` |
-| `Core/Models.swift`             | `DevPulseTests/SharedSnapshotStoreTests`, `DevPulseTests/ActivityEventTests` |
-| `Core/PendingItem*.swift`       | `DevPulseTests/PendingItemStaleLifecycleTests` |
-| `Core/SharedSnapshotStore.swift` | `DevPulseTests/SharedSnapshotStoreTests`   |
-| `Core/RefreshEngine.swift`      | `DevPulseTests/RefreshEngineIntegrationTests` |
-| `Core/ScanScheduler.swift`      | `DevPulseTests/CommitReadinessEngineTests`  |
-| repository discovery            | `DevPulseTests/RepositoryDiscoveryExperienceTests` |
-| scanning / performance          | `DevPulseTests/ScanPerformanceTests`        |
-| data consistency                | `DevPulseTests/ScanDataConsistencyTests`    |
-| Widget extension                | `DevPulseTests/WidgetDegradedRenderingTests`, `DevPulseTests/WidgetLifecycleScenariosTests` |
-| Lifecycle / sleep-wake          | `DevPulseTests/LifecycleIntegrationTests`, `DevPulseTests/LifecycleSystemTests` |
-| Build config consistency        | `DevPulseTests/BuildConfigConsistencyTests` |
+| `Core/Models.swift` | `DevPulseTests/SharedSnapshotStoreTests`, `DevPulseTests/ActivityEventTests` |
+| `Core/PendingItem*.swift` | `DevPulseTests/PendingItemStaleLifecycleTests` |
+| `Core/RefreshEngine.swift` | `DevPulseTests/RefreshEngineIntegrationTests`, `DevPulseTests/RefreshCompletionTests` |
+| `Core/ReleaseReadinessEngine.swift` | `DevPulseTests/ReleaseReadinessEngineTests` |
+| `Core/RepositoryHistoryStore.swift` | `DevPulseTests/RepositoryHistoryStoreTests` |
+| `Core/ScanScheduler.swift` | `DevPulseTests/CommitReadinessEngineTests` |
+| `Core/SharedSnapshotStore.swift` | `DevPulseTests/SharedSnapshotStoreTests`, `DevPulseTests/SnapshotStoreRecoveryTests` |
+| `Core/UnifiedLifecycleSystem.swift` | `DevPulseTests/LifecycleIntegrationTests`, `DevPulseTests/LifecycleSystemTests`, `DevPulseTests/LifecycleSleepWakeTests` |
+| `Core/Workspace*.swift` | `DevPulseTests/WorkspaceModelTests` |
+| repository discovery | `DevPulseTests/RepositoryDiscoveryExperienceTests` |
+| scanning / concurrency | `DevPulseTests/ScanPerformanceTests`, `DevPulseTests/ScanConcurrencyTests` |
+| data consistency | `DevPulseTests/ScanDataConsistencyTests`, `DevPulseTests/DataFreshnessStateTests` |
+| Widget extension | `DevPulseTests/WidgetDegradedRenderingTests`, `DevPulseTests/WidgetLifecycleScenariosTests` |
+| Lifecycle / sleep-wake | `DevPulseTests/LifecycleIntegrationTests`, `DevPulseTests/LifecycleSystemTests`, `DevPulseTests/LifecycleSleepWakeTests` |
+| Build config consistency | `DevPulseTests/BuildConfigConsistencyTests` |
+| cross-process | `DevPulseTests/CrossProcessConcurrencyTests`, `DevPulseTests/CrossProcessPipelineTests` |
+| persistence recovery | `DevPulseTests/PersistenceRecoveryTests`, `DevPulseTests/SnapshotStoreRecoveryTests` |
+| performance | `DevPulseTests/ScanPerformanceTests`, `DevPulseTests/LifecyclePerformanceTests` |
+| reliability | `DevPulseTests/ReliabilityLabTests` |
 
 ### Timeouts and failure logs
 
@@ -244,6 +374,7 @@ Changes affecting bundle IDs, entitlements, `Info.plist`, widget embedding, App 
 - Do not change signing, Team configuration, bundle identifiers, or entitlements as incidental cleanup.
 - Never insert personal Team ID, certificate hash, provisioning UUID, or other machine-specific signing values into tracked files.
 - Do not introduce broad formatting churn or unrelated file moves.
+- Shared snapshot is JSON-based; all read/write goes through `AppGroupStore` / `SharedSnapshotStore`.
 
 ## Testing Guidance
 
@@ -258,6 +389,11 @@ Add or update focused coverage in `DevPulseNative/DevPulseNativeTests/` when cha
 - **pending item store atomicity, schema migration, and corruption recovery**
 - **notification strategy (cooldown, severity escalation, suppression, quiet hours)**
 - **pending item widget summary aggregation**
+- **change impact analysis, dependency inference, and impact propagation**
+- **backup/restore engine, migration, and retention**
+- **refresh engine pipeline, cross-process coordination, and lifecycle management**
+- **analysis cache invalidation and pipeline orchestration**
+- **workspace aggregation, auto-suggest, and migration**
 
 Pending item logic (`PendingItem`, `PendingItemEvaluator`, `PendingItemNotificationStrategy`) is pure (no I/O), making it straightforward to validate in CLI tests without App Group or signing. Tests can construct `PendingItemEvaluationContext` directly.
 

@@ -76,7 +76,7 @@ check_pbxproj_contains() {
 
 cd "$ROOT_DIR"
 
-build_log="$(mktemp "${TMPDIR:-/tmp}/devpulse-widgetkit-build.XXXXXX.log")"
+build_log="$(mktemp "${TMPDIR:-/tmp}/devpulse-widgetkit-build.XXXXXX")"
 if xcodebuild \
     -project "$XCODEPROJ" \
     -scheme "$SCHEME" \
@@ -95,7 +95,7 @@ else
 fi
 rm -f "$build_log"
 
-build_settings_log="$(mktemp "${TMPDIR:-/tmp}/devpulse-widgetkit-settings.XXXXXX.log")"
+build_settings_log="$(mktemp "${TMPDIR:-/tmp}/devpulse-widgetkit-settings.XXXXXX")"
 if xcodebuild \
     -project "$XCODEPROJ" \
     -scheme "$SCHEME" \

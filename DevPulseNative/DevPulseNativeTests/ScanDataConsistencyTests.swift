@@ -251,7 +251,8 @@ struct RepositoryIdentityDedupTests {
 
         let normalized = RepositoryIdentity.normalize(snapshot)
         #expect(normalized.path == snapshot.path)
-        #expect(normalized.id == snapshot.id)
+        // normalize recomputes id from canonicalPath, so verify it matches
+        #expect(normalized.id == RepositoryIdentity.id(for: snapshot.path))
         #expect(normalized.name == snapshot.name)
     }
 }
@@ -1039,13 +1040,13 @@ struct SnapshotRevisionConsistencyTests {
 
         // The next non-refreshing write should advance further
         let final = try requireSuccess(
-            store.commit(emptySnapshot(storageRevision: 2), observedStorageRevision: 2)
+            store.commit(emptySnapshot(storageRevision: 2, isRefreshing: false), observedStorageRevision: 2)
         )
         #expect(final.storageRevision == 3)
         #expect(final.isRefreshing == false)
     }
 
-    private func emptySnapshot(storageRevision: UInt64) -> AppGroupData {
+    private func emptySnapshot(storageRevision: UInt64, isRefreshing: Bool? = nil) -> AppGroupData {
         AppGroupData(
             schemaVersion: RepositorySnapshotSchema.version,
             generatedAt: DateFormatting.nowISO(),
@@ -1054,6 +1055,7 @@ struct SnapshotRevisionConsistencyTests {
             repositories: [],
             storageRevision: storageRevision,
             persistenceState: .committed,
+            isRefreshing: isRefreshing,
             appVersion: RepositorySnapshotSchema.currentAppVersion,
             storageFormatVersion: RepositorySnapshotSchema.storageFormatVersion
         )
