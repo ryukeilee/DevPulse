@@ -922,8 +922,9 @@ struct RefreshEngineIntegrationTests {
 
         #expect(result.isCancelled == false)
         #expect(result.data.repositories.count == 2)
-        // The engine copies isRefreshing from the previous snapshot
-        #expect(result.data.isRefreshing == true)
+        // The engine always sets isRefreshing to false in its output to
+        // prevent stale "refreshing" flags from reaching the Widget.
+        #expect(result.data.isRefreshing == false)
     }
 
     @Test func perStageTimeBudgetExhaustion() async throws {

@@ -2926,12 +2926,14 @@ final class ScanScheduler: ObservableObject {
                     appVersion: pinned.appVersion,
                     storageFormatVersion: pinned.storageFormatVersion
                 )
+                // Always clear isRefreshing in memory even if the disk write
+                // fails, so the next scan does not propagate a stale flag.
+                lastResult = cleared
                 switch AppGroupStore.write(cleared) {
                 case .success:
-                    lastResult = cleared
                     diagnostics.lastSnapshotStoreDetail = "已清除先前残留的 isRefreshing 状态。"
                 case .failure:
-                    break
+                    diagnostics.lastSnapshotStoreDetail = "已清除内存中的 isRefreshing 状态，但磁盘写入失败。"
                 }
             }
 
@@ -3044,11 +3046,14 @@ final class ScanScheduler: ObservableObject {
         generationGuard: UInt64? = nil
     ) {
         let writtenAt = DateFormatting.nowISO()
+        // Always clear isRefreshing before writing so the Widget never
+        // sees a stale "refreshing" flag from a killed or crashed scan.
         let snapshotToWrite = applyPins(snapshot)
             .withWrittenAt(writtenAt)
             .withPendingItemWidgetSummary(
                 pendingItems.isEmpty ? nil : pendingItemWidgetSummary
             )
+            .withIsRefreshing(false)
         let prevSnapshot = previousSnapshot ?? lastResult
 
         // Capture the storage revision observed before the async write

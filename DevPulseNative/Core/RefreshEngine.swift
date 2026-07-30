@@ -249,7 +249,7 @@ actor RefreshEngine {
             storageRevision: previousSnapshot?.storageRevision ?? 0,
             persistenceState: .committed,
             pendingItemWidgetSummary: previousSnapshot?.pendingItemWidgetSummary,
-            isRefreshing: previousSnapshot?.isRefreshing,
+            isRefreshing: false,
             appVersion: previousSnapshot?.appVersion ?? RepositorySnapshotSchema.currentAppVersion,
             storageFormatVersion: previousSnapshot?.storageFormatVersion ?? RepositorySnapshotSchema.storageFormatVersion
         )
@@ -1157,7 +1157,7 @@ extension RefreshEngine {
                 storageRevision: previous?.storageRevision ?? 0,
                 persistenceState: .committed,
                 pendingItemWidgetSummary: previous?.pendingItemWidgetSummary,
-                isRefreshing: previous?.isRefreshing,
+                isRefreshing: false,
                 appVersion: previous?.appVersion ?? RepositorySnapshotSchema.currentAppVersion,
                 storageFormatVersion: previous?.storageFormatVersion ?? RepositorySnapshotSchema.storageFormatVersion
             ),
