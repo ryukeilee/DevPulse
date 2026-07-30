@@ -365,19 +365,19 @@ actor RefreshEngine {
         )
 
         // Collect and store observations
-        await recordStageSpan(stage: "merge", duration: mergeElapsed, callCount: 0) {
-            ObservationSpan(label: "merge", startedAt: stage4Start, duration: mergeElapsed, callCount: 0, concurrentPeak: 0, timeoutCount: 0, cancellationCount: 0, cacheHitCount: 0, snapshotReuseCount: 0, mainThreadStallUs: 0, resourceDeltaCPU: 0, resourceDeltaMemoryMB: 0, resourceDeltaDiskWritesKB: 0)
-        }
-        await recordStageSpan(stage: "persistence", duration: persistElapsed, callCount: 0) {
-            ObservationSpan(label: "persistence", startedAt: stage5Start, duration: persistElapsed, callCount: 0, concurrentPeak: 0, timeoutCount: 0, cancellationCount: 0, cacheHitCount: 0, snapshotReuseCount: 0, mainThreadStallUs: 0, resourceDeltaCPU: 0, resourceDeltaMemoryMB: 0, resourceDeltaDiskWritesKB: 0)
-        }
-        await recordStageSpan(stage: "widgetSync", duration: widgetElapsed, callCount: 0) {
-            ObservationSpan(label: "widgetSync", startedAt: stage6Start, duration: widgetElapsed, callCount: 0, concurrentPeak: 0, timeoutCount: 0, cancellationCount: 0, cacheHitCount: 0, snapshotReuseCount: 0, mainThreadStallUs: 0, resourceDeltaCPU: 0, resourceDeltaMemoryMB: 0, resourceDeltaDiskWritesKB: 0)
-        }
+        // Merge, persistence, and widgetSync stages have no meaningful
+        // per-span metrics (all-zero counters), so we skip recording
+        // their individual ObservationSpan entries to reduce allocations.
+        // Their durations are already tracked in RefreshDiagnostics.
 
         let obs = await observationCollector.snapshot()
-        let store = RefreshObservationStore()
-        store.append(obs)
+        // Only persist the observation when meaningful git work was performed
+        // or resource data was collected — skip for cancelled/no-op scans to
+        // reduce unnecessary disk I/O.
+        if obs.totalGitCalls > 0 || obs.totalCPU > 0 || obs.totalDiskWritesKB > 0 {
+            let store = RefreshObservationStore()
+            store.append(obs)
+        }
 
         return RefreshResult(
             data: persistedData,

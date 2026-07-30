@@ -283,7 +283,9 @@ enum GitRepositoryScanner {
     private static let discoveryRulesVersion = 3
     private static let maximumWorktreeDiscoveryBudget: TimeInterval = 5
     private static let worktreeDiscoveryBudgetFraction = 0.2
-    private static let maximumConcurrentGitOps = 12
+    // Note: effective concurrency is governed by ScanConfig.maxConcurrentGitOps.
+    // This fallback is used only when no config is available (static call paths).
+    private static let maximumConcurrentGitOps = 10
     private static let logger = Logger(subsystem: "local.devpulse.app", category: "RepositoryScan")
     static let defaultGitCommandRunner: GitCommandRunner = {
         arguments, workingDirectory, timeout, outputLimit, isCancelled in
@@ -1394,10 +1396,9 @@ enum GitRepositoryScanner {
 
         // Keep at most maxConcurrentGitOps read tasks in flight. Each task
         // invokes one Git command at a time, so this is also the process cap.
-        let concurrency = min(
-            maximumConcurrentGitOps,
-            max(1, config.maxConcurrentGitOps)
-        )
+        // Use config value directly; static fallback only applies when config
+        // is unavailable (static call paths that bypass RefreshEngine).
+        let concurrency = max(1, min(config.maxConcurrentGitOps, maximumConcurrentGitOps))
         var nextIndex = 0
         var timedOut = false
         var cancelled = false

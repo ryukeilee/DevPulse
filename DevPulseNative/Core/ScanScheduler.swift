@@ -772,6 +772,7 @@ final class ScanScheduler: ObservableObject {
     nonisolated(unsafe) private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var lastSystemSleepAt: Date?
     private var lastWakeScanSubmittedAt: Date?
+    private var lastWidgetReloadedAt: Date?
     private(set) var lastFreshnessRecalculationAt: Date?
     private var refreshCoordinator = ScanRefreshCoordinator()
     private var scanTask: Task<Void, Never>?
@@ -1672,7 +1673,15 @@ final class ScanScheduler: ObservableObject {
             diagnostics.sharedDataWriteError = nil
             diagnostics.lastSharedWriteAt = Date()
             diagnostics.lastSnapshotStoreTrigger = "refresh-start"
-            AppGroupStore.reloadWidgets()
+            // Throttle scan-start widget reload: avoid redundant WidgetCenter
+            // calls when scans are triggered in rapid succession. 5-second
+            // interval is sufficient for showing the loading indicator.
+            let now = Date()
+            if lastWidgetReloadedAt == nil
+                || now.timeIntervalSince(lastWidgetReloadedAt!) > 5 {
+                lastWidgetReloadedAt = now
+                AppGroupStore.reloadWidgets()
+            }
         case .failure:
             break
         }

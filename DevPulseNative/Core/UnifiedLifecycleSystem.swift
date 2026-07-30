@@ -1130,7 +1130,20 @@ actor WidgetRecoveryManager {
     /// Minimum interval between forced widget timeline reloads.
     nonisolated static let minimumReloadInterval: TimeInterval = 60
 
+    /// UserDefaults key to persist last forced reload timestamp across restarts.
+    private static let lastReloadUserDefaultsKey = "DevPulseWidgetLastForcedReloadAt"
+
     private var lastForcedReloadAt: Date?
+
+    init() {
+        // Restore last reload timestamp from UserDefaults so the throttle
+        // survives app restart, crash, or upgrade, preventing a burst of
+        // redundant timeline reloads immediately after launch.
+        if let saved = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+            .object(forKey: Self.lastReloadUserDefaultsKey) as? Date {
+            self.lastForcedReloadAt = saved
+        }
+    }
 
     /// Request a widget timeline reload with generation isolation.
     /// The reload is skipped if one was requested within `minimumReloadInterval`,
@@ -1155,6 +1168,10 @@ actor WidgetRecoveryManager {
         WidgetCenter.shared.reloadTimelines(ofKind: WidgetIdentity.kind)
         #endif
         lastForcedReloadAt = now
+
+        // Persist timestamp so throttle survives app restart/crash.
+        UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+            .set(now, forKey: Self.lastReloadUserDefaultsKey)
     }
 
     /// Attempt to verify that the Widget can read the current snapshot.
