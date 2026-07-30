@@ -471,6 +471,9 @@ final class RestoreManager: @unchecked Sendable {
         let txURL = dir.appendingPathComponent(Self.transactionFileName)
         guard let data = try? Data(contentsOf: txURL),
               let txState = try? JSONDecoder().decode(RestoreTransactionState.self, from: data) else {
+            if FileManager.default.fileExists(atPath: txURL.path) {
+                logger.warning("Found restore transaction file but could not decode it at \(txURL.path)")
+            }
             return nil
         }
         // Only return non-completed transactions
@@ -519,13 +522,21 @@ final class RestoreManager: @unchecked Sendable {
 
     private func saveTransactionState(_ state: RestoreTransactionState, in dir: URL) {
         let txURL = dir.appendingPathComponent(Self.transactionFileName)
-        guard let data = try? JSONEncoder().encode(state) else { return }
-        try? data.write(to: txURL, options: .atomic)
+        do {
+            let data = try JSONEncoder().encode(state)
+            try data.write(to: txURL, options: .atomic)
+        } catch {
+            logger.error("Failed to save restore transaction state: \(error.localizedDescription)")
+        }
     }
 
     private func cleanupTransactionState(in dir: URL) {
         let txURL = dir.appendingPathComponent(Self.transactionFileName)
-        try? fileManager.removeItem(at: txURL)
+        do {
+            try fileManager.removeItem(at: txURL)
+        } catch {
+            logger.warning("Failed to clean up transaction state: \(error.localizedDescription)")
+        }
     }
 
     private func decompress(data: Data) -> Data {

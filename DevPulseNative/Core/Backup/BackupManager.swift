@@ -46,7 +46,11 @@ final class BackupManager: @unchecked Sendable {
     func backupDirectoryURL(config: BackupIntegrationConfiguration) -> URL {
         let expanded = (config.backupDirectory as NSString).expandingTildeInPath
         let url = URL(fileURLWithPath: expanded, isDirectory: true)
-        try? fileManager.createDirectory(at: url, withIntermediateDirectories: true)
+        do {
+            try fileManager.createDirectory(at: url, withIntermediateDirectories: true)
+        } catch {
+            logger.warning("Failed to create backup directory: \(error.localizedDescription) at \(url.path)")
+        }
         return url
     }
 
@@ -55,9 +59,15 @@ final class BackupManager: @unchecked Sendable {
     /// List all backups in the configured backup directory.
     func listBackups(config: BackupIntegrationConfiguration) -> BackupDirectoryListing {
         let dir = backupDirectoryURL(config: config)
-        let contents = (try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: [
-            .isDirectoryKey, .fileSizeKey, .creationDateKey
-        ], options: [.skipsHiddenFiles])) ?? []
+        let contents: [URL]
+        do {
+            contents = try fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: [
+                .isDirectoryKey, .fileSizeKey, .creationDateKey
+            ], options: [.skipsHiddenFiles])
+        } catch {
+            logger.warning("Failed to list backup directory: \(error.localizedDescription)")
+            contents = []
+        }
 
         var summaries: [BackupSummary] = []
         for url in contents {
@@ -501,7 +511,10 @@ final class BackupManager: @unchecked Sendable {
             at: url,
             includingPropertiesForKeys: [.fileSizeKey],
             options: [.skipsSubdirectoryDescendants, .skipsHiddenFiles]
-        ) else { return 0 }
+        ) else {
+            logger.warning("Failed to enumerate backup directory for size estimate at \(url.path)")
+            return 0
+        }
         var total: Int64 = 0
         for case let fileURL as URL in enumerator {
             guard let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey]),
@@ -518,11 +531,17 @@ final class BackupManager: @unchecked Sendable {
     }
 
     private func findLatestBackupManifest(at directory: URL) -> BackupManifest? {
-        guard let contents = try? fileManager.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: [.creationDateKey],
-            options: [.skipsHiddenFiles]
-        ) else { return nil }
+        var contents: [URL]
+        do {
+            contents = try fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.creationDateKey],
+                options: [.skipsHiddenFiles]
+            )
+        } catch {
+            logger.warning("Failed to list backup directory for incremental manifest: \(error.localizedDescription)")
+            return nil
+        }
 
         let backups = contents.filter {
             $0.hasDirectoryPath && $0.lastPathComponent.hasPrefix(BackupFileLayout.backupPrefix)

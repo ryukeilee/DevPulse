@@ -180,7 +180,12 @@ final class RefreshObservationStore: @unchecked Sendable {
             FileManager.default.containerURL(
                 forSecurityApplicationGroupIdentifier: SharedSnapshotLocation.appGroupIdentifier
             )?.appendingPathComponent("refresh-observations.json")
-            ?? FileManager.default.temporaryDirectory.appendingPathComponent("refresh-observations.json")
+            ?? {
+                let fallback = FileManager.default.temporaryDirectory.appendingPathComponent("refresh-observations.json")
+                Logger(subsystem: "local.devpulse.app", category: "ObservationStore")
+                    .warning("App Group container unavailable; falling back to /tmp. Observation data will not persist across reboots.")
+                return fallback
+            }()
         )
         self.fileURL = url
     }
@@ -214,7 +219,10 @@ final class RefreshObservationStore: @unchecked Sendable {
     /// 3. Single object (v0 legacy)
     /// 4. Empty on corruption or missing file
     private func loadAllInternal() -> [RefreshObservation] {
-        guard let data = try? Data(contentsOf: fileURL) else { return [] }
+        guard let data = try? Data(contentsOf: fileURL) else {
+            logger.warning("No observation data at \(self.fileURL.path), starting fresh")
+            return []
+        }
         let decoder = JSONDecoder()
 
         // Versioned envelope format (v1+).

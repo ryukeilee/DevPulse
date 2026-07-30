@@ -64,6 +64,17 @@ actor RefreshEngine {
         .widgetSync: 0.05
     ]
 
+    /// Return the budget fraction for a stage with a safe fallback.
+    /// Logs a warning if the stage is missing (new stage without a budget entry).
+    static func budgetFraction(for stage: RefreshPipelineStage) -> Double {
+        guard let fraction = stageBudgetFractions[stage], fraction > 0 else {
+            Logger(subsystem: "local.devpulse.app", category: "RefreshEngine")
+                .warning("Stage \(String(describing: stage)) has no budget fraction; using fallback 0.05")
+            return 0.05
+        }
+        return fraction
+    }
+
     /// Cancel the current refresh. In-flight work completes cooperatively
     /// but the returned result will be marked as cancelled.
     func cancel() {
@@ -105,9 +116,7 @@ actor RefreshEngine {
     ) async -> RefreshResult {
         await observationCollector.reset()
         await observationCollector.setSource(String(describing: source))
-        generation &+= 1
-        let currentGeneration = GenerationIsolation.Token(generation: generation, epoch: generationEpoch)
-        _isCancelled = false
+        let currentGeneration = advanceGeneration()
         let overallStart = ProcessInfo.processInfo.systemUptime
         let overallDeadline = overallStart + config.scanTimeout
         let isFastFirst = source == .manual || source == .configuration
@@ -123,7 +132,7 @@ actor RefreshEngine {
         let stage1Start = ProcessInfo.processInfo.systemUptime
         logger.debug("Stage .discovery starting")
         let stage1Budget = overallDeadline - stage1Start
-        let stage1Slice = stage1Budget * Self.stageBudgetFractions[.discovery]!
+        let stage1Slice = stage1Budget * Self.budgetFraction(for: .discovery)
         let stage1Deadline = stage1Start + stage1Slice
         let discoveryResult = await performDiscovery(
             config: config,
@@ -155,7 +164,7 @@ actor RefreshEngine {
         let stage2Start = ProcessInfo.processInfo.systemUptime
         logger.debug("Stage .coreStatus starting")
         let stage2Budget = overallDeadline - stage2Start
-        let stage2Slice = stage2Budget * Self.stageBudgetFractions[.coreStatus]!
+        let stage2Slice = stage2Budget * Self.budgetFraction(for: .coreStatus)
         let stage2Deadline = stage2Start + stage2Slice
         let coreResult = await readCoreStatusPriorityBatched(
             paths: isFastFirst
@@ -193,7 +202,7 @@ actor RefreshEngine {
         let stage3Start = ProcessInfo.processInfo.systemUptime
         logger.debug("Stage .extendedInfo starting")
         let stage3Budget = overallDeadline - stage3Start
-        let stage3Slice = stage3Budget * Self.stageBudgetFractions[.extendedInfo]!
+        let stage3Slice = stage3Budget * Self.budgetFraction(for: .extendedInfo)
         let stage3Deadline = stage3Start + stage3Slice
         let extendedResult = await readExtendedInfo(
             coreResult: coreResult,
@@ -215,11 +224,22 @@ actor RefreshEngine {
                         completed: extendedResult.completed, elapsed: extendedElapsed,
                         finished: true, startedAt: overallStart)
 
+        guard !isInvalidated(token: currentGeneration) else {
+            return buildPartialCancelled(
+                discovery: discoveryResult,
+                coreSnapshots: extendedResult.snapshots.isEmpty
+                    ? coreResult.snapshots
+                    : extendedResult.snapshots,
+                previous: previousSnapshot,
+                warnings: &warnings
+            )
+        }
+
         // ── Stage 4: Merge ───────────────────────────────────────────────
         let stage4Start = ProcessInfo.processInfo.systemUptime
         logger.debug("Stage .merge starting")
         let stage4Budget = overallDeadline - stage4Start
-        let stage4Slice = stage4Budget * Self.stageBudgetFractions[.merge]!
+        let stage4Slice = stage4Budget * Self.budgetFraction(for: .merge)
         let mergeResult = mergeResults(
             discovery: discoveryResult,
             coreSnapshots: extendedResult.snapshots.count > 0 ? extendedResult.snapshots : coreResult.snapshots,
@@ -256,6 +276,15 @@ actor RefreshEngine {
         let retainedPaths = Array(Set(
             mergeSnapshots.map { $0.path } + Array(mergeResult.unavailableSinceByPath.keys)
         )).sorted()
+
+        guard !isInvalidated(token: currentGeneration) else {
+            return buildPartialCancelled(
+                discovery: discoveryResult,
+                coreSnapshots: mergeSnapshots,
+                previous: previousSnapshot,
+                warnings: &warnings
+            )
+        }
 
         publishProgress(stage: .merge, total: mergeSnapshots.count, completed: mergeSnapshots.count,
                         elapsed: mergeElapsed, finished: true, startedAt: overallStart)
@@ -299,6 +328,24 @@ actor RefreshEngine {
         publishProgress(stage: .widgetSync, total: 1, completed: 1,
                         elapsed: widgetElapsed, finished: true, startedAt: overallStart)
 
+        guard !isInvalidated(token: currentGeneration) else {
+            return buildPartialCancelled(
+                discovery: discoveryResult,
+                coreSnapshots: mergeSnapshots,
+                previous: previousSnapshot,
+                warnings: &warnings
+            )
+        }
+
+        let timedOut = ProcessInfo.processInfo.systemUptime >= overallDeadline
+        if timedOut {
+            warnings.append("刷新总时间预算已用尽，未完成仓库保留上次结果。")
+        }
+
+        // Finish the stream for direct consumers as well as the scheduler's
+        // forwarding task. A refresh engine owns one stream for one execution;
+        // leaving it open would make consumers wait forever after a successful
+        // scan.
         progressContinuation.finish()
 
         let totalElapsed = ProcessInfo.processInfo.systemUptime - overallStart
@@ -327,7 +374,7 @@ actor RefreshEngine {
                 discoveredRepositoryPaths: retainedPaths,
                 stageDurations: stageDurations,
                 isCancelled: false,
-                timedOut: false,
+                timedOut: timedOut,
                 diagnostics: RefreshDiagnostics(
                     overallElapsed: totalElapsed,
                     discoveryElapsed: discoveryElapsed,
@@ -347,12 +394,12 @@ actor RefreshEngine {
                         ? Double(extendedResult.reusedMetadataCount) / Double(mergeSnapshots.count) : 0,
                     peakGitConcurrency: coreResult.peakConcurrency,
                     cancelled: false,
-                    timedOut: false,
+                    timedOut: timedOut,
                     stageDiagnostics: []
                 )
             ),
             overallElapsed: totalElapsed,
-            overallTimedOut: false,
+            overallTimedOut: timedOut,
             totalRepositoryCount: mergeSnapshots.count,
             currentRepositoryCount: mergeSnapshots.filter { $0.resolvedDataSource == .current }.count,
             reusedSnapshotCount: extendedResult.reusedMetadataCount,
@@ -385,7 +432,7 @@ actor RefreshEngine {
             discoveredRepositoryPaths: retainedPaths,
             stageDurations: stageDurations,
             isCancelled: false,
-            timedOut: false,
+            timedOut: timedOut,
             diagnostics: diagnostics
         )
     }
@@ -456,7 +503,10 @@ extension RefreshEngine {
             knownRepositoryPaths: knownRepositoryPaths,
             ignoredRepositoryPaths: ignoredRepositoryPaths,
             forceRepositoryDiscovery: forceRepositoryDiscovery,
-            previousSnapshot: previousSnapshot
+            previousSnapshot: previousSnapshot,
+            overallDeadline: Date().addingTimeInterval(
+                max(0, overallDeadline - ProcessInfo.processInfo.systemUptime)
+            )
         )
 
         // Build workspace kinds map from the discovery result
@@ -581,12 +631,11 @@ extension RefreshEngine {
                 let statusGenNum = generation.generation
                 let statusEpochNum = generation.epoch
                 group.addTask { [tGen = statusGenNum, tEpoch = statusEpochNum] in
-                    let cancelled = self.isCancelled
                     let tToken = GenerationIsolation.Token(generation: tGen, epoch: tEpoch)
-                    let stale = !GenerationIsolation.isCurrent(token: tToken, currentGeneration: tGen, currentEpoch: tEpoch) || cancelled
+                    let stale = await self.isInvalidated(token: tToken)
                     // Generation check: if the current scan has been
                     // superseded, don't start new work.
-                    guard !Task.isCancelled, !cancelled, !stale else { return (idx, nil) }
+                    guard !Task.isCancelled, !stale else { return (idx, nil) }
                     let remaining = overallDeadline - ProcessInfo.processInfo.systemUptime
                     guard remaining > 0 else { return (idx, nil) }
 
@@ -600,7 +649,7 @@ extension RefreshEngine {
                         ["status", "--porcelain=v2", "--branch"],
                         canonical, timeout,
                         ProcessRunner.defaultOutputLimit,
-                        { cancelled || Task.isCancelled || stale }
+                        { self.isCancelled || Task.isCancelled || stale }
                     )
 
                     return (idx, ProcessReadResult(
@@ -846,18 +895,11 @@ extension RefreshEngine {
                 let (origIdx, snapshot) = needsLog[nextIdx]
                 nextIdx += 1
 
-                let logGen = generation.generation
-                let logEpoch = generation.epoch
-                let logToken = GenerationIsolation.Token(generation: logGen, epoch: logEpoch)
-                group.addTask { [localGen = logGen, localEpoch = logEpoch, localToken = logToken] in
-                    let cancelled = self.isCancelled
-                    let isStale = !GenerationIsolation.isCurrent(
-                        token: localToken,
-                        currentGeneration: localGen,
-                        currentEpoch: localEpoch
-                    ) || cancelled
+                let logToken = GenerationIsolation.Token(generation: generation.generation, epoch: generation.epoch)
+                group.addTask { [localToken = logToken] in
+                    let isStale = await self.isInvalidated(token: localToken)
                     // Generation check before starting work
-                    guard !Task.isCancelled, !cancelled, !isStale else { return (origIdx, nil) }
+                    guard !Task.isCancelled, !isStale else { return (origIdx, nil) }
                     let remaining = overallDeadline - ProcessInfo.processInfo.systemUptime
                     guard remaining > 0 else { return (origIdx, nil) }
                     let timeout = min(config.gitCommandTimeout, max(0.5, remaining))
@@ -866,7 +908,7 @@ extension RefreshEngine {
                         ["log", "-1", "--pretty=%H%x00%cI%x00%s"],
                         snapshot.path, timeout,
                         ProcessRunner.defaultOutputLimit,
-                        { cancelled || Task.isCancelled || isStale }
+                        { self.isCancelled || Task.isCancelled || isStale }
                     )
 
                     guard !isStale else {

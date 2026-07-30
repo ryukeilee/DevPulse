@@ -200,7 +200,12 @@ final class WorkspaceStore: @unchecked Sendable {
         let url = fileURL ?? (FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: SharedSnapshotLocation.appGroupIdentifier
         )?.appendingPathComponent(Self.fileName))
-        ?? FileManager.default.temporaryDirectory.appendingPathComponent(Self.fileName)
+        ?? {
+            let fallback = FileManager.default.temporaryDirectory.appendingPathComponent(Self.fileName)
+            Logger(subsystem: "local.devpulse.app", category: "WorkspaceStore")
+                .warning("App Group container unavailable; falling back to /tmp. Data will not persist across reboots.")
+            return fallback
+        }()
 
         self.fileURL = url
         self.lockURL = url.deletingLastPathComponent().appendingPathComponent(Self.lockFileName)

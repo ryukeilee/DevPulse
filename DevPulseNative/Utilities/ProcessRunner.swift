@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import OSLog
 
 enum ProcessRunResult: Sendable, Equatable {
     case success(output: String)
@@ -343,6 +344,7 @@ enum ProcessRunner {
             try process.run()
         } catch {
             stopDraining(stdoutPipe: stdoutPipe, stderrPipe: stderrPipe)
+            Logger(subsystem: "local.devpulse.app", category: "ProcessRunner").error("Git process launch failed: \(error.localizedDescription) (path: \(gitExecutablePath() ?? "nil"))")
             return .launch
         }
 
