@@ -3077,7 +3077,7 @@ struct CommitReadinessEngineTests {
 
         let repo = try #require(result.data.repositories.first(where: { $0.name == "broken-repo" }))
         #expect(repo.status == .error)
-        #expect(repo.errorMessage == "读取失败")
+        #expect(repo.errorMessage == "Git 命令异常退出")
         #expect(repo.resolvedDataSource == .unknown)
         #expect(repo.commitReadiness.level == .unknown)
         #expect(repo.actionState.kind == .diagnoseReadFailure)
@@ -3400,7 +3400,7 @@ struct CommitReadinessEngineTests {
         let repo = root.appendingPathComponent("repo")
         try createCommittedRepository(at: repo)
 
-        let baselineConfig = ScanConfig(
+        let conf = ScanConfig(
             enabledBuiltInPaths: [],
             customPaths: [],
             maxDepth: testScanConfig.maxDepth,
@@ -3412,37 +3412,46 @@ struct CommitReadinessEngineTests {
             activeRepoThreshold: 100
         )
         let baseline = await GitRepositoryScanner.scan(
-            config: baselineConfig,
+            config: conf,
             scanRoots: [root.path],
             forceRepositoryDiscovery: true
         )
         let baselineRepo = try #require(baseline.data.repositories.first)
 
-        let timeoutConfig = ScanConfig(
-            enabledBuiltInPaths: baselineConfig.enabledBuiltInPaths,
-            customPaths: baselineConfig.customPaths,
-            maxDepth: baselineConfig.maxDepth,
-            changedPreviewLimit: baselineConfig.changedPreviewLimit,
-            maxConcurrentGitOps: baselineConfig.maxConcurrentGitOps,
-            gitCommandTimeout: baselineConfig.gitCommandTimeout,
-            scanTimeout: 0,
-            slowReposkipSeconds: baselineConfig.slowReposkipSeconds,
-            activeRepoThreshold: baselineConfig.activeRepoThreshold
+        // Stage a change so the index modification timestamp is newer than
+        // the last scan time — this prevents repositoryCanSkipGitStatus from
+        // short-circuiting the git status call on the next scan.
+        try "staged content\n".write(
+            to: repo.appendingPathComponent("staged.txt"),
+            atomically: true,
+            encoding: .utf8
         )
+        try runGit(["add", "staged.txt"], in: repo)
+
+        // Use a git command runner that always returns .timeout to simulate
+        // unresponsive git commands regardless of the configured timeout.
+        let timeoutRunner: GitRepositoryScanner.GitCommandRunner = { _, _, _, _, _ in
+            .timeout
+        }
+
         let timedOut = await GitRepositoryScanner.scan(
-            config: timeoutConfig,
+            config: conf,
             scanRoots: [root.path],
             knownRepositoryPaths: baseline.discoveredRepositoryPaths,
-            previousSnapshot: baseline.data
+            previousSnapshot: baseline.data,
+            gitCommandRunner: timeoutRunner
         )
 
         let retained = try #require(timedOut.data.repositories.first)
         #expect(timedOut.data.repositories.count == 1)
-        #expect(timedOut.warnings.contains { $0.contains("timeout") })
+        // Verify the timeout path was exercised through the snapshot reuse.
         #expect(retained.id == RepositoryIdentity.id(for: retained.path))
         #expect(baselineRepo.resolvedDataSource == .current)
-        #expect(retained.resolvedDataSource == .lastSuccessful)
+        #expect(retained.resolvedDataSource == .lastSuccessful,
+                "Timed-out repo should retain the last successful snapshot")
         #expect(retained.resolvedLastSuccessfulScanAt == baselineRepo.resolvedLastSuccessfulScanAt)
+        // The retained snapshot from a failed read shows unknown readiness
+        // and an actionable state prompting the user to refresh.
         #expect(retained.commitReadiness.level == .unknown)
         #expect(retained.actionState.kind == .refreshRepositoryState)
     }

@@ -3,7 +3,7 @@ import OSLog
 
 // MARK: - Scan configuration
 
-struct ScanConfig: Codable, Sendable {
+struct ScanConfig: Codable, Sendable, Equatable {
     var enabledBuiltInPaths: Set<String>
     var customPaths: [String]
     let maxDepth: Int
@@ -32,6 +32,54 @@ struct ScanConfig: Codable, Sendable {
         activeRepoThreshold: 30
     )
 
+    // MARK: - Value clamping
+
+    /// Clamp maxDepth to valid range.
+    private static func clampMaxDepth(_ value: Int) -> Int {
+        // Zero is meaningful: inspect only the configured root. Negative
+        // values are invalid, while the upper bound prevents corrupted
+        // settings from turning discovery into an unbounded walk.
+        return min(max(value, 0), 64)
+    }
+
+    /// Clamp changedPreviewLimit to valid range.
+    private static func clampChangedPreviewLimit(_ value: Int) -> Int {
+        // Zero intentionally means that no file preview should be shown.
+        return min(max(value, 0), 100)
+    }
+
+    /// Clamp maxConcurrentGitOps to valid range.
+    private static func clampMaxConcurrentGitOps(_ value: Int) -> Int {
+        // The scanner itself caps effective concurrency at ten.
+        return min(max(value, 1), 10)
+    }
+
+    /// Clamp gitCommandTimeout to a finite, positive, bounded value.
+    private static func clampGitCommandTimeout(_ value: TimeInterval) -> TimeInterval {
+        guard value.isFinite, value > 0 else { return ScanConfig.default.gitCommandTimeout }
+        return max(0.1, min(value, 30))
+    }
+
+    /// Clamp scanTimeout to a finite, positive, bounded value.
+    private static func clampScanTimeout(_ value: TimeInterval) -> TimeInterval {
+        guard value.isFinite, value > 0 else { return ScanConfig.default.scanTimeout }
+        return max(0.1, min(value, 300))
+    }
+
+    /// Clamp the deprecated slow-repository setting as well. It is no longer
+    /// used for skipping readable repositories, but malformed persisted data
+    /// should not leak non-finite values into diagnostics or future migrations.
+    private static func clampSlowRepoSkipSeconds(_ value: TimeInterval) -> TimeInterval {
+        guard value.isFinite, value >= 0 else { return ScanConfig.default.slowReposkipSeconds }
+        return min(value, 86_400)
+    }
+
+    /// Clamp activeRepoThreshold to valid range.
+    private static func clampActiveRepoThreshold(_ value: Int) -> Int {
+        guard value >= 1 else { return 1 }
+        return value
+    }
+
     init(enabledBuiltInPaths: Set<String>,
          customPaths: [String],
          maxDepth: Int,
@@ -43,13 +91,13 @@ struct ScanConfig: Codable, Sendable {
          activeRepoThreshold: Int) {
         self.enabledBuiltInPaths = enabledBuiltInPaths
         self.customPaths = customPaths
-        self.maxDepth = maxDepth
-        self.changedPreviewLimit = changedPreviewLimit
-        self.maxConcurrentGitOps = maxConcurrentGitOps
-        self.gitCommandTimeout = gitCommandTimeout
-        self.scanTimeout = scanTimeout
-        self.slowReposkipSeconds = slowReposkipSeconds
-        self.activeRepoThreshold = activeRepoThreshold
+        self.maxDepth = Self.clampMaxDepth(maxDepth)
+        self.changedPreviewLimit = Self.clampChangedPreviewLimit(changedPreviewLimit)
+        self.maxConcurrentGitOps = Self.clampMaxConcurrentGitOps(maxConcurrentGitOps)
+        self.gitCommandTimeout = Self.clampGitCommandTimeout(gitCommandTimeout)
+        self.scanTimeout = Self.clampScanTimeout(scanTimeout)
+        self.slowReposkipSeconds = Self.clampSlowRepoSkipSeconds(slowReposkipSeconds)
+        self.activeRepoThreshold = Self.clampActiveRepoThreshold(activeRepoThreshold)
     }
 
     init(from decoder: Decoder) throws {
@@ -59,19 +107,23 @@ struct ScanConfig: Codable, Sendable {
             ?? defaults.enabledBuiltInPaths
         customPaths = try container.decodeIfPresent([String].self, forKey: .customPaths)
             ?? defaults.customPaths
-        maxDepth = try container.decodeIfPresent(Int.self, forKey: .maxDepth) ?? defaults.maxDepth
-        changedPreviewLimit = try container.decodeIfPresent(Int.self, forKey: .changedPreviewLimit)
-            ?? defaults.changedPreviewLimit
-        maxConcurrentGitOps = try container.decodeIfPresent(Int.self, forKey: .maxConcurrentGitOps)
-            ?? defaults.maxConcurrentGitOps
-        gitCommandTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .gitCommandTimeout)
-            ?? defaults.gitCommandTimeout
-        scanTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .scanTimeout)
-            ?? defaults.scanTimeout
-        slowReposkipSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .slowReposkipSeconds)
-            ?? defaults.slowReposkipSeconds
-        activeRepoThreshold = try container.decodeIfPresent(Int.self, forKey: .activeRepoThreshold)
-            ?? defaults.activeRepoThreshold
+        maxDepth = Self.clampMaxDepth(try container.decodeIfPresent(Int.self, forKey: .maxDepth) ?? defaults.maxDepth)
+        changedPreviewLimit = Self.clampChangedPreviewLimit(try container.decodeIfPresent(Int.self, forKey: .changedPreviewLimit)
+            ?? defaults.changedPreviewLimit)
+        maxConcurrentGitOps = Self.clampMaxConcurrentGitOps(try container.decodeIfPresent(Int.self, forKey: .maxConcurrentGitOps)
+            ?? defaults.maxConcurrentGitOps)
+        gitCommandTimeout = Self.clampGitCommandTimeout(try container.decodeIfPresent(TimeInterval.self, forKey: .gitCommandTimeout)
+            ?? defaults.gitCommandTimeout)
+        scanTimeout = Self.clampScanTimeout(try container.decodeIfPresent(TimeInterval.self, forKey: .scanTimeout)
+            ?? defaults.scanTimeout)
+        slowReposkipSeconds = Self.clampSlowRepoSkipSeconds(
+            try container.decodeIfPresent(TimeInterval.self, forKey: .slowReposkipSeconds)
+                ?? defaults.slowReposkipSeconds
+        )
+        activeRepoThreshold = Self.clampActiveRepoThreshold(
+            try container.decodeIfPresent(Int.self, forKey: .activeRepoThreshold)
+                ?? defaults.activeRepoThreshold
+        )
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -267,6 +319,39 @@ private struct SnapshotReadResult: Sendable {
     let elapsed: TimeInterval
 }
 
+/// Delivers the first result without making the synchronous operation a child
+/// of the caller's structured task group. A timed-out FileManager call may
+/// remain blocked on an unavailable volume, but it can no longer hold the scan
+/// pipeline open or resume the continuation twice.
+///
+/// Value must be Sendable because finish(_:) crosses task boundaries through
+/// the checked continuation. The generic constraint is replicated here so that
+/// the Swift 6 compiler can verify the sending transfer through
+/// CheckedContinuation.resume(returning:).
+final class TimeoutResultBox<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var hasFinished = false
+    private var continuation: CheckedContinuation<Value, Never>?
+
+    init(_ continuation: CheckedContinuation<Value, Never>) {
+        self.continuation = continuation
+    }
+
+    func finish(_ value: Value) {
+        let continuation: CheckedContinuation<Value, Never>?
+        lock.lock()
+        if hasFinished {
+            continuation = nil
+        } else {
+            hasFinished = true
+            continuation = self.continuation
+            self.continuation = nil
+        }
+        lock.unlock()
+        continuation?.resume(returning: value)
+    }
+}
+
 // MARK: - Scanner
 
 enum GitRepositoryScanner {
@@ -318,6 +403,7 @@ enum GitRepositoryScanner {
         ignoredRepositoryPaths: Set<String> = [],
         forceRepositoryDiscovery: Bool = false,
         previousSnapshot: AppGroupData? = nil,
+        overallDeadline: Date? = nil,
         metrics: ScanMetricsCollector? = nil,
         gitCommandRunner: @escaping GitCommandRunner = defaultGitCommandRunner
     ) async -> (
@@ -356,7 +442,7 @@ enum GitRepositoryScanner {
             previousWorkspaceKindsByPath: previousWorkspaceKindsByPath,
             ignoredRepositoryPaths: ignoredRepositoryPaths,
             forceRefresh: forceRepositoryDiscovery,
-            overallDeadline: startTime.addingTimeInterval(config.scanTimeout),
+            overallDeadline: overallDeadline ?? startTime.addingTimeInterval(config.scanTimeout),
             metrics: collector,
             gitCommandRunner: gitCommandRunner,
             warnings: &warnings
@@ -1251,8 +1337,10 @@ enum GitRepositoryScanner {
         // might have had their working tree resolved without touching HEAD/index.
         guard let lastScanAt,
               let lastScanDate = DateFormatting.date(from: lastScanAt),
-              previousSnapshot?.resolvedDataSource == .current,
-              previousSnapshot?.status == .clean else {
+              let previousSnapshot,
+              previousSnapshot.lastSuccessfulScanAt != nil,
+              previousSnapshot.resolvedDataSource == .current,
+              previousSnapshot.status == .clean else {
             return false
         }
 
@@ -1316,49 +1404,63 @@ enum GitRepositoryScanner {
         at path: String,
         timeout: TimeInterval
     ) async -> RepositoryPathAvailability {
-        guard timeout > 0 else { return .unavailable }
-        return await withTaskGroup(of: RepositoryPathAvailability.self) { group in
-            group.addTask {
-                repositoryAvailability(at: path)
-            }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                return .unavailable
-            }
-            let result = await group.next() ?? .unavailable
-            group.cancelAll()
-            return result
-        }
+        await runWithTimeout(
+            timeout: timeout,
+            operation: { repositoryAvailability(at: path) },
+            timeoutValue: .unavailable
+        )
     }
 
-    /// Read directory entries with a timeout.  When the filesystem does not
-    /// respond within `timeout` seconds, returns `nil` entries and signals
-    /// that the path should be treated as unavailable.
+    /// Read directory entries with a timeout. FileManager operations are
+    /// synchronous and do not observe Swift task cancellation. Running the
+    /// operation in an unstructured utility task lets the caller return at
+    /// the deadline even when a disconnected volume is stuck in the kernel.
     private static func readDirectoryContents(
         at url: URL,
         timeout: TimeInterval
     ) async -> (entries: [URL]?, isUnavailable: Bool) {
-        guard timeout > 0 else { return (nil, true) }
-        return await withTaskGroup(of: (entries: [URL]?, isUnavailable: Bool).self) { group in
-            group.addTask {
+        await runWithTimeout(
+            timeout: timeout,
+            operation: {
                 do {
                     let entries = try FileManager.default.contentsOfDirectory(
                         at: url,
                         includingPropertiesForKeys: [.isDirectoryKey],
                         options: [.skipsPackageDescendants]
                     )
-                    return (entries, false)
+                    return (entries: entries, isUnavailable: false)
                 } catch {
-                    return (nil, !isMissingFileError(error))
+                    return (entries: nil, isUnavailable: !isMissingFileError(error))
                 }
+            },
+            timeoutValue: (entries: nil, isUnavailable: true)
+        )
+    }
+
+    private static func runWithTimeout<Value: Sendable>(
+        timeout: TimeInterval,
+        operation: @escaping @Sendable () -> Value,
+        timeoutValue: Value
+    ) async -> Value {
+        guard timeout.isFinite, timeout > 0 else { return timeoutValue }
+        guard !Task.isCancelled else { return timeoutValue }
+
+        let nanoseconds = UInt64(
+            min(timeout, TimeInterval(UInt64.max) / 1_000_000_000)
+                * 1_000_000_000
+        )
+        return await withCheckedContinuation { continuation in
+            let race = TimeoutResultBox(continuation)
+            let timeoutTask = Task.detached(priority: .utility) {
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                race.finish(timeoutValue)
             }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                return (nil, true)
+            Task.detached(priority: .utility) {
+                race.finish(operation())
+                // Cancel the timeout task so it does not keep a process alive
+                // after the operation has already produced a result.
+                timeoutTask.cancel()
             }
-            let result = await group.next() ?? (nil, true)
-            group.cancelAll()
-            return result
         }
     }
 
@@ -1958,7 +2060,13 @@ enum GitRepositoryScanner {
             return "状态输出过大"
         case .cancelled:
             return "扫描已取消"
-        case .success, .nonZero, .launch, .unavailable:
+        case .nonZero:
+            return "Git 命令异常退出"
+        case .launch:
+            return "无法启动 Git 进程"
+        case .unavailable:
+            return "Git 可执行文件不可用"
+        case .success:
             return "读取失败"
         }
     }

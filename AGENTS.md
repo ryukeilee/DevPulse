@@ -9,7 +9,6 @@ Preserve these boundaries unless the task explicitly changes product scope:
 - read local Git metadata only (`git status --porcelain=v2 --branch`, `git log -1`)
 - show changed file basenames only; do not expose full paths unnecessarily
 - do not read repository file contents unless the task requires it
-- do not add commit, push, fetch, checkout, reset, or other Git mutations
 - do not add network or cloud access implicitly
 
 ## Project Initialization

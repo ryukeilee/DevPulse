@@ -57,13 +57,17 @@ enum RepositoryIdentity {
     }
 
     static func canonicalPath(_ rawPath: String) -> String {
+        // Empty or whitespace-only paths cannot be resolved to a real location.
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+
         let expanded: String
-        if rawPath == "~" {
+        if trimmed == "~" {
             expanded = resolvedUserHomeDirectory()
-        } else if rawPath.hasPrefix("~/") {
-            expanded = resolvedUserHomeDirectory() + String(rawPath.dropFirst(1))
+        } else if trimmed.hasPrefix("~/") {
+            expanded = resolvedUserHomeDirectory() + String(trimmed.dropFirst(1))
         } else {
-            expanded = rawPath
+            expanded = trimmed
         }
 
         let home = resolvedUserHomeDirectory()
@@ -1446,10 +1450,15 @@ struct ScanSummary: Codable, Equatable {
         let currentRepositories = repositories.filter {
             $0.resolvedDataSource == .current && $0.status != .error
         }
+        let total = max(repositories.count, totalRepositories ?? repositories.count)
+        let totalChangedFiles = currentRepositories.reduce(0) { partial, repository in
+            let addition = partial.addingReportingOverflow(max(0, repository.changedFileCount))
+            return addition.overflow ? Int.max : addition.partialValue
+        }
         return ScanSummary(
-            totalRepositories: totalRepositories ?? repositories.count,
+            totalRepositories: total,
             changedRepositories: currentRepositories.filter { $0.status == .changed }.count,
-            totalChangedFiles: currentRepositories.reduce(0) { $0 + $1.changedFileCount },
+            totalChangedFiles: totalChangedFiles,
             errorRepositories: repositories.filter {
                 $0.resolvedDataSource != .current || $0.status == .error
             }.count

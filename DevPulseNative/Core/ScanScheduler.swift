@@ -924,6 +924,7 @@ final class ScanScheduler: ObservableObject {
             // time-based rules (escalation, auto-recovery) still work from
             // previous items alone and don't need fresh health data.
             var healthAssessments: [String: RepositoryHealthAssessment] = [:]
+            var historyLoadErrors: [String] = []
             if !skipHealthAssessments, let historyStore {
                 for repo in repos {
                     switch historyStore.load(for: repo.id) {
@@ -935,8 +936,13 @@ final class ScanScheduler: ObservableObject {
                         )
                         healthAssessments[repo.id] = assessment
                     case .failure:
-                        break
+                        historyLoadErrors.append(repo.id)
                     }
+                }
+            }
+            if !historyLoadErrors.isEmpty {
+                Task { @MainActor [weak self] in
+                    self?.recordEvent(.validationFailed, "历史记录加载失败，影响 \(historyLoadErrors.count) 个仓库的健康评估")
                 }
             }
 
@@ -1179,10 +1185,16 @@ final class ScanScheduler: ObservableObject {
          scanExecution: @escaping ScanExecution = { request in
         let engine = RefreshEngine()
 
-        // Forward progress reports if a handler is set
+        // Forward progress reports if a handler is set. The for-await loop
+        // runs in its own Task so it does not block execute(). The stream is
+        // finished by the engine on every terminal path; explicit cancellation
+        // below also covers an early scheduler shutdown.
+        var progressTask: Task<Void, Never>?
         if let handler = request.progressHandler {
-            Task {
+            progressTask = Task {
                 for await progress in engine.progress {
+                    // Stop promptly if the scheduler is shutting down.
+                    guard !Task.isCancelled else { break }
                     handler(progress)
                 }
             }
@@ -1197,6 +1209,9 @@ final class ScanScheduler: ObservableObject {
             previousSnapshot: request.previousSnapshot,
             source: request.source
         )
+        // Ensure no forwarding task outlives this scan execution, including
+        // an early cancellation path where the engine may be deallocated later.
+        progressTask?.cancel()
         return (data: result.data, warnings: result.warnings, discoveredRepositoryPaths: result.discoveredRepositoryPaths)
     }) {
         self.scanExecution = scanExecution
@@ -1713,6 +1728,13 @@ final class ScanScheduler: ObservableObject {
             await MainActor.run { [weak self] in
                 guard let self, self.scanGeneration == generation, self.isScanning else { return }
                 self.recordEvent(.scanFailed, "Scan watchdog fired after \(watchdogTimeout)s — forcing scan completion")
+                // Invalidate the detached scan before starting any queued
+                // successor. Without a generation change, the stale task can
+                // still return later and overwrite the watchdog's recovered
+                // state or complete the coordinator a second time.
+                self.scanGeneration &+= 1
+                self.refreshCoordinator.markRunningCancelled()
+                self.scanTask?.cancel()
                 self.isScanning = false
                 self.currentProgress = nil
                 self.refreshPhase = .failure
@@ -4086,14 +4108,28 @@ final class ScanScheduler: ObservableObject {
 
     private func normalizeConfig(_ config: ScanConfig) -> ScanConfig {
         var normalized = config
-        let existingRoots = config.customPaths
-            .map(ScanLocationProvider.normalizePersistedPath)
-            .filter { isAccessibleScanRoot($0) && !isAppContainerPath($0) && !ScanLocationProvider.isBuiltInPath($0) }
+        // Keep a configured custom path even while it is temporarily
+        // inaccessible. Dropping it here makes a revoked permission or
+        // unmounted volume impossible to recover from without re-adding it;
+        // the scan-root resolver will surface the access warning and retry it
+        // after the path becomes available again.
+        var existingRoots: [String] = []
+        var seenRoots = Set<String>()
+        for rawPath in config.customPaths {
+            let normalizedPath = ScanLocationProvider.normalizePersistedPath(rawPath)
+            guard !normalizedPath.isEmpty,
+                  !isAppContainerPath(normalizedPath),
+                  !ScanLocationProvider.isBuiltInPath(normalizedPath),
+                  seenRoots.insert(normalizedPath).inserted else {
+                continue
+            }
+            existingRoots.append(normalizedPath)
+        }
         let enabledBuiltIns = config.enabledBuiltInPaths
             .map(ScanLocationProvider.normalizePersistedPath)
             .filter(ScanLocationProvider.isBuiltInPath)
         normalized.enabledBuiltInPaths = Set(enabledBuiltIns)
-        normalized.customPaths = Array(Set(existingRoots)).sorted()
+        normalized.customPaths = existingRoots
         return normalized
     }
 
