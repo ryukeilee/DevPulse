@@ -16,11 +16,31 @@ BACKUP_DIR=""
 HOST_PROFILE_RELATIVE_PATH="Contents/embedded.provisionprofile"
 WIDGET_PROFILE_RELATIVE_PATH="Contents/PlugIns/DevPulseWidgetExtension.appex/Contents/embedded.provisionprofile"
 
+stop_headless_self_checks() {
+    local pids attempt
+    pids="$(pgrep -f "$INSTALL_APP/Contents/MacOS/DevPulse --self-check" || true)"
+    [ -z "$pids" ] && return
+
+    info "Stopping leftover DevPulse headless self-check process"
+    kill $pids || true
+
+    for attempt in $(seq 1 40); do
+        if ! pgrep -f "$INSTALL_APP/Contents/MacOS/DevPulse --self-check" >/dev/null 2>&1; then
+            return
+        fi
+        sleep 0.25
+    done
+
+    pids="$(pgrep -f "$INSTALL_APP/Contents/MacOS/DevPulse --self-check" || true)"
+    [ -z "$pids" ] || kill -KILL $pids || true
+}
+
 cleanup() {
     rm -f "$SELF_CHECK_LOG"
     if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
         rm -rf "$BACKUP_DIR"
     fi
+    stop_headless_self_checks
 }
 
 info() {
