@@ -220,10 +220,10 @@ build_signed_app() {
         if [ -z "$cert_name" ]; then
             # Fallback: derive from keychain identity
             identity_hash="$(security find-identity -v -p codesigning 2>/dev/null \
-                | awk '/Apple Development:/{print \$2; exit}' || true)"
+                | awk '/Apple Development:/{print $2; exit}' || true)"
         else
             identity_hash="$(security find-identity -v -p codesigning 2>/dev/null \
-                | grep -F "$cert_name" | awk '{print \$2; exit}' || true)"
+                | grep -F "$cert_name" | awk '{print $2; exit}' || true)"
         fi
         if [ -z "$identity_hash" ]; then
             fail "Cannot find Apple Development signing identity for re-signing."

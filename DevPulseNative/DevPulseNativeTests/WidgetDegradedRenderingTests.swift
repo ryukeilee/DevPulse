@@ -325,6 +325,109 @@ struct WidgetDegradedRenderingTests {
     }
 
     // ────────────────────────────────────────────────────────────────
+    // MARK: - Timeline refresh cadence
+    // ────────────────────────────────────────────────────────────────
+
+    @Test("timeline refresh interval for every load state")
+    func refreshIntervalForLoadStates() {
+        #expect(Provider.nextRefreshInterval(
+            loadState: .placeholder,
+            isRefreshing: false,
+            trustState: nil,
+            lastSuccessfulRefreshAt: nil
+        ) == 60)
+        #expect(Provider.nextRefreshInterval(
+            loadState: .noSnapshot,
+            isRefreshing: false,
+            trustState: nil,
+            lastSuccessfulRefreshAt: nil
+        ) == 60)
+        #expect(Provider.nextRefreshInterval(
+            loadState: .loadFailed,
+            isRefreshing: false,
+            trustState: nil,
+            lastSuccessfulRefreshAt: nil
+        ) == 180)
+    }
+
+    @Test("timeline refresh is bounded for ready entries")
+    func refreshIntervalForReadyEntries() {
+        let now = Date()
+        let iso = DateFormatting.isoString(from: now)
+        let staleIso = DateFormatting.isoString(from: now.addingTimeInterval(-600))
+        let oldIso = DateFormatting.isoString(from: now.addingTimeInterval(-3600))
+
+        // Refreshing snapshot: fast poll to pick up the completed write.
+        #expect(Provider.nextRefreshInterval(
+            loadState: .ready,
+            isRefreshing: true,
+            trustState: .fresh,
+            lastSuccessfulRefreshAt: iso,
+            now: now
+        ) == 60)
+
+        // Stale / expired snapshots: recovery poll until the app's next
+        // background scan writes fresh data.
+        #expect(Provider.nextRefreshInterval(
+            loadState: .ready,
+            isRefreshing: false,
+            trustState: .stale,
+            lastSuccessfulRefreshAt: staleIso,
+            now: now
+        ) == 60)
+        #expect(Provider.nextRefreshInterval(
+            loadState: .ready,
+            isRefreshing: false,
+            trustState: .expired,
+            lastSuccessfulRefreshAt: oldIso,
+            now: now
+        ) == 60)
+
+        // Fresh data: refresh just before the stale boundary, bounded to
+        // 60…300 s so the widget re-reads the snapshot before it decays.
+        let fresh = Provider.nextRefreshInterval(
+            loadState: .ready,
+            isRefreshing: false,
+            trustState: .fresh,
+            lastSuccessfulRefreshAt: iso,
+            now: now
+        )
+        #expect(abs(fresh - 300) < 1.0)
+
+        let ageing = Provider.nextRefreshInterval(
+            loadState: .ready,
+            isRefreshing: false,
+            trustState: .fresh,
+            lastSuccessfulRefreshAt: DateFormatting.isoString(
+                from: now.addingTimeInterval(-480)
+            ),
+            now: now
+        )
+        #expect(abs(ageing - 120) < 1.0)
+
+        let nearBoundary = Provider.nextRefreshInterval(
+            loadState: .ready,
+            isRefreshing: false,
+            trustState: .fresh,
+            lastSuccessfulRefreshAt: DateFormatting.isoString(
+                from: now.addingTimeInterval(-590)
+            ),
+            now: now
+        )
+        #expect(nearBoundary == 60)
+
+        // Degraded/unknown states keep the bounded 300 s backstop.
+        let degraded = Provider.nextRefreshInterval(
+            loadState: .ready,
+            isRefreshing: false,
+            trustState: .degraded,
+            lastSuccessfulRefreshAt: iso,
+            now: now
+        )
+        #expect(degraded == 300)
+    }
+
+    // ────────────────────────────────────────────────────────────────
     // MARK: - SnapshotReadSource detection
     // ────────────────────────────────────────────────────────────────
 

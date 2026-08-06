@@ -110,35 +110,63 @@ struct Provider: TimelineProvider {
     func getTimeline(in context: Context,
                      completion: @escaping (Timeline<WidgetEntry>) -> Void) {
         let entry = loadEntry()
-        let nextRefreshInterval: TimeInterval
-        switch entry.loadState {
-        case .placeholder, .noSnapshot:
-            // No snapshot yet — refresh every 60 s to pick up
-            // a newly written shared snapshot as soon as possible
-            // after the first app launch or a delayed write.
-            nextRefreshInterval = 60
-        case .loadFailed:
-            // Load failure (corruption, schema, App Group) — retry
-            // at 180 s to recover from a transient I/O or a
-            // short-lived process state mismatch without
-            // thrashing WidgetKit.
-            nextRefreshInterval = 180
-        case .ready:
-            // When the app is refreshing, poll every 60 s so the widget
-            // picks up completed scan results as soon as possible.
-            if entry.snapshot?.isRefreshing == true {
-                nextRefreshInterval = 60
-            } else {
-                // Poll every 300 s (5 min) so the widget checks for updates
-                // at least as often as the base scan interval. A longer
-                // interval (900 s) combined with the 600 s stale threshold
-                // creates a visible gap where data is stale but the widget
-                // won't auto-refresh for up to 5 more minutes.
-                nextRefreshInterval = 300
-            }
-        }
+        let nextRefreshInterval = Self.nextRefreshInterval(
+            loadState: entry.loadState,
+            isRefreshing: entry.snapshot?.isRefreshing == true,
+            trustState: entry.trustAssessment?.state,
+            lastSuccessfulRefreshAt: entry.snapshot?.lastSuccessfulRefreshAt
+        )
         let nextRefresh = Date().addingTimeInterval(nextRefreshInterval)
         completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
+    }
+
+    /// Bounded timeline refresh cadence for a loaded entry.
+    ///
+    /// On macOS, WidgetKit treats `.after(date)` policies and
+    /// `WidgetCenter.reloadTimelines` requests as opportunistic — they can be
+    /// deferred, especially while the containing app runs in the background.
+    /// The timeline must therefore re-read the shared snapshot on its own
+    /// bounded cadence:
+    /// - No snapshot yet: every 60 s so a delayed first write is picked up.
+    /// - Load failure: every 180 s to recover from transient I/O without
+    ///   thrashing WidgetKit.
+    /// - Snapshot refreshing: every 60 s so the completed write is picked up
+    ///   as soon as possible.
+    /// - Snapshot already stale/expired: every 60 s so the widget recovers on
+    ///   its own right after the app's next background scan writes fresh data
+    ///   (the app's scan cadence is capped at the 10-minute stale threshold).
+    /// - Fresh snapshot: refresh just before the stale boundary (60…300 s) so
+    ///   the widget re-reads the snapshot before its freshness decays and
+    ///   never lingers on an entry that has silently gone stale.
+    static func nextRefreshInterval(
+        loadState: WidgetLoadState,
+        isRefreshing: Bool,
+        trustState: SnapshotTrustState?,
+        lastSuccessfulRefreshAt: String?,
+        now: Date = Date()
+    ) -> TimeInterval {
+        switch loadState {
+        case .placeholder, .noSnapshot:
+            return 60
+        case .loadFailed:
+            return 180
+        case .ready:
+            if isRefreshing {
+                return 60
+            }
+            if trustState == .stale || trustState == .expired {
+                return 60
+            }
+            let age: TimeInterval
+            if let lastSuccessfulRefreshAt,
+               let date = DateFormatting.date(from: lastSuccessfulRefreshAt) {
+                age = max(0, now.timeIntervalSince(date))
+            } else {
+                age = 0
+            }
+            let secondsUntilStale = RefreshStatusFormatter.staleThreshold - age
+            return min(300, max(60, secondsUntilStale))
+        }
     }
 
     private func loadEntry() -> WidgetEntry {

@@ -1983,12 +1983,13 @@ final class ScanScheduler: ObservableObject {
                 }
                 self.updateScanInterval()
 
-                // Stop the background timer entirely after prolonged inactivity.
-                // It will be restarted by the next lifecycle event or manual scan.
-                if !hadChanges, self.consecutiveNoChanges >= Self.noChangeThreshold3 + 1 {
-                    self.backgroundTimer?.invalidate()
-                    self.backgroundTimer = nil
-                }
+                // The background timer is deliberately NOT stopped after
+                // prolonged inactivity: the Widget depends on periodic
+                // snapshot writes to stay inside its freshness window, and
+                // stopping the timer permanently let the shared snapshot age
+                // to "已过期" with no recovery path except user interaction.
+                // updateScanInterval() bounds the cadence to the stale
+                // threshold in every power state.
                 if hadChanges {
                     self.syncSharedSnapshot(from: recorded, previousSnapshot: previous, reason: "scan")
                 } else {
@@ -2538,20 +2539,30 @@ final class ScanScheduler: ObservableObject {
 
     // MARK: - Adaptive interval
 
-    private func updateScanInterval() {
-        updatePowerState()
-
+    /// Bounded background scan cadence for the periodic timer.
+    ///
+    /// The shared snapshot has a hard freshness contract (stale at 10 min,
+    /// expired at 30 min) and the Widget hides repository data once the
+    /// snapshot ages past the stale threshold. The interval must therefore
+    /// never exceed that threshold in any power state: unbounded adaptive
+    /// extension (30–120 min on battery/low-power) lets the snapshot
+    /// legitimately age to "已过期" while the app runs in the background,
+    /// leaving the Widget stuck until the user interacts with it.
+    static func effectiveScanInterval(
+        consecutiveNoChanges: Int,
+        powerState: String
+    ) -> TimeInterval {
         let newInterval: TimeInterval
 
         switch consecutiveNoChanges {
-        case Self.noChangeThreshold3...:
-            newInterval = Self.maxInterval
-        case Self.noChangeThreshold2...:
-            newInterval = Self.extendedInterval2
-        case Self.noChangeThreshold1...:
-            newInterval = Self.extendedInterval1
+        case noChangeThreshold3...:
+            newInterval = maxInterval
+        case noChangeThreshold2...:
+            newInterval = extendedInterval2
+        case noChangeThreshold1...:
+            newInterval = extendedInterval1
         default:
-            newInterval = Self.baseInterval
+            newInterval = baseInterval
         }
 
         // Power-aware floor and ceiling
@@ -2559,22 +2570,29 @@ final class ScanScheduler: ObservableObject {
         let ceiling: TimeInterval?
         switch powerState {
         case "low-power":
-            floor = Self.lowPowerBaseInterval
-            ceiling = Self.lowPowerMaxInterval
+            floor = lowPowerBaseInterval
+            ceiling = lowPowerMaxInterval
         case "battery":
-            floor = Self.lowPowerBaseInterval
-            ceiling = Self.batteryMaxInterval
+            floor = lowPowerBaseInterval
+            ceiling = batteryMaxInterval
         default:
-            floor = Self.baseInterval
+            floor = baseInterval
             ceiling = nil
         }
 
-        let clamped: TimeInterval = max(newInterval, floor)
-        if let ceiling {
-            scanIntervalSeconds = min(clamped, ceiling)
-        } else {
-            scanIntervalSeconds = clamped
-        }
+        let clamped = max(newInterval, floor)
+        let powerClamped = ceiling.map { min(clamped, $0) } ?? clamped
+        // Freshness cap: a scan must always land before the snapshot crosses
+        // the stale threshold, in every power state.
+        return min(powerClamped, RefreshStatusFormatter.staleThreshold)
+    }
+
+    private func updateScanInterval() {
+        updatePowerState()
+        scanIntervalSeconds = Self.effectiveScanInterval(
+            consecutiveNoChanges: consecutiveNoChanges,
+            powerState: powerState
+        )
         UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
             .set(scanIntervalSeconds, forKey: lastScanIntervalKey)
 

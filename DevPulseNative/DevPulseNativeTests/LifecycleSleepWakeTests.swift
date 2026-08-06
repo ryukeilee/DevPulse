@@ -549,6 +549,68 @@ private func snapshotWithRepository(
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// MARK: - Background Interval Freshness Bound
+// ─────────────────────────────────────────────────────────────────────
+
+@Suite("Background Interval Freshness Bound")
+@MainActor struct BackgroundIntervalFreshnessBoundTests {
+
+    @Test("background interval never exceeds stale threshold in any power state")
+    func intervalNeverExceedsStaleThreshold() {
+        let noChangeLevels = [0, 1, 2, 3, 4, 7, 8, 14, 15, 16, 20, 100]
+        let powerStates = ["normal", "battery", "low-power"]
+        for level in noChangeLevels {
+            for state in powerStates {
+                let interval = ScanScheduler.effectiveScanInterval(
+                    consecutiveNoChanges: level,
+                    powerState: state
+                )
+                #expect(
+                    interval <= RefreshStatusFormatter.staleThreshold,
+                    "level \(level) / \(state): interval \(interval) exceeds stale threshold"
+                )
+            }
+        }
+    }
+
+    @Test("background interval adapts from base to bound")
+    func intervalAdaptsWithinBound() {
+        #expect(ScanScheduler.effectiveScanInterval(consecutiveNoChanges: 0, powerState: "normal") == 300)
+        #expect(ScanScheduler.effectiveScanInterval(consecutiveNoChanges: 1, powerState: "normal") == 300)
+        // At the first no-change tier the interval extends to the stale
+        // threshold (600 s) and stays there — never beyond.
+        #expect(ScanScheduler.effectiveScanInterval(consecutiveNoChanges: 3, powerState: "normal") == 600)
+        #expect(ScanScheduler.effectiveScanInterval(consecutiveNoChanges: 8, powerState: "normal") == 600)
+        #expect(ScanScheduler.effectiveScanInterval(consecutiveNoChanges: 15, powerState: "normal") == 600)
+        #expect(ScanScheduler.effectiveScanInterval(consecutiveNoChanges: 100, powerState: "normal") == 600)
+        // Battery / low-power floors and ceilings are also capped.
+        #expect(ScanScheduler.effectiveScanInterval(consecutiveNoChanges: 0, powerState: "battery") == 600)
+        #expect(ScanScheduler.effectiveScanInterval(consecutiveNoChanges: 0, powerState: "low-power") == 600)
+        #expect(ScanScheduler.effectiveScanInterval(consecutiveNoChanges: 100, powerState: "battery") == 600)
+        #expect(ScanScheduler.effectiveScanInterval(consecutiveNoChanges: 100, powerState: "low-power") == 600)
+    }
+
+    @Test("timer stays scheduled after a no-change scan completes")
+    func timerSurvivesNoChangeScan() async {
+        let executor = MockScanExecutor()
+        executor.setResult(emptyScanResult)
+        let scheduler = makeTestScheduler(scanExecutor: executor)
+        scheduler.startBackgroundScanning(refreshIfNeeded: false)
+        #expect(scheduler.hasScheduledTimer == true)
+
+        // Drive one scan to completion (no repository changes). The
+        // completion handler must leave the background timer armed so the
+        // next periodic scan still happens.
+        scheduler.scanNow(source: .manual)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        #expect(executor.executionCount >= 1)
+        #expect(scheduler.hasScheduledTimer == true)
+
+        scheduler.shutdown()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // MARK: - Concurrent Refresh Scenarios
 // ─────────────────────────────────────────────────────────────────────
 
