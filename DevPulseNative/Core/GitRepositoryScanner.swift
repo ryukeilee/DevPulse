@@ -719,15 +719,17 @@ enum GitRepositoryScanner {
                 successMode: .reusedKnown
             ) {
             case .reusable(let reusedPaths):
+                let topologyPlan = worktreeInspectionPlan(
+                    paths: reusedPaths.readablePaths,
+                    previousWorkspaceKindsByPath: previousWorkspaceKindsByPath
+                )
                 let enriched = await enrichWorktreeDiscovery(
                     reusedPaths,
                     scanRoots: normalizedRoots,
                     ignoredPaths: ignoredPaths,
                     previousWorkspaceKindsByPath: previousWorkspaceKindsByPath,
-                    inspectTopology: shouldInspectWorktreeTopology(
-                        paths: reusedPaths.readablePaths,
-                        previousWorkspaceKindsByPath: previousWorkspaceKindsByPath
-                    ),
+                    inspectTopology: topologyPlan.requiresInspection,
+                    requiresListByPath: topologyPlan.requiresListByPath,
                     config: config,
                     overallDeadline: overallDeadline,
                     metrics: metrics,
@@ -758,15 +760,17 @@ enum GitRepositoryScanner {
                 successMode: .reusedCache
             ) {
             case .reusable(let reusableCached):
+                let topologyPlan = worktreeInspectionPlan(
+                    paths: reusableCached.readablePaths,
+                    previousWorkspaceKindsByPath: previousWorkspaceKindsByPath
+                )
                 let enriched = await enrichWorktreeDiscovery(
                     reusableCached,
                     scanRoots: normalizedRoots,
                     ignoredPaths: ignoredPaths,
                     previousWorkspaceKindsByPath: previousWorkspaceKindsByPath,
-                    inspectTopology: shouldInspectWorktreeTopology(
-                        paths: reusableCached.readablePaths,
-                        previousWorkspaceKindsByPath: previousWorkspaceKindsByPath
-                    ),
+                    inspectTopology: topologyPlan.requiresInspection,
+                    requiresListByPath: topologyPlan.requiresListByPath,
                     config: config,
                     overallDeadline: overallDeadline,
                     metrics: metrics,
@@ -868,24 +872,54 @@ enum GitRepositoryScanner {
         return enriched
     }
 
-    private static func shouldInspectWorktreeTopology(
+    /// Per-path worktree-topology inspection plan for one discovery pass.
+    ///
+    /// `requiresInspection` mirrors the previous gate (any known path that is
+    /// not a standalone repository needs the topology loop), while
+    /// `requiresListByPath` records the *real* `requiresWorktreeList`
+    /// filesystem decision for standalone paths. `enrichWorktreeDiscovery`
+    /// reuses those recorded decisions instead of stat'ing the same
+    /// repositories twice within a single refresh; paths that are not in the
+    /// plan (unknown kinds, ignored seeds) are still checked there exactly as
+    /// before.
+    private struct WorktreeInspectionPlan {
+        let requiresInspection: Bool
+        let requiresListByPath: [String: Bool]
+    }
+
+    private static func worktreeInspectionPlan(
         paths: [String],
         previousWorkspaceKindsByPath: [String: RepositoryWorkspaceKind]
-    ) -> Bool {
-        paths.contains { rawPath in
+    ) -> WorktreeInspectionPlan {
+        var requiresInspection = false
+        var requiresList: [String: Bool] = [:]
+        requiresList.reserveCapacity(paths.count)
+        for rawPath in paths {
             let path = RepositoryIdentity.canonicalPath(rawPath)
             switch previousWorkspaceKindsByPath[path] {
             case nil, .mainWorktree, .linkedWorktree:
-                return true
+                // Same gate as before: these kinds always warrant entering
+                // the topology loop. The per-seed `requiresWorktreeList`
+                // check still happens inside `enrichWorktreeDiscovery`,
+                // preserving the existing reclassification behavior.
+                requiresInspection = true
             case .standalone:
                 // Registering the first linked worktree creates Git's
                 // worktrees metadata directory. Checking that filesystem bit
                 // keeps ordinary repositories at zero extra Git commands
                 // while letting the next status refresh discover the new
                 // workspace immediately.
-                return requiresWorktreeList(at: path)
+                let requiresListForPath = requiresWorktreeList(at: path)
+                requiresList[path] = requiresListForPath
+                if requiresListForPath {
+                    requiresInspection = true
+                }
             }
         }
+        return WorktreeInspectionPlan(
+            requiresInspection: requiresInspection,
+            requiresListByPath: requiresList
+        )
     }
 
     private static func enrichWorktreeDiscovery(
@@ -894,6 +928,7 @@ enum GitRepositoryScanner {
         ignoredPaths: Set<String>,
         previousWorkspaceKindsByPath: [String: RepositoryWorkspaceKind],
         inspectTopology: Bool,
+        requiresListByPath: [String: Bool]? = nil,
         config: ScanConfig,
         overallDeadline: Date,
         metrics: ScanMetricsCollector,
@@ -944,7 +979,16 @@ enum GitRepositoryScanner {
                 break
             }
 
-            guard requiresWorktreeList(at: seed) else {
+            // Use the precomputed decision for known readable paths; fall
+            // back to a fresh check only for seeds (e.g. ignored topologies)
+            // that were not part of the inspection plan.
+            let requiresList: Bool
+            if let planned = requiresListByPath?[seed] {
+                requiresList = planned
+            } else {
+                requiresList = requiresWorktreeList(at: seed)
+            }
+            guard requiresList else {
                 coveredPaths.insert(seed)
                 if !RepositoryScope.contains(seed, in: ignoredPaths) {
                     workspaceKindsByPath[seed] = .standalone

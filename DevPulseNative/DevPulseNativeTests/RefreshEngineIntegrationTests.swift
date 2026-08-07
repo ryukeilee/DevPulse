@@ -315,7 +315,13 @@ struct RefreshEngineIntegrationTests {
         //   repo-0 → pinned
         //   repo-1 → changed
         //   repo-2 → clean
-        let timestamp = ISO8601DateFormatter().string(from: Date())
+        //
+        // The last-successful-scan timestamp must lie in the past: the fast
+        // filesystem skip compares .git/HEAD and .git/index mtimes against it
+        // with a strict `<`. A "now" timestamp can straddle a second boundary
+        // under load, flipping the comparison and skipping repos that this
+        // test must observe in priority order.
+        let timestamp = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-3600))
         let repoSnapshots: [RepositorySnapshot] = try repoURLs.enumerated().map { (i, url) in
             let canonPath = RepositoryIdentity.canonicalPath(url.path)
             let id = RepositoryIdentity.id(for: canonPath)
@@ -965,5 +971,92 @@ struct RefreshEngineIntegrationTests {
         // Final result has fewer repos than total discovered due to budget
         #expect(result.data.repositories.count < 5)
         #expect(result.data.repositories.count >= 1)
+    }
+
+    // MARK: - 17. Skipped first repository does not stall the batch
+
+    /// Regression: with maxConcurrentGitOps == 1, a first path that is
+    /// filesystem-skippable must not leave the task group empty. Previously
+    /// the skip consumed the single submission slot without adding a task, so
+    /// the result loop never ran and every remaining repository was silently
+    /// dropped from the scan (the snapshot retained only the skipped repo).
+    @Test func skippableFirstRepositoryDoesNotStallRemainingBatch() async throws {
+        let root = reposRoot("skip-batch")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repoURLs = try (0..<3).map { i in
+            let url = root.appendingPathComponent("repo-\(i)")
+            try createTempGitRepo(at: url)
+            return url
+        }
+
+        let formatter = ISO8601DateFormatter()
+        // repo-0 is pinned, so it always sorts first in the priority order.
+        // Its scan time lies in the future: HEAD/index mtimes (now) are
+        // strictly older, so the fast filesystem skip fires for it. repo-1 and
+        // repo-2 use past scan times, so they are never skippable.
+        let repoSnapshots: [RepositorySnapshot] = try repoURLs.enumerated().map { (i, url) in
+            let canonPath = RepositoryIdentity.canonicalPath(url.path)
+            let id = RepositoryIdentity.id(for: canonPath)
+            let scannedAt = i == 0
+                ? formatter.string(from: Date().addingTimeInterval(3600))
+                : formatter.string(from: Date().addingTimeInterval(-3600))
+            return RepositorySnapshot(
+                id: id,
+                name: "repo-\(i)",
+                path: canonPath,
+                branch: "main",
+                status: .clean,
+                modifiedFileCount: 0,
+                addedFileCount: 0,
+                deletedFileCount: 0,
+                untrackedFileCount: 0,
+                stagedFileCount: 0,
+                unstagedFileCount: 0,
+                conflictedFileCount: nil,
+                aheadCount: nil,
+                hasUpstream: true,
+                changedFileCount: 0,
+                changedFilesPreview: [],
+                risk: .low,
+                lastScannedAt: scannedAt,
+                lastChangedAt: scannedAt,
+                errorMessage: nil,
+                isPinned: i == 0
+            )
+        }
+
+        let previousSnapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: formatter.string(from: Date()),
+            writtenAt: nil,
+            lastSuccessfulRefreshAt: formatter.string(from: Date()),
+            scanSummary: ScanSummary.build(from: repoSnapshots),
+            repositories: repoSnapshots,
+            storageRevision: 0,
+            persistenceState: .committed
+        )
+
+        let mock = MockGitCommandRunner()
+        let engine = RefreshEngine()
+        let result = await engine.execute(
+            config: scanConfig(maxConcurrent: 1), // serial → deterministic ordering
+            scanRoots: [root.path],
+            knownRepositoryPaths: repoSnapshots.map(\.path),
+            forceRepositoryDiscovery: false,
+            previousSnapshot: previousSnapshot,
+            source: .manual,
+            gitCommandRunner: mock.runner()
+        )
+
+        let statusPaths = mock.calls
+            .filter { $0.arguments.first == "status" }
+            .map { $0.workingDirectory }
+
+        // repo-0 was skipped via the fast filesystem check; repo-1 and repo-2
+        // must still be read even though the skip consumed the single slot.
+        #expect(statusPaths.count == 2, "Expected 2 status calls, got \(statusPaths.count)")
+        #expect(result.data.repositories.count == 3, "Expected all 3 repos retained, got \(result.data.repositories.count)")
+        #expect(result.data.repositories.allSatisfy { $0.resolvedDataSource == .current })
     }
 }

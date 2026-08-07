@@ -166,12 +166,19 @@ actor RefreshEngine {
         let stage2Budget = overallDeadline - stage2Start
         let stage2Slice = stage2Budget * Self.budgetFraction(for: .coreStatus)
         let stage2Deadline = stage2Start + stage2Slice
+        // Index previous snapshots once per refresh. Every downstream stage
+        // (priority ordering, status skip check, extended metadata reuse)
+        // looks up this map, and building it runs canonicalPath — a
+        // filesystem check — per previous repository, so the single
+        // construction avoids repeated disk access for the same data.
+        let previousByPath = indexPreviousSnapshots(previousSnapshot)
         let coreResult = await readCoreStatusPriorityBatched(
             paths: isFastFirst
-                ? prioritizePaths(discoveryResult.readablePaths, previous: previousSnapshot)
+                ? prioritizePaths(discoveryResult.readablePaths, previousByPath: previousByPath)
                 : discoveryResult.readablePaths.map { PrioritizedRepository(path: $0) },
             config: config,
             previousSnapshot: previousSnapshot,
+            previousByPath: previousByPath,
             workspaceKindsByPath: discoveryResult.workspaceKindsByPath,
             overallDeadline: stage2Deadline,
             generation: currentGeneration,
@@ -207,7 +214,7 @@ actor RefreshEngine {
         let extendedResult = await readExtendedInfo(
             coreResult: coreResult,
             config: config,
-            previousSnapshot: previousSnapshot,
+            previousByPath: previousByPath,
             overallDeadline: stage3Deadline,
             generation: currentGeneration,
             gitCommandRunner: wrappedRunner,
@@ -535,6 +542,7 @@ extension RefreshEngine {
         paths: [PrioritizedRepository],
         config: ScanConfig,
         previousSnapshot: AppGroupData?,
+        previousByPath: [String: RepositorySnapshot],
         workspaceKindsByPath: [String: RepositoryWorkspaceKind],
         overallDeadline: TimeInterval,
         generation: GenerationIsolation.Token,
@@ -548,17 +556,19 @@ extension RefreshEngine {
                                   peakConcurrency: 0)
         }
 
-        let previousByPath = indexPreviousSnapshots(previousSnapshot)
         let previousUnavailableSinceByPath = previousSnapshot?.repositoryUnavailableSinceByPath ?? [:]
         let concurrency = min(config.maxConcurrentGitOps, paths.count)
         var snapshotsByIndex: [Int: RepositorySnapshot] = [:]
         var counters = (status: 0, timeout: 0, cancelled: 0, failed: 0, peak: 0)
         var skippedCount = 0
 
-        // Pre-scan: identify repos whose filesystem state hasn't changed
+        // Pre-scan: identify repos whose filesystem state hasn't changed.
+        // `entry.path` is already canonical (prioritized or discovery output),
+        // so no re-normalization — and therefore no extra filesystem checks —
+        // is needed here.
         var skipIndices = Set<Int>()
         for (idx, entry) in paths.enumerated() {
-            let canonical = RepositoryIdentity.canonicalPath(entry.path)
+            let canonical = entry.path
             let lastSuccessfulScanAt: String?
             if let prev = previousByPath[canonical] {
                 lastSuccessfulScanAt = prev.resolvedDataSource == .current
@@ -590,7 +600,7 @@ extension RefreshEngine {
 
                 // Fast skip: reuse previous snapshot without git commands.
                 if skipIndices.contains(idx) {
-                    if let previous = previousByPath[RepositoryIdentity.canonicalPath(entry.path)] {
+                    if let previous = previousByPath[entry.path] {
                         // Preserve .current dataSource since the repo is genuinely
                         // unchanged — the fast filesystem check proves it.
                         let retained = RepositorySnapshot(
@@ -623,6 +633,13 @@ extension RefreshEngine {
                         snapshotsByIndex[idx] = retained
                     }
                     counters.status += 1
+                    // A skip must not consume a task slot: keep submitting so
+                    // the group always contains real work. Otherwise an
+                    // all-skip first batch — or maxConcurrentGitOps == 1 with
+                    // a skippable first path — leaves the task group empty,
+                    // the result loop never runs, and every remaining path is
+                    // silently dropped from the scan.
+                    submit()
                     return
                 }
 
@@ -639,7 +656,7 @@ extension RefreshEngine {
                     let remaining = overallDeadline - ProcessInfo.processInfo.systemUptime
                     guard remaining > 0 else { return (idx, nil) }
 
-                    let canonical = RepositoryIdentity.canonicalPath(entry.path)
+                    let canonical = entry.path
                     let previous = previousByPath[canonical]
                     let unavailableSince = previousUnavailableSinceByPath[canonical]
                     let workspaceKind = workspaceKindsByPath[canonical] ?? previous?.workspaceKind
@@ -845,7 +862,7 @@ extension RefreshEngine {
     private func readExtendedInfo(
         coreResult: CoreReadResult,
         config: ScanConfig,
-        previousSnapshot: AppGroupData?,
+        previousByPath: [String: RepositorySnapshot],
         overallDeadline: TimeInterval,
         generation: GenerationIsolation.Token,
         gitCommandRunner: @escaping GitCommandRunner,
@@ -855,7 +872,6 @@ extension RefreshEngine {
             return ExtendedReadResult(snapshots: [], completed: 0, total: 0, reusedMetadataCount: 0)
         }
 
-        let previousByPath = indexPreviousSnapshots(previousSnapshot)
         var enriched: [RepositorySnapshot] = []
         var needsLog: [(Int, RepositorySnapshot)] = []
         var reusedCount = 0
@@ -1092,14 +1108,15 @@ extension RefreshEngine {
 extension RefreshEngine {
     private func prioritizePaths(
         _ paths: [String],
-        previous: AppGroupData?
+        previousByPath: [String: RepositorySnapshot]
     ) -> [PrioritizedRepository] {
-        let prevByPath = indexPreviousSnapshots(previous)
+        // Discovery paths are already canonicalized, and the caller's single
+        // previousByPath index avoids re-normalizing every path (and the
+        // accompanying filesystem checks) here.
         return paths.map { path in
-            let canonical = RepositoryIdentity.canonicalPath(path)
-            let prev = prevByPath[canonical]
+            let prev = previousByPath[path]
             let priority = RepositoryRefreshPriority(previous: prev)
-            return PrioritizedRepository(path: canonical, priority: priority, previousSnapshot: prev)
+            return PrioritizedRepository(path: path, priority: priority, previousSnapshot: prev)
         }.sorted { $0.priority < $1.priority }
     }
 

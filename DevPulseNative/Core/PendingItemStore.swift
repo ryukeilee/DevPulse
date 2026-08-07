@@ -246,6 +246,7 @@ final class PendingItemStore: @unchecked Sendable {
     func replaceAll(with items: [PendingItem]) -> Result<PendingItemArchive, PendingItemStoreError> {
         switch load() {
         case .success(var archive):
+            let existingArchive = archive
             // Preserve dismissed IDs and user-set statuses for matching items
             let existingByID = Dictionary(uniqueKeysWithValues: archive.items.map { ($0.id, $0) })
 
@@ -302,6 +303,14 @@ final class PendingItemStore: @unchecked Sendable {
             }
 
             archive.items = merged
+            // The evaluator runs after every refresh, so most scans produce a
+            // merged archive identical to what is already on disk. Skip the
+            // encode + write + fsync in that case — the persisted state is
+            // unchanged and returning the merged archive keeps the caller's
+            // contract identical.
+            if archive == existingArchive {
+                return .success(archive)
+            }
             return save(archive)
         case .failure(let error):
             return .failure(error)

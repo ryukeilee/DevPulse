@@ -2625,6 +2625,21 @@ struct CommitReadinessEngineTests {
             atomically: true,
             encoding: .utf8
         )
+        // Untracked writes do not update .git/HEAD or .git/index mtimes, so
+        // the fast filesystem skip (strict mtime < lastScanAt comparison)
+        // would silently miss this change whenever the repository's commit
+        // moment and the previous scan land in different seconds. Touch both
+        // files to simulate git activity and make the refresh deterministic.
+        let gitDir = newlyChanged.appendingPathComponent(".git")
+        let now = Date()
+        try FileManager.default.setAttributes(
+            [.modificationDate: now],
+            ofItemAtPath: gitDir.appendingPathComponent("HEAD").path
+        )
+        try FileManager.default.setAttributes(
+            [.modificationDate: now],
+            ofItemAtPath: gitDir.appendingPathComponent("index").path
+        )
 
         let refreshed = await GitRepositoryScanner.scan(
             config: config,
