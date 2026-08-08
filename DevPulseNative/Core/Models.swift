@@ -2166,10 +2166,34 @@ enum RefreshStatusFormatter {
         let unavailableRepositories = snapshot.repositories.filter {
             $0.resolvedDataSource != .current || $0.status == .error
         }
+        // 与 App 端 isDegraded 语义保持一致：一次扫描只要因仓库读取错误
+        // (scanSummary.errorRepositories) 或探索不可达路径
+        // (repositoryUnavailableSinceByPath) 被判定为降级，Widget 就不应
+        // 用被冻结的旧 lastSuccessfulRefreshAt 渲染成"数据过期"——那会让
+        // 用户反复点 Rescan Now 也无法恢复。此时应呈现"部分仓库待确认"。
+        let hasUnresolvedPaths = snapshot.repositoryUnavailableSinceByPath?.isEmpty == false
+        let hasScanReportedErrors = snapshot.scanSummary.errorRepositories > 0
         let successfulRefreshDate = snapshot.lastSuccessfulRefreshAt
             .flatMap(DateFormatting.date(from:))
 
-        if !unavailableRepositories.isEmpty {
+        if !unavailableRepositories.isEmpty || hasUnresolvedPaths || hasScanReportedErrors {
+            // 扫描降级但列表内仓库全部可用（例如个别根目录暂不可读）时，
+            // 明确给出 degraded 状态而不是退化为按旧 lastSuccessfulAt 判过期。
+            if unavailableRepositories.isEmpty {
+                let successfulSuffix = successfulRefreshDate.map {
+                    " · 上次完整成功：\(updateLabel(for: $0, now: now))"
+                } ?? " · 尚无完整成功记录"
+                let detail = hasUnresolvedPaths
+                    ? "部分扫描路径暂无法确认，其余仓库数据可用\(successfulSuffix)"
+                    : "部分仓库扫描未能确认，其余仓库数据可用\(successfulSuffix)"
+                return SnapshotTrustAssessment(
+                    state: .degraded,
+                    title: "部分仓库待确认",
+                    detail: detail,
+                    basis: "共享快照含有未能确认的扫描路径/仓库；writtenAt 仅表示快照已写入，不代表扫描完整成功。"
+                )
+            }
+
             let lastSuccessfulCount = snapshot.repositories.filter {
                 $0.resolvedDataSource == .lastSuccessful
             }.count

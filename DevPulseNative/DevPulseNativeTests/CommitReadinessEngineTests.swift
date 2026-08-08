@@ -367,6 +367,99 @@ struct CommitReadinessEngineTests {
         #expect(assessment.detail.contains("上次完整成功"))
     }
 
+    @Test func snapshotTrustAssessmentShowsDegradedForUnresolvedScanPaths() {
+        let now = Date(timeIntervalSince1970: 1_718_000_000)
+        let formatter = ISO8601DateFormatter()
+        let successfulAt = formatter.string(from: now.addingTimeInterval(-20 * 60))
+        let attemptedAt = formatter.string(from: now)
+        // 仓库数据全部 current，但探索阶段有不可达路径：Widget 不应退化为
+        // "数据过期"（旧 lastSuccessfulRefreshAt 被降级扫描冻结），应显示降级。
+        let snapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: attemptedAt,
+            writtenAt: attemptedAt,
+            lastSuccessfulRefreshAt: successfulAt,
+            scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 0, totalChangedFiles: 0, errorRepositories: 0),
+            repositories: [
+                snapshot(
+                    status: .clean,
+                    lastScannedAt: attemptedAt,
+                    dataSource: .current,
+                    lastSuccessfulScanAt: attemptedAt
+                )
+            ],
+            repositoryUnavailableSinceByPath: ["/tmp/unreachable-root": successfulAt]
+        )
+
+        let assessment = RefreshStatusFormatter.snapshotAssessment(snapshot: snapshot, now: now)
+
+        #expect(assessment.state == .degraded)
+        #expect(assessment.title == "部分仓库待确认")
+        #expect(assessment.detail.contains("部分扫描路径"))
+    }
+
+    @Test func snapshotTrustAssessmentShowsDegradedWhenScanReportsRepositoryErrors() {
+        let now = Date(timeIntervalSince1970: 1_718_000_000)
+        let formatter = ISO8601DateFormatter()
+        let successfulAt = formatter.string(from: now.addingTimeInterval(-20 * 60))
+        let attemptedAt = formatter.string(from: now)
+        // scanSummary 报告有仓库读取错误，但快照里都是 current 数据：
+        // 不能仅凭被冻结的 lastSuccessfulRefreshAt 判为过期。
+        let snapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: attemptedAt,
+            writtenAt: attemptedAt,
+            lastSuccessfulRefreshAt: successfulAt,
+            scanSummary: ScanSummary(totalRepositories: 2, changedRepositories: 0, totalChangedFiles: 0, errorRepositories: 1),
+            repositories: [
+                snapshot(
+                    status: .clean,
+                    lastScannedAt: attemptedAt,
+                    dataSource: .current,
+                    lastSuccessfulScanAt: attemptedAt
+                ),
+                snapshot(
+                    status: .clean,
+                    lastScannedAt: attemptedAt,
+                    dataSource: .current,
+                    lastSuccessfulScanAt: attemptedAt
+                )
+            ]
+        )
+
+        let assessment = RefreshStatusFormatter.snapshotAssessment(snapshot: snapshot, now: now)
+
+        #expect(assessment.state == .degraded)
+        #expect(assessment.title == "部分仓库待确认")
+    }
+
+    @Test func snapshotTrustAssessmentStaysStaleWhenNoDegradedSignals() {
+        let now = Date(timeIntervalSince1970: 1_718_000_000)
+        let formatter = ISO8601DateFormatter()
+        let successfulAt = formatter.string(from: now.addingTimeInterval(-20 * 60))
+        let attemptedAt = formatter.string(from: now)
+        // 完全健康的快照：lastSuccessfulRefreshAt 20 分钟前，应保持 stale。
+        let snapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: attemptedAt,
+            writtenAt: attemptedAt,
+            lastSuccessfulRefreshAt: successfulAt,
+            scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 0, totalChangedFiles: 0, errorRepositories: 0),
+            repositories: [
+                snapshot(
+                    status: .clean,
+                    lastScannedAt: attemptedAt,
+                    dataSource: .current,
+                    lastSuccessfulScanAt: attemptedAt
+                )
+            ]
+        )
+
+        let assessment = RefreshStatusFormatter.snapshotAssessment(snapshot: snapshot, now: now)
+
+        #expect(assessment.state == .stale)
+    }
+
     @Test func futureSuccessfulTimestampCannotAppearJustUpdated() {
         let now = Date(timeIntervalSince1970: 1_718_000_000)
         let future = now.addingTimeInterval(5 * 60)
