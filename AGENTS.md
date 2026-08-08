@@ -29,6 +29,7 @@ git config core.hooksPath .githooks
 
 ```
 .
+├── .agent/                   # Evidence-driven Maintenance Loop (loop.md/rules.md/memory.md/history.md)
 ├── .claude/worktrees/        # Claude worktree sessions
 ├── .githooks/
 │   ├── pre-commit            # runs scripts/secret-scan.sh staged
@@ -65,6 +66,14 @@ git config core.hooksPath .githooks
 ```
 
 Do not commit DerivedData, build products, installed app bundles, or Xcode user state.
+
+## Maintenance Loop
+
+`.agent/` defines the evidence-driven maintenance loop
+(Observe → Evidence → Decide → Execute → Verify → Record). Before any
+evidence-based maintenance work, read `.agent/rules.md`, `.agent/memory.md`,
+and the recent records in `.agent/history.md`, then follow `.agent/loop.md`.
+Boundary rules in this file and `DevPulseNative/AGENTS.md` take precedence.
 
 ## Core files (DevPulseNative/Core/)
 
