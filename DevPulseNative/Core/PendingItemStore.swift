@@ -47,7 +47,9 @@ final class PendingItemStore: @unchecked Sendable {
     private let fileURL: URL
     private let lockURL: URL
     private let queue: DispatchQueue
-    private let processLock = NSLock()
+    // POSIX record locks are process-scoped; serialize independent store
+    // instances in this process as well.
+    private static let processLock = NSLock()
     private let logger = Logger(subsystem: "local.devpulse.app", category: "PendingItemStore")
 
     private var cachedArchive: PendingItemArchive?
@@ -118,68 +120,66 @@ final class PendingItemStore: @unchecked Sendable {
     }
 
     private func loadUnsafe() -> Result<PendingItemArchive, PendingItemStoreError> {
+        withFileLock {
+            loadUnsafeUnlocked()
+        }
+    }
+
+    /// Reads while the caller already owns `withFileLock`.
+    private func loadUnsafeUnlocked() -> Result<PendingItemArchive, PendingItemStoreError> {
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             let empty = PendingItemArchive()
             cachedArchive = empty
             return .success(empty)
         }
 
-        return withFileLock {
-            let data: Data
-            do {
-                data = try Data(contentsOf: fileURL)
-            } catch {
-                logger.warning("pending items read failed: \(error.localizedDescription)")
-                logger.warning("recovering with empty archive — replacing corrupt file")
-                let empty = PendingItemArchive()
-                // Persist the empty archive to disk so the same corrupt data
-                // is not re-read on the next load, preventing repeated failures
-                // after a crash or partial write.
-                // Use unlocked variant — caller already holds `withFileLock`
-                if case .failure(let writeError) = saveUnsafeUnlocked(empty) {
-                    logger.error("failed to replace corrupt pending items file: \(writeError.localizedDescription)")
-                }
-                cachedArchive = empty
-                return .success(empty)
+        let data: Data
+        do {
+            data = try Data(contentsOf: fileURL)
+        } catch {
+            logger.warning("pending items read failed: \(error.localizedDescription)")
+            logger.warning("recovering with empty archive — replacing corrupt file")
+            let empty = PendingItemArchive()
+            // Persist the empty archive so corrupt data is not retried forever.
+            if case .failure(let writeError) = saveUnsafeUnlocked(empty) {
+                logger.error("failed to replace corrupt pending items file: \(writeError.localizedDescription)")
             }
-
-            let decoder = JSONDecoder()
-            guard let archive = try? decoder.decode(PendingItemArchive.self, from: data) else {
-                logger.warning("pending items decode failed, recovering with empty archive — replacing corrupt file")
-                let empty = PendingItemArchive()
-                // Persist the empty archive to disk so the same corrupt data
-                // is not re-read on the next load.
-                // Use unlocked variant — caller already holds `withFileLock`
-                if case .failure(let writeError) = saveUnsafeUnlocked(empty) {
-                    logger.error("failed to replace corrupt pending items file: \(writeError.localizedDescription)")
-                }
-                cachedArchive = empty
-                return .success(empty)
-            }
-
-            guard archive.schemaVersion <= PendingItemArchive.currentSchemaVersion else {
-                return .failure(.schemaMismatch(
-                    expected: PendingItemArchive.currentSchemaVersion,
-                    actual: archive.schemaVersion
-                ))
-            }
-
-            if archive.schemaVersion < PendingItemArchive.currentSchemaVersion {
-                let migrated = migrate(archive: archive)
-                // Use unlocked variant — caller already holds `withFileLock`
-                switch saveUnsafeUnlocked(migrated) {
-                case .success:
-                    cachedArchive = migrated
-                    return .success(migrated)
-                case .failure(let error):
-                    return .failure(error)
-                }
-            }
-
-            cachedArchive = archive
-            cacheTimestamp = Date()
-            return .success(archive)
+            cachedArchive = empty
+            return .success(empty)
         }
+
+        let decoder = JSONDecoder()
+        guard let archive = try? decoder.decode(PendingItemArchive.self, from: data) else {
+            logger.warning("pending items decode failed, recovering with empty archive — replacing corrupt file")
+            let empty = PendingItemArchive()
+            if case .failure(let writeError) = saveUnsafeUnlocked(empty) {
+                logger.error("failed to replace corrupt pending items file: \(writeError.localizedDescription)")
+            }
+            cachedArchive = empty
+            return .success(empty)
+        }
+
+        guard archive.schemaVersion <= PendingItemArchive.currentSchemaVersion else {
+            return .failure(.schemaMismatch(
+                expected: PendingItemArchive.currentSchemaVersion,
+                actual: archive.schemaVersion
+            ))
+        }
+
+        if archive.schemaVersion < PendingItemArchive.currentSchemaVersion {
+            let migrated = migrate(archive: archive)
+            switch saveUnsafeUnlocked(migrated) {
+            case .success:
+                cachedArchive = migrated
+                return .success(migrated)
+            case .failure(let error):
+                return .failure(error)
+            }
+        }
+
+        cachedArchive = archive
+        cacheTimestamp = Date()
+        return .success(archive)
     }
 
     // MARK: - Save
@@ -242,24 +242,58 @@ final class PendingItemStore: @unchecked Sendable {
 
     // MARK: - Mutations
 
+    /// Read-modify-write an archive while holding one process/POSIX lock. This
+    /// prevents evaluator writes and user actions from losing each other
+    /// between separate `load()` and `save()` calls.
+    private func mutateArchive(
+        _ mutation: (inout PendingItemArchive) -> PendingItemStoreError?
+    ) -> Result<PendingItemArchive, PendingItemStoreError> {
+        queue.sync {
+            withFileLock {
+                var archive: PendingItemArchive
+                switch loadUnsafeUnlocked() {
+                case .success(let loaded):
+                    archive = loaded
+                case .failure(let error):
+                    return .failure(error)
+                }
+
+                let original = archive
+                if let error = mutation(&archive) {
+                    return .failure(error)
+                }
+                if archive == original {
+                    cachedArchive = archive
+                    lastLoadResult = .success(archive)
+                    cacheTimestamp = Date()
+                    return .success(archive)
+                }
+
+                let result = saveUnsafeUnlocked(archive)
+                if case .success(let saved) = result {
+                    cachedArchive = saved
+                    lastLoadResult = .success(saved)
+                    cacheTimestamp = Date()
+                }
+                return result
+            }
+        }
+    }
+
     /// Replace all items in bulk (used by evaluator after a refresh).
     func replaceAll(with items: [PendingItem]) -> Result<PendingItemArchive, PendingItemStoreError> {
-        switch load() {
-        case .success(var archive):
-            let existingArchive = archive
-            // Preserve dismissed IDs and user-set statuses for matching items
+        mutateArchive { archive in
+            // Preserve dismissed IDs and user-set statuses for matching items.
             let existingByID = Dictionary(uniqueKeysWithValues: archive.items.map { ($0.id, $0) })
 
             var merged: [PendingItem] = []
             for item in items {
                 if let existing = existingByID[item.id] {
-                    // Preserve user-set status unless condition changed significantly
                     let preservedStatus: PendingItemStatus
                     switch existing.status {
                     case .acknowledged, .muted, .permanentlyIgnored:
                         preservedStatus = existing.status
                     case .snoozed:
-                        // Check if snooze expired
                         if let until = existing.snoozedUntil.flatMap(DateFormatting.date(from:)),
                            until <= Date() {
                             preservedStatus = .restored
@@ -267,7 +301,7 @@ final class PendingItemStore: @unchecked Sendable {
                             preservedStatus = .snoozed
                         }
                     case .restored:
-                        preservedStatus = item.status // Follow evaluator
+                        preservedStatus = item.status
                     case .active, .resolved:
                         preservedStatus = item.status
                     }
@@ -277,7 +311,6 @@ final class PendingItemStore: @unchecked Sendable {
                     if preservedStatus == .snoozed {
                         mergedItem.snoozedUntil = existing.snoozedUntil
                     }
-                    // Preserve original firstDetectedAt
                     mergedItem = PendingItem(
                         id: mergedItem.id,
                         source: mergedItem.source,
@@ -303,17 +336,7 @@ final class PendingItemStore: @unchecked Sendable {
             }
 
             archive.items = merged
-            // The evaluator runs after every refresh, so most scans produce a
-            // merged archive identical to what is already on disk. Skip the
-            // encode + write + fsync in that case — the persisted state is
-            // unchanged and returning the merged archive keeps the caller's
-            // contract identical.
-            if archive == existingArchive {
-                return .success(archive)
-            }
-            return save(archive)
-        case .failure(let error):
-            return .failure(error)
+            return nil
         }
     }
 
@@ -323,10 +346,9 @@ final class PendingItemStore: @unchecked Sendable {
         action: PendingItemUserAction,
         snoozeDuration: TimeInterval? = nil
     ) -> Result<PendingItemArchive, PendingItemStoreError> {
-        switch load() {
-        case .success(var archive):
+        mutateArchive { archive in
             guard let idx = archive.items.firstIndex(where: { $0.id == itemID }) else {
-                return .failure(.writeFailed("item not found"))
+                return .writeFailed("item not found")
             }
 
             var item = archive.items[idx]
@@ -342,7 +364,6 @@ final class PendingItemStore: @unchecked Sendable {
                     let date = Date().addingTimeInterval(duration)
                     item.snoozedUntil = DateFormatting.isoString(from: date)
                 } else {
-                    // Default: 1 hour
                     let date = Date().addingTimeInterval(3600)
                     item.snoozedUntil = DateFormatting.isoString(from: date)
                 }
@@ -363,9 +384,7 @@ final class PendingItemStore: @unchecked Sendable {
             }
 
             archive.items[idx] = item
-            return save(archive)
-        case .failure(let error):
-            return .failure(error)
+            return nil
         }
     }
 
@@ -441,8 +460,8 @@ final class PendingItemStore: @unchecked Sendable {
     // MARK: - File lock
 
     private func withFileLock<T>(_ body: () throws -> T) rethrows -> T {
-        processLock.lock()
-        defer { processLock.unlock() }
+        Self.processLock.lock()
+        defer { Self.processLock.unlock() }
 
         let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
         guard descriptor >= 0 else {

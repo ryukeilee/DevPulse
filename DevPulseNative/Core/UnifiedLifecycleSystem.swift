@@ -1660,43 +1660,49 @@ struct BoundedRecoveryContext {
         operation: @Sendable @escaping () async throws -> T,
         deadline: inout TimeInterval?
     ) async -> BoundedResult<T> {
-        // Check total budget
-        if let deadline, ProcessInfo.processInfo.systemUptime >= deadline {
+        let now = ProcessInfo.processInfo.systemUptime
+        if deadline == nil {
+            deadline = now + max(0, totalBudget)
+        }
+
+        guard let deadline, now < deadline else {
             return .budgetExceeded
         }
 
-        // Set deadline on first call
-        if deadline == nil {
-            deadline = ProcessInfo.processInfo.systemUptime + totalBudget
-        }
+        // A structured task group cannot enforce a wall-clock timeout when the
+        // operation is blocking or otherwise ignores cancellation: leaving the
+        // group waits for that child to finish. Race two unstructured tasks
+        // through a single-resume box instead, so startup recovery remains
+        // bounded even for a non-cooperative filesystem operation.
+        let remainingBudget = deadline - now
+        let allowedDuration = min(max(0, operationTimeout), remainingBudget)
+        guard allowedDuration > 0 else { return .budgetExceeded }
+        let budgetIsLimiting = remainingBudget <= operationTimeout
 
-        // Run with operation timeout
-        do {
-            let result = try await withThrowingTaskGroup(of: T.self) { group in
-                group.addTask {
-                    try await operation()
+        return await withCheckedContinuation { continuation in
+            let resultBox = TimeoutResultBox<BoundedResult<T>>(continuation)
+            let operationTask = Task.detached(priority: .utility) {
+                do {
+                    resultBox.finish(.success(try await operation()))
+                } catch {
+                    resultBox.finish(.failure(error))
                 }
-                group.addTask {
-                    try await Task.sleep(nanoseconds: UInt64(operationTimeout * 1_000_000_000))
-                    throw BoundedRecoveryError.timeout
+            }
+
+            Task.detached(priority: .utility) {
+                do {
+                    try await Task.sleep(for: .seconds(allowedDuration))
+                } catch {
+                    return
                 }
-                let result = try await group.next()!
-                group.cancelAll()
-                return result
+                resultBox.finish(budgetIsLimiting ? .budgetExceeded : .timeout)
+                operationTask.cancel()
             }
-            return .success(result)
-        } catch let error as BoundedRecoveryError {
-            if error == .timeout {
-                return .timeout
-            }
-            return .failure(error)
-        } catch {
-            return .failure(error)
         }
     }
 }
 
-enum BoundedResult<T: Sendable> {
+enum BoundedResult<T: Sendable>: @unchecked Sendable {
     case success(T)
     case timeout
     case budgetExceeded

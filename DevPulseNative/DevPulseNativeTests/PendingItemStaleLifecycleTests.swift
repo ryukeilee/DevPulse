@@ -329,6 +329,58 @@ struct PendingItemStaleLifecycleTests {
         #expect(dirty.status == PendingItemStatus.active)  // unchanged
     }
 
+    @Test func evaluatorWritePreservesActionFromAnotherStoreInstance() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pending-race-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("pending-items.json")
+
+        let actionStore = PendingItemStore(fileURL: fileURL)
+        let evaluatorStore = PendingItemStore(fileURL: fileURL)
+        let item = PendingItem(
+            source: .dirtyWorkspace,
+            severity: .medium,
+            repositoryID: "repo-1",
+            title: "工作区存在长期改动"
+        )
+        _ = actionStore.save(PendingItemArchive(items: [item]))
+        // Prime the second instance's cache with the pre-action state.
+        _ = evaluatorStore.load()
+
+        guard case .success = actionStore.applyUserAction(
+            itemID: item.id,
+            action: .acknowledge
+        ) else {
+            Issue.record("Expected user action to persist")
+            return
+        }
+
+        let reevaluated = PendingItem(
+            id: item.id,
+            source: item.source,
+            severity: .high,
+            repositoryID: item.repositoryID,
+            title: item.title,
+            explanation: "updated evidence",
+            evidence: ["new"],
+            status: .active
+        )
+        guard case .success(let merged) = evaluatorStore.replaceAll(with: [reevaluated]) else {
+            Issue.record("Expected evaluator write to persist")
+            return
+        }
+
+        #expect(merged.items.first?.status == .acknowledged)
+        #expect(merged.items.first?.severity == .high)
+        let reloaded = PendingItemStore(fileURL: fileURL).load()
+        guard case .success(let archive) = reloaded else {
+            Issue.record("Expected merged archive to reload")
+            return
+        }
+        #expect(archive.items.first?.status == .acknowledged)
+    }
+
     // MARK: - Mutual exclusion: unavailable vs staleRepository
 
     @Test func unavailableAndStaleRepositoryAreMutuallyExclusive() throws {

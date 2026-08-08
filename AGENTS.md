@@ -287,7 +287,11 @@ DERIVED_DATA_PATH="$DERIVED_DATA_PATH" ./scripts/verify-widgetkit.sh
 # Activity timeline logic check
 ./scripts/verify-activity-timeline.sh
 
-# Signed local install + runtime self-check (requires signing identity)
+# Signed local install + runtime self-check (requires signing identity).
+# When the build embeds DevPulseTests.xctest, the script re-signs after
+# removing it; the re-sign must pass --entitlements so the App Group
+# capability is preserved (a bare `--generate-entitlement-der` drops it,
+# which makes UserDefaults(suiteName:) fall back to ~/Library/Preferences).
 ./scripts/install-and-self-check.sh
 ```
 

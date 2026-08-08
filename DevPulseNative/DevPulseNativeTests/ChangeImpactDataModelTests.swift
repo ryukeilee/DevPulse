@@ -412,6 +412,51 @@ struct ChangeImpactDataModelTests {
         }
     }
 
+    // MARK: - ChangeImpactStore
+
+    @Test("automatic compaction does not re-enter the store queue")
+    func automaticCompactionCompletes() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devpulse-impact-store-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        var configuration = ChangeImpactStore.Configuration()
+        configuration.maxAnalysesPerRepo = 1
+        configuration.maxTotalAnalyses = 1
+        configuration.retentionDays = nil
+        configuration.compactionInterval = 1
+        configuration.compactionThreshold = 0
+
+        let store = ChangeImpactStore(
+            fileURL: directory.appendingPathComponent("impact.json"),
+            config: configuration
+        )
+        let snapshot = ChangeImpactSnapshot(
+            id: "snapshot-1",
+            repositoryID: "repo-1",
+            repositoryPath: "/repo-1",
+            analysisVersion: 1,
+            analyzedAt: ISO8601DateFormatter().string(from: Date()),
+            baselineState: .none(),
+            changes: [],
+            modules: [],
+            impactEdges: [],
+            scope: .singleFile,
+            releaseReadiness: nil,
+            categoryBreakdown: [:],
+            repositoryHealthSnapshot: nil,
+            diagnostics: nil,
+            isFromCache: false
+        )
+
+        guard case .success = store.store(snapshot: snapshot) else {
+            Issue.record("Expected store write to complete")
+            return
+        }
+        #expect(store.totalAnalysisCount == 1)
+    }
+
     // MARK: - AnalysisStage
 
     @Test("AnalysisStage ordering and completeness")

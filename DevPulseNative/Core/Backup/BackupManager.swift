@@ -3,6 +3,65 @@ import CryptoKit
 import Foundation
 import OSLog
 
+// MARK: - Backup compression
+
+enum BackupCompression {
+    /// Bound allocations when inspecting an untrusted imported manifest.
+    private static let maximumDecodedSize: Int64 = 512 * 1024 * 1024
+
+    static func compress(_ data: Data) -> Data {
+        guard !data.isEmpty else { return data }
+        let destinationBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: data.count)
+        defer { destinationBuffer.deallocate() }
+
+        let compressedSize = data.withUnsafeBytes { source in
+            guard let baseAddress = source.baseAddress else { return 0 }
+            return compression_encode_buffer(
+                destinationBuffer,
+                data.count,
+                baseAddress.assumingMemoryBound(to: UInt8.self),
+                data.count,
+                nil,
+                COMPRESSION_ZLIB
+            )
+        }
+        guard compressedSize > 0 else { return data }
+        return Data(bytes: destinationBuffer, count: compressedSize)
+    }
+
+    static func decompress(_ data: Data, expectedSize: Int64) -> Data? {
+        guard expectedSize >= 0,
+              expectedSize <= maximumDecodedSize,
+              expectedSize <= Int64(Int.max) else { return nil }
+        let targetSize = Int(expectedSize)
+        if targetSize == 0 {
+            return data.isEmpty ? Data() : nil
+        }
+
+        let destinationBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: targetSize)
+        defer { destinationBuffer.deallocate() }
+        let decodedSize = data.withUnsafeBytes { source in
+            guard let baseAddress = source.baseAddress else { return 0 }
+            return compression_decode_buffer(
+                destinationBuffer,
+                targetSize,
+                baseAddress.assumingMemoryBound(to: UInt8.self),
+                data.count,
+                nil,
+                COMPRESSION_ZLIB
+            )
+        }
+        if decodedSize == targetSize {
+            return Data(bytes: destinationBuffer, count: decodedSize)
+        }
+
+        // Compression deliberately falls back to raw bytes when zlib cannot
+        // make the payload smaller. Accept that representation only when its
+        // exact size matches the manifest.
+        return data.count == targetSize ? data : nil
+    }
+}
+
 // MARK: - Backup manager
 
 /// Creates, verifies, lists, and manages local backups of all DevPulse
@@ -107,14 +166,41 @@ final class BackupManager: @unchecked Sendable {
         isIncremental: Bool = false,
         progress: ((Double) -> Void)? = nil
     ) throws -> BackupSummary {
-        guard !_isBackingUp else { throw BackupManagerError.backupInProgress }
+        processLock.lock()
+        guard !_isBackingUp else {
+            processLock.unlock()
+            throw BackupManagerError.backupInProgress
+        }
         _isBackingUp = true
-        defer { _isBackingUp = false }
+        processLock.unlock()
+        defer {
+            processLock.lock()
+            _isBackingUp = false
+            processLock.unlock()
+        }
+        guard !stores.isEmpty else {
+            throw BackupManagerError.storeUnavailable("没有可备份的数据")
+        }
 
         let backupDir = backupDirectoryURL(config: config)
         let now = Date()
-        let backupName = BackupFileLayout.backupDirectoryName(date: now)
-        let backupURL = backupDir.appendingPathComponent(backupName)
+        let baseName = BackupFileLayout.backupDirectoryName(date: now)
+        var backupName = baseName
+        var finalBackupURL = backupDir.appendingPathComponent(backupName)
+        if fileManager.fileExists(atPath: finalBackupURL.path) {
+            backupName += "-\(UUID().uuidString.prefix(8))"
+            finalBackupURL = backupDir.appendingPathComponent(backupName)
+        }
+        let backupURL = backupDir.appendingPathComponent(
+            ".backup-staging-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        var committed = false
+        defer {
+            if !committed {
+                try? fileManager.removeItem(at: backupURL)
+            }
+        }
 
         // Check free space
         let estimatedSize = estimateBackupSize(stores: stores)
@@ -127,8 +213,10 @@ final class BackupManager: @unchecked Sendable {
             throw BackupManagerError.storageFull(available: free, needed: estimatedSize)
         }
 
-        // Check for previous backup for incremental diff
-        let previousManifest = isIncremental ? findLatestBackupManifest(at: backupDir) : nil
+        // Check for previous backup for incremental diff.
+        let previousBackup = isIncremental ? findLatestBackup(at: backupDir) : nil
+        let previousManifest = previousBackup?.manifest
+        let createsIncremental = isIncremental && previousBackup != nil
 
         progress?(0.05)
 
@@ -170,32 +258,54 @@ final class BackupManager: @unchecked Sendable {
             let dataHash = SHA256.hash(data: sanitized)
                 .map { String(format: "%02x", $0) }.joined()
 
-            // Incremental: skip if hash matches previous backup
-            if isIncremental, let prev = previousManifest {
-                if let prevEntry = prev.content.entries.values.first(where: { $0.storeType == storeType }),
-                   prevEntry.dataHash == dataHash {
-                    // Entry unchanged - skip storing but record reference
-                    let entryInfo = BackupEntryInfo(
-                        storeType: storeType,
-                        schemaVersion: storeData.schemaVersion,
-                        dataHash: dataHash,
-                        compressedSizeBytes: 0,
-                        uncompressedSizeBytes: Int64(sanitized.count),
-                        entryCreatedAt: prevEntry.entryCreatedAt
-                    )
-                    entries.append(entryInfo)
-                    checksums[storeType.entryFileName] = dataHash
-                    continue
-                }
+            // Keep incremental backups independently restorable: when an entry
+            // is unchanged, copy its verified payload from the previous chain
+            // instead of writing a zero-byte reference that retention could
+            // orphan.
+            if createsIncremental,
+               let previousBackup,
+               let prevEntry = previousManifest?.content.entries.values.first(where: {
+                   $0.storeType == storeType
+               }),
+               prevEntry.dataHash == dataHash,
+               let sourceURL = resolveEntryURL(
+                   storeType: storeType,
+                   backupURL: previousBackup.url,
+                   manifest: previousBackup.manifest,
+                   backupRoot: backupDir
+               ),
+               let previousPayload = try? Data(contentsOf: sourceURL),
+               BackupCompression.decompress(
+                   previousPayload,
+                   expectedSize: Int64(sanitized.count)
+               ) == sanitized {
+                let entryFileName = storeType.entryFileName
+                try previousPayload.write(
+                    to: entriesDir.appendingPathComponent(entryFileName),
+                    options: .atomic
+                )
+                entries.append(BackupEntryInfo(
+                    storeType: storeType,
+                    schemaVersion: storeData.schemaVersion,
+                    dataHash: dataHash,
+                    compressedSizeBytes: Int64(previousPayload.count),
+                    uncompressedSizeBytes: Int64(sanitized.count),
+                    entryCreatedAt: prevEntry.entryCreatedAt
+                ))
+                checksums[entryFileName] = dataHash
+                continue
             }
 
             // Compress data
-            let compressed = compress(data: sanitized)
+            let compressed = BackupCompression.compress(sanitized)
             let entryFileName = storeType.entryFileName
             let entryURL = entriesDir.appendingPathComponent(entryFileName)
 
             // Verify compression
-            let decompressed = decompress(data: compressed)
+            let decompressed = BackupCompression.decompress(
+                compressed,
+                expectedSize: Int64(sanitized.count)
+            )
             guard decompressed == sanitized else {
                 throw BackupManagerError.serializationFailed("压缩/解压缩验证失败：\(storeType.rawValue)")
             }
@@ -238,10 +348,8 @@ final class BackupManager: @unchecked Sendable {
             contentHash: contentHash,
             content: inventory,
             metadata: metadata,
-            isIncremental: isIncremental,
-            parentBackupID: isIncremental ? previousManifest.map { _ in
-                backupName // previous backup's directory name
-            } : nil
+            isIncremental: createsIncremental,
+            parentBackupID: createsIncremental ? previousBackup?.id : nil
         )
 
         // Apply privacy filter to manifest
@@ -260,7 +368,12 @@ final class BackupManager: @unchecked Sendable {
             .joined(separator: "\n")
         checksumLines += "\n"
         let checksumsURL = backupURL.appendingPathComponent(BackupFileLayout.checksumsFileName)
-        try checksumLines.data(using: .utf8)?.write(to: checksumsURL, options: .atomic)
+        try Data(checksumLines.utf8).write(to: checksumsURL, options: .atomic)
+
+        // Publish the backup directory only after every entry and metadata file
+        // has been written. A failed operation leaves no visible partial backup.
+        try fileManager.moveItem(at: backupURL, to: finalBackupURL)
+        committed = true
 
         progress?(0.95)
 
@@ -277,20 +390,20 @@ final class BackupManager: @unchecked Sendable {
         progress?(1.0)
 
         // Return summary for the new backup
-        return loadSummary(from: backupURL) ?? BackupSummary(
+        return loadSummary(from: finalBackupURL) ?? BackupSummary(
             id: backupName,
             createdAt: now,
             appVersion: appVersion,
             backupVersion: BackupSchema.currentVersion,
-            isIncremental: isIncremental,
-            parentBackupID: nil,
+            isIncremental: createsIncremental,
+            parentBackupID: createsIncremental ? previousBackup?.id : nil,
             entryCount: entries.count,
-            totalSizeBytes: estimateDirectorySize(backupURL),
+            totalSizeBytes: estimateDirectorySize(finalBackupURL),
             contentHash: contentHash,
             integrityVerified: true,
             integrityError: nil,
             isCompatible: true,
-            storedAt: backupURL.path
+            storedAt: finalBackupURL.path
         )
     }
 
@@ -298,9 +411,19 @@ final class BackupManager: @unchecked Sendable {
 
     /// Verify the integrity of a backup.
     func verifyIntegrity(backupID: String, config: BackupIntegrationConfiguration) -> BackupIntegrityResult {
-        let dir = backupDirectoryURL(config: config)
-        let backupURL = dir.appendingPathComponent(backupID)
+        let directory = backupDirectoryURL(config: config)
+        return verifyIntegrity(
+            backupURL: directory.appendingPathComponent(backupID),
+            backupRoot: directory,
+            backupID: backupID
+        )
+    }
 
+    private func verifyIntegrity(
+        backupURL: URL,
+        backupRoot: URL,
+        backupID: String
+    ) -> BackupIntegrityResult {
         guard fileManager.fileExists(atPath: backupURL.path) else {
             return BackupIntegrityResult(
                 backupID: backupID,
@@ -315,9 +438,6 @@ final class BackupManager: @unchecked Sendable {
         }
 
         var errors: [String] = []
-        var warnings: [String] = []
-
-        // 1. Verify manifest exists and is valid JSON
         let manifestURL = backupURL.appendingPathComponent(BackupFileLayout.manifestFileName)
         guard let manifestData = try? Data(contentsOf: manifestURL),
               let manifest = try? JSONDecoder().decode(BackupManifest.self, from: manifestData) else {
@@ -333,74 +453,133 @@ final class BackupManager: @unchecked Sendable {
             )
         }
 
-        let manifestValid = true
-        let entriesDir = backupURL.appendingPathComponent(BackupFileLayout.entriesDirectoryName)
-
-        // 2. Verify checksums file
+        var manifestChecksums: [String: String] = [:]
+        var hasDuplicateStoreEntries = false
+        for entry in manifest.content.entries.values {
+            let fileName = entry.storeType.entryFileName
+            if manifestChecksums.updateValue(entry.dataHash, forKey: fileName) != nil {
+                hasDuplicateStoreEntries = true
+            }
+        }
+        if hasDuplicateStoreEntries {
+            errors.append("备份清单包含重复存储条目")
+        }
+        var fileChecksums: [String: String] = [:]
         let checksumsURL = backupURL.appendingPathComponent(BackupFileLayout.checksumsFileName)
-        var checksumsValid = false
-        var expectedChecksums: [String: String] = [:]
         if let checksumsData = try? Data(contentsOf: checksumsURL),
-           let checksumsStr = String(data: checksumsData, encoding: .utf8) {
-            for line in checksumsStr.split(separator: "\n") {
+           let checksumsString = String(data: checksumsData, encoding: .utf8) {
+            for line in checksumsString.split(separator: "\n") {
                 let parts = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
                 if parts.count == 2 {
-                    expectedChecksums[String(parts[1])] = String(parts[0])
+                    fileChecksums[String(parts[1])] = String(parts[0])
                 }
             }
-            checksumsValid = !expectedChecksums.isEmpty
         } else {
             errors.append("校验和文件缺失或不可读")
         }
+        let checksumsValid = !hasDuplicateStoreEntries
+            && !manifestChecksums.isEmpty
+            && fileChecksums == manifestChecksums
+        if !checksumsValid, !fileChecksums.isEmpty {
+            errors.append("校验和清单与备份清单不一致")
+        }
 
-        // 3. Verify all entries present and checksums match
         var allEntriesPresent = true
         var entryChecksumsMatch = true
-
-        for (entryFileName, expectedHash) in expectedChecksums {
-            let entryURL = entriesDir.appendingPathComponent(entryFileName)
-            guard fileManager.fileExists(atPath: entryURL.path) else {
+        for entry in manifest.content.entries.values {
+            let entryFileName = entry.storeType.entryFileName
+            guard let entryURL = resolveEntryURL(
+                storeType: entry.storeType,
+                backupURL: backupURL,
+                manifest: manifest,
+                backupRoot: backupRoot
+            ) else {
                 allEntriesPresent = false
+                entryChecksumsMatch = false
                 errors.append("缺少条目文件：\(entryFileName)")
                 continue
             }
-
-            // For compressed entries, verify the stored file hash
-            if let entryData = try? Data(contentsOf: entryURL) {
-                let actualHash = SHA256.hash(data: entryData)
-                    .map { String(format: "%02x", $0) }.joined()
-                if actualHash != expectedHash {
-                    entryChecksumsMatch = false
-                    errors.append("条目文件校验和不匹配：\(entryFileName)")
-                }
-            } else {
+            guard let storedData = try? Data(contentsOf: entryURL),
+                  let logicalData = BackupCompression.decompress(
+                    storedData,
+                    expectedSize: entry.uncompressedSizeBytes
+                  ) else {
                 entryChecksumsMatch = false
-                errors.append("无法读取条目文件：\(entryFileName)")
+                errors.append("无法解压条目文件：\(entryFileName)")
+                continue
+            }
+
+            let actualHash = SHA256.hash(data: logicalData)
+                .map { String(format: "%02x", $0) }.joined()
+            if actualHash != entry.dataHash {
+                entryChecksumsMatch = false
+                errors.append("条目数据校验和不匹配：\(entryFileName)")
             }
         }
 
-        // 4. Verify content hash
-        var contentHashValid = true
-        if manifestValid {
-            let computedHash = BackupManifest.computeContentHash(entryHashes: expectedChecksums)
-            if computedHash != manifest.contentHash {
-                contentHashValid = false
-                warnings.append("内容哈希不匹配（可能是隐私过滤导致清单与条目不一致）")
-            }
+        let computedContentHash = BackupManifest.computeContentHash(entryHashes: manifestChecksums)
+        let contentHashValid = computedContentHash == manifest.contentHash
+        if !contentHashValid {
+            errors.append("内容哈希不匹配")
         }
 
-        let overall = manifestValid && checksumsValid && allEntriesPresent && entryChecksumsMatch
-
+        let overall = checksumsValid
+            && allEntriesPresent
+            && entryChecksumsMatch
+            && contentHashValid
         return BackupIntegrityResult(
             backupID: backupID,
-            manifestValid: manifestValid,
+            manifestValid: true,
             checksumsValid: checksumsValid,
             allEntriesPresent: allEntriesPresent,
             entryChecksumsMatch: entryChecksumsMatch && contentHashValid,
             overallIntegrity: overall,
             errors: errors,
-            warnings: warnings
+            warnings: []
         )
+    }
+
+    /// Load and verify one logical entry, following an older incremental
+    /// parent chain when necessary.
+    func loadEntryData(
+        backupID: String,
+        entry: BackupEntryInfo,
+        config: BackupIntegrationConfiguration
+    ) throws -> Data {
+        let backupRoot = backupDirectoryURL(config: config)
+        let backupURL = backupRoot.appendingPathComponent(backupID, isDirectory: true)
+        let manifestURL = backupURL.appendingPathComponent(BackupFileLayout.manifestFileName)
+        guard let manifestData = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(BackupManifest.self, from: manifestData),
+              manifest.content.entries[entry.id] == entry else {
+            throw BackupManagerError.manifestMissing(backupID)
+        }
+        guard let entryURL = resolveEntryURL(
+            storeType: entry.storeType,
+            backupURL: backupURL,
+            manifest: manifest,
+            backupRoot: backupRoot
+        ) else {
+            throw BackupManagerError.entryMissing(entry.storeType.entryFileName)
+        }
+        let storedData = try Data(contentsOf: entryURL)
+        guard let logicalData = BackupCompression.decompress(
+            storedData,
+            expectedSize: entry.uncompressedSizeBytes
+        ) else {
+            throw BackupManagerError.deserializationFailed(
+                "无法解压：\(entry.storeType.entryFileName)"
+            )
+        }
+        let actualHash = SHA256.hash(data: logicalData)
+            .map { String(format: "%02x", $0) }.joined()
+        guard actualHash == entry.dataHash else {
+            throw BackupManagerError.checksumMismatch(
+                expected: entry.dataHash,
+                actual: actualHash
+            )
+        }
+        return logicalData
     }
 
     // MARK: - Export
@@ -434,35 +613,59 @@ final class BackupManager: @unchecked Sendable {
         from archiveURL: URL,
         config: BackupIntegrationConfiguration
     ) throws -> BackupSummary {
-        let dir = backupDirectoryURL(config: config)
+        let directory = backupDirectoryURL(config: config)
+        let stagingDirectory = directory.appendingPathComponent(
+            ".import-staging-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: stagingDirectory) }
 
-        // Extract archive
+        // Extract away from live backups. The previous implementation unpacked
+        // directly into the live directory and could return an unrelated old
+        // backup while leaving a corrupt import behind.
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-        process.arguments = ["-x", "-k", archiveURL.path, dir.path]
+        process.arguments = ["-x", "-k", archiveURL.path, stagingDirectory.path]
         try process.run()
         process.waitUntilExit()
-
         guard process.terminationStatus == 0 else {
             throw BackupManagerError.ioError("导入失败，ditto 退出码：\(process.terminationStatus)")
         }
 
-        // Find the imported backup directory
-        let contents = try fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey],
-                                                           options: [.skipsHiddenFiles])
-        guard let imported = contents.first(where: {
+        let contents = try fileManager.contentsOfDirectory(
+            at: stagingDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        let candidates = contents.filter {
             $0.hasDirectoryPath && $0.lastPathComponent.hasPrefix(BackupFileLayout.backupPrefix)
-        }) else {
-            throw BackupManagerError.backupNotFound("未找到导入的备份")
+        }
+        guard candidates.count == 1, let imported = candidates.first else {
+            throw BackupManagerError.backupCorrupted("归档必须且只能包含一个 DevPulse 备份目录")
         }
 
-        // Verify integrity
-        let result = verifyIntegrity(backupID: imported.lastPathComponent, config: config)
-        guard result.overallIntegrity else {
-            throw BackupManagerError.backupCorrupted(result.errors.joined(separator: "; "))
+        let integrity = verifyIntegrity(
+            backupURL: imported,
+            backupRoot: stagingDirectory,
+            backupID: imported.lastPathComponent
+        )
+        guard integrity.overallIntegrity else {
+            throw BackupManagerError.backupCorrupted(integrity.errors.joined(separator: "; "))
         }
 
-        return loadSummary(from: imported)!
+        var destinationName = imported.lastPathComponent
+        var destination = directory.appendingPathComponent(destinationName)
+        if fileManager.fileExists(atPath: destination.path) {
+            destinationName += "-\(UUID().uuidString.prefix(8))"
+            destination = directory.appendingPathComponent(destinationName)
+        }
+        try fileManager.moveItem(at: imported, to: destination)
+        guard let summary = loadSummary(from: destination) else {
+            try? fileManager.removeItem(at: destination)
+            throw BackupManagerError.manifestMissing(destinationName)
+        }
+        return summary
     }
 
     /// Delete a backup.
@@ -510,7 +713,7 @@ final class BackupManager: @unchecked Sendable {
         guard let enumerator = fileManager.enumerator(
             at: url,
             includingPropertiesForKeys: [.fileSizeKey],
-            options: [.skipsSubdirectoryDescendants, .skipsHiddenFiles]
+            options: [.skipsHiddenFiles]
         ) else {
             logger.warning("Failed to enumerate backup directory for size estimate at \(url.path)")
             return 0
@@ -530,7 +733,9 @@ final class BackupManager: @unchecked Sendable {
         return Int64(Double(totalUncompressed) * 0.3) + 4096 // overhead
     }
 
-    private func findLatestBackupManifest(at directory: URL) -> BackupManifest? {
+    private func findLatestBackup(
+        at directory: URL
+    ) -> (id: String, url: URL, manifest: BackupManifest)? {
         var contents: [URL]
         do {
             contents = try fileManager.contentsOfDirectory(
@@ -555,56 +760,50 @@ final class BackupManager: @unchecked Sendable {
             let manifestURL = backupURL.appendingPathComponent(BackupFileLayout.manifestFileName)
             if let data = try? Data(contentsOf: manifestURL),
                let manifest = try? JSONDecoder().decode(BackupManifest.self, from: data) {
-                return manifest
+                return (backupURL.lastPathComponent, backupURL, manifest)
             }
         }
         return nil
     }
 
-    // MARK: - Compression
+    /// Resolve an entry from this backup or its incremental parent chain.
+    /// New backups are self-contained, while this keeps older valid chains
+    /// readable and rejects missing/cyclic references.
+    private func resolveEntryURL(
+        storeType: BackupStoreType,
+        backupURL: URL,
+        manifest: BackupManifest,
+        backupRoot: URL,
+        visited: Set<String> = []
+    ) -> URL? {
+        let identity = backupURL.standardizedFileURL.path
+        guard !visited.contains(identity) else { return nil }
+        var nextVisited = visited
+        nextVisited.insert(identity)
 
-    private func compress(data: Data) -> Data {
-        guard !data.isEmpty else { return data }
-        let sourceSize = data.count
-
-        let destinationBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: sourceSize)
-        defer { destinationBuffer.deallocate() }
-
-        let compressedSize = data.withUnsafeBytes { sourcePtr in
-            guard let baseAddress = sourcePtr.baseAddress else { return 0 }
-            return compression_encode_buffer(
-                destinationBuffer, sourceSize,
-                baseAddress.assumingMemoryBound(to: UInt8.self), sourceSize,
-                nil, COMPRESSION_ZLIB
-            )
+        let candidate = backupURL
+            .appendingPathComponent(BackupFileLayout.entriesDirectoryName)
+            .appendingPathComponent(storeType.entryFileName)
+        if fileManager.fileExists(atPath: candidate.path) {
+            return candidate
         }
 
-        if compressedSize > 0 {
-            return Data(bytes: destinationBuffer, count: compressedSize)
+        guard manifest.isIncremental,
+              let parentID = manifest.parentBackupID,
+              parentID == (parentID as NSString).lastPathComponent,
+              parentID.hasPrefix(BackupFileLayout.backupPrefix) else { return nil }
+        let parentURL = backupRoot.appendingPathComponent(parentID, isDirectory: true)
+        let parentManifestURL = parentURL.appendingPathComponent(BackupFileLayout.manifestFileName)
+        guard let data = try? Data(contentsOf: parentManifestURL),
+              let parentManifest = try? JSONDecoder().decode(BackupManifest.self, from: data) else {
+            return nil
         }
-        return data
-    }
-
-    private func decompress(data: Data) -> Data {
-        guard !data.isEmpty else { return data }
-        // Try decompression with a generous buffer
-        let sourceSize = data.count
-        let destSize = sourceSize * 10 // 10x expansion buffer
-        let destinationBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: destSize)
-        defer { destinationBuffer.deallocate() }
-
-        let decodedSize = data.withUnsafeBytes { sourcePtr in
-            guard let baseAddress = sourcePtr.baseAddress else { return 0 }
-            return compression_decode_buffer(
-                destinationBuffer, destSize,
-                baseAddress.assumingMemoryBound(to: UInt8.self), sourceSize,
-                nil, COMPRESSION_ZLIB
-            )
-        }
-
-        if decodedSize > 0 {
-            return Data(bytes: destinationBuffer, count: decodedSize)
-        }
-        return data // Return original if decompression fails (might be uncompressed)
+        return resolveEntryURL(
+            storeType: storeType,
+            backupURL: parentURL,
+            manifest: parentManifest,
+            backupRoot: backupRoot,
+            visited: nextVisited
+        )
     }
 }

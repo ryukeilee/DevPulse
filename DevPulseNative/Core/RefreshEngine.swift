@@ -560,34 +560,11 @@ extension RefreshEngine {
         let concurrency = min(config.maxConcurrentGitOps, paths.count)
         var snapshotsByIndex: [Int: RepositorySnapshot] = [:]
         var counters = (status: 0, timeout: 0, cancelled: 0, failed: 0, peak: 0)
-        var skippedCount = 0
 
-        // Pre-scan: identify repos whose filesystem state hasn't changed.
-        // `entry.path` is already canonical (prioritized or discovery output),
-        // so no re-normalization — and therefore no extra filesystem checks —
-        // is needed here.
-        var skipIndices = Set<Int>()
-        for (idx, entry) in paths.enumerated() {
-            let canonical = entry.path
-            let lastSuccessfulScanAt: String?
-            if let prev = previousByPath[canonical] {
-                lastSuccessfulScanAt = prev.resolvedDataSource == .current
-                    ? prev.lastSuccessfulScanAt
-                    : nil
-            } else {
-                lastSuccessfulScanAt = entry.previousSnapshot?.lastSuccessfulScanAt
-            }
-            if GitRepositoryScanner.repositoryCanSkipGitStatus(
-                at: canonical,
-                lastSuccessfulScanAt: lastSuccessfulScanAt,
-                previousSnapshot: previousByPath[canonical] ?? entry.previousSnapshot
-            ) {
-                skipIndices.insert(idx)
-                skippedCount += 1
-            }
-        }
-
-        // Process in priority order but with bounded concurrency
+        // Process in priority order but with bounded concurrency. Every
+        // readable repository executes `git status`: working-tree edits do not
+        // reliably update `.git/HEAD` or `.git/index`, so timestamp-based
+        // shortcuts can silently reuse stale clean data.
         await withTaskGroup(of: (Int, ProcessReadResult?).self) { group in
             var nextIdx = 0
             var pendingCount = 0
@@ -597,51 +574,6 @@ extension RefreshEngine {
                 let idx = nextIdx
                 let entry = paths[idx]
                 nextIdx += 1
-
-                // Fast skip: reuse previous snapshot without git commands.
-                if skipIndices.contains(idx) {
-                    if let previous = previousByPath[entry.path] {
-                        // Preserve .current dataSource since the repo is genuinely
-                        // unchanged — the fast filesystem check proves it.
-                        let retained = RepositorySnapshot(
-                            id: previous.id, name: previous.name, path: previous.path,
-                            workspaceKind: previous.workspaceKind,
-                            branch: previous.branch, status: previous.status,
-                            modifiedFileCount: previous.modifiedFileCount,
-                            addedFileCount: previous.addedFileCount,
-                            deletedFileCount: previous.deletedFileCount,
-                            untrackedFileCount: previous.untrackedFileCount,
-                            stagedFileCount: previous.stagedFileCount,
-                            unstagedFileCount: previous.unstagedFileCount,
-                            conflictedFileCount: previous.conflictedFileCount,
-                            aheadCount: previous.aheadCount, behindCount: previous.behindCount,
-                            hasUpstream: previous.hasUpstream,
-                            changedFileCount: previous.changedFileCount,
-                            changedFilesPreview: previous.changedFilesPreview,
-                            risk: previous.risk,
-                            lastScannedAt: previous.lastScannedAt,
-                            dataSource: .current,
-                            lastSuccessfulScanAt: previous.lastSuccessfulScanAt,
-                            lastChangedAt: previous.lastChangedAt,
-                            lastCommitID: previous.lastCommitID,
-                            lastCommitSummary: previous.lastCommitSummary,
-                            lastCommitMetadataAvailable: previous.lastCommitMetadataAvailable,
-                            lastActivityAt: previous.lastActivityAt,
-                            errorMessage: nil,
-                            isPinned: previous.isPinned
-                        )
-                        snapshotsByIndex[idx] = retained
-                    }
-                    counters.status += 1
-                    // A skip must not consume a task slot: keep submitting so
-                    // the group always contains real work. Otherwise an
-                    // all-skip first batch — or maxConcurrentGitOps == 1 with
-                    // a skippable first path — leaves the task group empty,
-                    // the result loop never runs, and every remaining path is
-                    // silently dropped from the scan.
-                    submit()
-                    return
-                }
 
                 pendingCount += 1
 
@@ -872,13 +804,18 @@ extension RefreshEngine {
             return ExtendedReadResult(snapshots: [], completed: 0, total: 0, reusedMetadataCount: 0)
         }
 
-        var enriched: [RepositorySnapshot] = []
+        // Keep non-log results keyed by their original core-status index.
+        // A compact array loses alignment whenever an earlier repository needs
+        // `git log`; if that log task is then cancelled or misses its budget,
+        // indexing the compact array duplicates a later repository and drops
+        // the unfinished one from the snapshot.
+        var baselineByIndex: [Int: RepositorySnapshot] = [:]
         var needsLog: [(Int, RepositorySnapshot)] = []
         var reusedCount = 0
 
         for (idx, snapshot) in coreResult.snapshots.enumerated() {
             guard snapshot.resolvedDataSource == .current, snapshot.status != .error else {
-                enriched.append(snapshot)
+                baselineByIndex[idx] = snapshot
                 continue
             }
 
@@ -886,9 +823,8 @@ extension RefreshEngine {
             let headChanged = prev?.lastCommitID != snapshot.lastCommitID
             let canReuse = prev?.lastCommitMetadataAvailable == true && !headChanged
 
-            if canReuse {
-                let reused = snapshot.reusingCommitMetadata(from: prev!)
-                enriched.append(reused)
+            if canReuse, let prev {
+                baselineByIndex[idx] = snapshot.reusingCommitMetadata(from: prev)
                 reusedCount += 1
             } else {
                 needsLog.append((idx, snapshot))
@@ -896,7 +832,8 @@ extension RefreshEngine {
         }
 
         guard !needsLog.isEmpty else {
-            return ExtendedReadResult(snapshots: enriched, completed: enriched.count,
+            let snapshots = coreResult.snapshots.indices.compactMap { baselineByIndex[$0] }
+            return ExtendedReadResult(snapshots: snapshots, completed: snapshots.count,
                                       total: coreResult.snapshots.count, reusedMetadataCount: reusedCount)
         }
 
@@ -990,16 +927,12 @@ extension RefreshEngine {
             }
         }
 
-        // Merge log results back into order
+        // Merge log results back into the original core-status order. A log
+        // task that did not start or finish keeps its own status snapshot;
+        // it must never borrow another repository's baseline entry.
         var finalSnapshots: [RepositorySnapshot] = []
         for (idx, snapshot) in coreResult.snapshots.enumerated() {
-            if let enriched = logResults[idx] {
-                finalSnapshots.append(enriched)
-            } else if idx < enriched.count {
-                finalSnapshots.append(enriched[idx])
-            } else {
-                finalSnapshots.append(snapshot)
-            }
+            finalSnapshots.append(logResults[idx] ?? baselineByIndex[idx] ?? snapshot)
         }
 
         return ExtendedReadResult(
@@ -1041,35 +974,43 @@ extension RefreshEngine {
             previousByPath[RepositoryIdentity.canonicalPath(prev.path)] = RepositoryIdentity.normalize(prev)
         }
 
-        var previousUnavailableSinceByPath = previousSnapshot?.repositoryUnavailableSinceByPath ?? [:]
+        let previousUnavailableSinceByPath = previousSnapshot?.repositoryUnavailableSinceByPath ?? [:]
 
-        // Add unavailable paths as failed
-        for upath in discovery.unavailablePaths {
-            let cpath = RepositoryIdentity.canonicalPath(upath)
+        // Preserve every discovered readable path even when its status task did
+        // not start before the stage budget expired. Known repositories retain
+        // their last successful payload with explicit degraded provenance;
+        // newly discovered ones receive an explainable unknown placeholder.
+        for readablePath in discovery.readablePaths {
+            let cpath = RepositoryIdentity.canonicalPath(readablePath)
             guard byPath[cpath] == nil else { continue }
-            let prev = previousByPath[cpath]
-            byPath[cpath] = RepositorySnapshot(
-                id: RepositoryIdentity.id(for: cpath),
-                name: (cpath as NSString).lastPathComponent, path: cpath,
-                workspaceKind: discovery.workspaceKindsByPath[cpath],
-                branch: "unknown", status: .error,
-                modifiedFileCount: 0, addedFileCount: 0,
-                deletedFileCount: 0, untrackedFileCount: 0,
-                stagedFileCount: nil, unstagedFileCount: nil,
-                conflictedFileCount: nil, aheadCount: nil, behindCount: nil,
-                hasUpstream: nil, changedFileCount: 0,
-                changedFilesPreview: [], risk: .low,
-                lastScannedAt: DateFormatting.nowISO(),
-                dataSource: prev?.resolvedDataSource ?? .unknown,
-                lastSuccessfulScanAt: prev?.resolvedLastSuccessfulScanAt,
-                lastChangedAt: prev?.lastChangedAt,
-                lastCommitID: prev?.lastCommitID,
-                lastCommitSummary: prev?.lastCommitSummary,
-                lastCommitMetadataAvailable: prev?.lastCommitMetadataAvailable ?? false,
-                lastActivityAt: prev?.lastActivityAt,
-                unavailableSince: prev?.unavailableSince ?? DateFormatting.nowISO(),
-                errorMessage: "仓库暂时不可访问",
-                isPinned: prev?.isPinned ?? false
+            let previous = previousByPath[cpath]
+            byPath[cpath] = buildFailedSnapshot(
+                read: ProcessReadResult(
+                    result: .timeout,
+                    path: cpath,
+                    previous: previous,
+                    unavailableSince: previousUnavailableSinceByPath[cpath],
+                    workspaceKind: discovery.workspaceKindsByPath[cpath] ?? previous?.workspaceKind
+                ),
+                error: "本轮未完成扫描"
+            )
+        }
+
+        // Add unavailable paths as failed while retaining the full previous
+        // payload rather than replacing it with zeroed counts.
+        for unavailablePath in discovery.unavailablePaths {
+            let cpath = RepositoryIdentity.canonicalPath(unavailablePath)
+            guard byPath[cpath] == nil else { continue }
+            let previous = previousByPath[cpath]
+            byPath[cpath] = buildFailedSnapshot(
+                read: ProcessReadResult(
+                    result: .unavailable,
+                    path: cpath,
+                    previous: previous,
+                    unavailableSince: previousUnavailableSinceByPath[cpath],
+                    workspaceKind: discovery.workspaceKindsByPath[cpath] ?? previous?.workspaceKind
+                ),
+                error: "仓库暂时不可访问"
             )
         }
 

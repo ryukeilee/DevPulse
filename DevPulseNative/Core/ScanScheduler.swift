@@ -780,6 +780,9 @@ final class ScanScheduler: ObservableObject {
     private var selfCheckTask: Task<ScanSelfCheckReport, Never>?
     private var selfCheckGeneration = 0
     private var refreshDebounceTask: Task<Void, Never>?
+    private var workspaceAggregationGeneration: UInt64 = 0
+    private var pendingItemEvaluationGeneration: UInt64 = 0
+    private var workspaceSuggestionGeneration: UInt64 = 0
     private var deferredScanRefresh: DeferredScanRefresh?
     private var workSuspended = false
     private var sessionInactive = false
@@ -866,7 +869,10 @@ final class ScanScheduler: ObservableObject {
         let repos = lastResult.repositories
         let confirmedWorkspaces = workspaces.filter { $0.autoSuggestConfirmed }
         let unconfirmed = workspaces.filter { !$0.autoSuggestConfirmed }
-        Task.detached(priority: .utility) { @Sendable in
+        workspaceAggregationGeneration &+= 1
+        let generation = workspaceAggregationGeneration
+
+        Task.detached(priority: .utility) { @Sendable [weak self] in
             let aggregations = WorkspaceAggregationEngine.aggregateAll(
                 workspaces: confirmedWorkspaces,
                 allRepositories: repos
@@ -879,8 +885,11 @@ final class ScanScheduler: ObservableObject {
             for (key, value) in unconfirmedAggregations {
                 all[key] = value
             }
-            Task { @MainActor [weak self] in
-                self?.workspaceAggregations = all
+            await MainActor.run { [weak self] in
+                guard let self,
+                      !self.terminating,
+                      self.workspaceAggregationGeneration == generation else { return }
+                self.workspaceAggregations = all
             }
         }
     }
@@ -912,13 +921,13 @@ final class ScanScheduler: ObservableObject {
     /// Refresh pending items after a scan completes, in background.
     func refreshPendingItems(skipHealthAssessments: Bool = false) {
         let repos = lastResult.repositories
-        let confirmWorkspaces = workspaces.filter { $0.autoSuggestConfirmed }
-        let workspaceAggs = workspaceAggregations
+        let confirmedWorkspaces = workspaces.filter { $0.autoSuggestConfirmed }
         let historyStore = self.historyStore
+        let pendingItemStore = self.pendingItemStore
+        pendingItemEvaluationGeneration &+= 1
+        let generation = pendingItemEvaluationGeneration
 
         Task.detached(priority: .utility) { @Sendable [weak self] in
-            guard let self else { return }
-
             // Gather health assessments for all repos.
             // Skip this expensive loading when repo state hasn't changed —
             // time-based rules (escalation, auto-recovery) still work from
@@ -940,15 +949,30 @@ final class ScanScheduler: ObservableObject {
                     }
                 }
             }
+
+            let isCurrent = await MainActor.run { [weak self] in
+                guard let self else { return false }
+                return !self.terminating && self.pendingItemEvaluationGeneration == generation
+            }
+            guard isCurrent else { return }
+
             if !historyLoadErrors.isEmpty {
-                Task { @MainActor [weak self] in
-                    self?.recordEvent(.validationFailed, "历史记录加载失败，影响 \(historyLoadErrors.count) 个仓库的健康评估")
+                await MainActor.run { [weak self] in
+                    guard let self, self.pendingItemEvaluationGeneration == generation else { return }
+                    self.recordEvent(.validationFailed, "历史记录加载失败，影响 \(historyLoadErrors.count) 个仓库的健康评估")
                 }
             }
 
-            // Load previous items from store
+            // Build aggregations from the same repository/workspace snapshot as
+            // this evaluation. Reading the published UI aggregation here could
+            // pair a new scan with an older asynchronous aggregation result.
+            let workspaceAggregations = WorkspaceAggregationEngine.aggregateAll(
+                workspaces: confirmedWorkspaces,
+                allRepositories: repos
+            )
+
             let previousArchive: PendingItemArchive?
-            switch self.pendingItemStore.load() {
+            switch pendingItemStore.load() {
             case .success(let archive):
                 previousArchive = archive
             case .failure:
@@ -957,34 +981,49 @@ final class ScanScheduler: ObservableObject {
 
             let context = PendingItemEvaluationContext(
                 repositories: repos,
-                workspaceAggregations: workspaceAggs,
-                workspaces: confirmWorkspaces,
+                workspaceAggregations: workspaceAggregations,
+                workspaces: confirmedWorkspaces,
                 healthAssessments: healthAssessments,
                 previousItems: previousArchive?.items ?? []
             )
-
             let result = PendingItemEvaluator.evaluate(
                 context: context,
                 previousArchive: previousArchive
             )
 
-            // Save to store
-            _ = self.pendingItemStore.replaceAll(with: result.items)
+            let canCommit = await MainActor.run { [weak self] in
+                guard let self else { return false }
+                return !self.terminating && self.pendingItemEvaluationGeneration == generation
+            }
+            guard canCommit else { return }
 
-            // Compute widget summary
-            let summary = PendingItemWidgetSummary.build(from: result.items)
-            _ = self.pendingItemStore.widgetSummary()
+            // `replaceAll` performs a fresh read/merge/write under one file
+            // lock, preserving any user action that raced this evaluation.
+            guard case .success(let savedArchive) = pendingItemStore.replaceAll(with: result.items) else {
+                return
+            }
+            let summary = PendingItemWidgetSummary.build(from: savedArchive.items)
 
-            Task { @MainActor in
-                self.pendingItems = result.items
+            await MainActor.run { [weak self] in
+                guard let self,
+                      !self.terminating,
+                      self.pendingItemEvaluationGeneration == generation else { return }
+                let summaryChanged = self.pendingItemWidgetSummary != summary
+                self.pendingItems = savedArchive.items
                 self.pendingItemWidgetSummary = summary
                 self.pendingItemEvaluationDurationMs = result.durationMs
+                if summaryChanged {
+                    self.syncSharedSnapshot(from: self.lastResult, reason: "pending-items")
+                }
             }
         }
     }
 
     /// Apply a user action to a pending item.
     func applyUserAction(to itemID: String, action: PendingItemUserAction, snoozeDuration: TimeInterval? = nil) {
+        // Supersede any background evaluation based on the pre-action state.
+        pendingItemEvaluationGeneration &+= 1
+
         // For stale-repository cleanup, look up the repository path and
         // add it to the ignored set before marking the item as resolved.
         if action == .cleanupStaleRepository {
@@ -997,8 +1036,12 @@ final class ScanScheduler: ObservableObject {
 
         switch pendingItemStore.applyUserAction(itemID: itemID, action: action, snoozeDuration: snoozeDuration) {
         case .success(let archive):
+            let previousSummary = pendingItemWidgetSummary
             self.pendingItems = archive.items
             self.pendingItemWidgetSummary = PendingItemWidgetSummary.build(from: archive.items)
+            if previousSummary != pendingItemWidgetSummary {
+                syncSharedSnapshot(from: lastResult, reason: "pending-user-action")
+            }
         case .failure:
             break
         }
@@ -1007,15 +1050,27 @@ final class ScanScheduler: ObservableObject {
     /// Generate auto-suggest candidates for workspace grouping.
     func refreshWorkspaceSuggestions() {
         let repos = lastResult.repositories
+        let dismissedHashes: Set<String>
+        switch workspaceStore.load() {
+        case .success(let archive):
+            dismissedHashes = archive.dismissedSuggestionHashes
+        case .failure:
+            dismissedHashes = []
+        }
         let context = WorkspaceAutoSuggestEngine.SuggestionContext(
             repositories: repos,
             existingWorkspaces: workspaces,
-            dismissedHashes: Set()  // loaded from store on demand
+            dismissedHashes: dismissedHashes
         )
+        workspaceSuggestionGeneration &+= 1
+        let generation = workspaceSuggestionGeneration
+
         Task.detached(priority: .utility) { @Sendable [weak self] in
-            guard let self else { return }
             let candidates = WorkspaceAutoSuggestEngine.generateCandidates(context: context)
-            Task { @MainActor in
+            await MainActor.run { [weak self] in
+                guard let self,
+                      !self.terminating,
+                      self.workspaceSuggestionGeneration == generation else { return }
                 self.workspaceSuggestionCandidates = candidates
             }
         }
@@ -1273,6 +1328,7 @@ final class ScanScheduler: ObservableObject {
     deinit {
         scanTask?.cancel()
         selfCheckTask?.cancel()
+        snapshotSyncTask?.cancel()
         repositoryRetryDrainTask?.cancel()
         repositoryRetryDrainWaiters.forEach { $0.resume() }
         refreshDebounceTask?.cancel()
@@ -1658,6 +1714,9 @@ final class ScanScheduler: ObservableObject {
         diagnostics.snapshotDecodable = false
         lastScanMetrics = nil
 
+        // A full scan supersedes any queued retry/UI snapshot write.
+        invalidatePendingSnapshotSync()
+
         // Write an isRefreshing snapshot so Widget can distinguish a running scan from stale/degraded data.
         let refreshingData = lastResult.withWrittenAt(DateFormatting.nowISO())
         let refreshingSnapshot = AppGroupData(
@@ -1678,7 +1737,10 @@ final class ScanScheduler: ObservableObject {
             appVersion: refreshingData.appVersion,
             storageFormatVersion: refreshingData.storageFormatVersion
         )
-        switch AppGroupStore.write(refreshingSnapshot) {
+        switch AppGroupStore.write(
+            refreshingSnapshot,
+            observedStorageRevision: lastResult.storageRevision
+        ) {
         case .success(let written):
             // Update lastResult's storageRevision to match the on-disk value
             // so subsequent syncSharedSnapshot calls use the correct observed
@@ -1759,8 +1821,13 @@ final class ScanScheduler: ObservableObject {
                     appVersion: safeSnapshot.appVersion,
                     storageFormatVersion: safeSnapshot.storageFormatVersion
                 )
-                switch AppGroupStore.write(safeSnapshot) {
-                case .success:
+                self.invalidatePendingSnapshotSync()
+                switch AppGroupStore.write(
+                    safeSnapshot,
+                    observedStorageRevision: self.lastResult.storageRevision
+                ) {
+                case .success(let written):
+                    self.lastResult = self.applyPins(written)
                     self.diagnostics.lastSnapshotStoreTrigger = "watchdog-timeout"
                     AppGroupStore.reloadWidgets()
                 case .failure(let err):
@@ -2152,15 +2219,10 @@ final class ScanScheduler: ObservableObject {
                     }
                 }
 
-                // Capture the current syncTaskGeneration so the retry's async
-                // write can verify it hasn't been superseded by a full scan's
-                // sync before committing to disk.
-                let retrySyncGuard = self.syncTaskGeneration &+ 1
                 self.syncSharedSnapshot(
                     from: finalSnapshot,
                     previousSnapshot: previousSnapshot,
-                    reason: "repository-retry",
-                    generationGuard: retrySyncGuard
+                    reason: "repository-retry"
                 )
             }
         }
@@ -3077,22 +3139,20 @@ final class ScanScheduler: ObservableObject {
         }
     }
 
-    /// Serializes concurrent syncSharedSnapshot calls: a Task.detached write
-    /// checks this generation at start and skips itself if a newer generation
-    /// has already begun, preventing stale cross-process write failures.
-    ///
-    /// An optional `generationGuard` parameter allows callers (such as
-    /// `retryRepository`) to provide an external generation counter: if the
-    /// guard advanced between the sync being scheduled and the detached write
-    /// starting, the write is skipped. This prevents a stale retry result from
-    /// overwriting data produced by a newer full scan.
+    /// Monotonic token for shared-snapshot writes. Writes are also chained by
+    /// `snapshotSyncTask`, so a newer snapshot always observes completion of
+    /// any older write before reading the current storage revision.
     private var syncTaskGeneration: UInt64 = 0
+    private var snapshotSyncTask: Task<Void, Never>?
+
+    private func invalidatePendingSnapshotSync() {
+        syncTaskGeneration &+= 1
+    }
 
     private func syncSharedSnapshot(
         from snapshot: AppGroupData,
         previousSnapshot: AppGroupData? = nil,
-        reason: String,
-        generationGuard: UInt64? = nil
+        reason: String
     ) {
         let writtenAt = DateFormatting.nowISO()
         // Always clear isRefreshing before writing so the Widget never
@@ -3104,51 +3164,57 @@ final class ScanScheduler: ObservableObject {
             )
             .withIsRefreshing(false)
         let prevSnapshot = previousSnapshot ?? lastResult
-
-        // Capture the storage revision observed before the async write
-        // so the commit can reject a cross-process or inter-scan race
-        // where another writer advanced the on-disk revision past what
-        // we saw when this sync was initiated.
-        let observedStorageRevision = (previousSnapshot ?? lastResult).storageRevision
+        let fallbackObservedRevision = prevSnapshot.storageRevision
 
         syncTaskGeneration &+= 1
-        let currentGen = syncTaskGeneration
-        let capturedGuard = generationGuard
+        let currentGeneration = syncTaskGeneration
+        let previousWrite = snapshotSyncTask
 
         diagnostics.lastSnapshotStoreTrigger = reason
         diagnostics.lastSnapshotStoreState = .idle
         diagnostics.lastSnapshotStoreDetail = "正在把 \(snapshotToWrite.repositories.count) 个仓库写入共享快照…"
 
-        Task.detached(priority: .utility) { @Sendable [weak self] in
-            // Bail if a newer generation has already started
+        let task = Task.detached(priority: .utility) { @Sendable [weak self] in
+            // Serialize all scheduler writes. A generation-only check allowed
+            // an already-started older write to finish after a newer write.
+            if let previousWrite {
+                await previousWrite.value
+            }
+            guard !Task.isCancelled else { return }
+
             let shouldProceed = await MainActor.run { [weak self] in
-                guard let self, self.syncTaskGeneration == currentGen else { return false }
-                return true
+                guard let self else { return false }
+                return !self.terminating && self.syncTaskGeneration == currentGeneration
             }
             guard shouldProceed else { return }
 
-            // If a caller-specified generation guard advanced since this sync
-            // was scheduled, the result it carries is stale (e.g. a retry
-            // result that was superseded by a full scan). Skip the write to
-            // prevent overwriting newer data with outdated information.
-            if let capturedGuard {
-                let guardStillValid = await MainActor.run { [weak self] in
-                    guard let self else { return false }
-                    // Use a lightweight guard check: repositoryRetryGeneration
-                    // is incremented when retries are cancelled (which happens
-                    // before a new scan). If it advanced, the data is stale.
-                    return capturedGuard == self.syncTaskGeneration - 1
-                        || capturedGuard == self.syncTaskGeneration
-                }
-                guard guardStillValid else {
-                    // logger.debug("syncSharedSnapshot skipped: generation guard advanced (stale retry)") -- ScanScheduler has no logger
-                    return
-                }
+            // Read the revision after the previous scheduler write completes.
+            // This keeps the cross-process compare-and-swap guard meaningful
+            // without making a newer chained write fail on our own revision.
+            let observedStorageRevision: UInt64
+            switch AppGroupStore.read() {
+            case .success(let current):
+                observedStorageRevision = current.storageRevision
+            case .failure(.snapshotMissing):
+                observedStorageRevision = 0
+            case .failure:
+                observedStorageRevision = fallbackObservedRevision
             }
 
-            let writeResult = AppGroupStore.write(snapshotToWrite, observedStorageRevision: observedStorageRevision)
+            let stillCurrent = await MainActor.run { [weak self] in
+                guard let self else { return false }
+                return !self.terminating && self.syncTaskGeneration == currentGeneration
+            }
+            guard stillCurrent else { return }
+
+            let writeResult = AppGroupStore.write(
+                snapshotToWrite,
+                observedStorageRevision: observedStorageRevision
+            )
             await MainActor.run { [weak self] in
-                guard let self else { return }
+                guard let self,
+                      !self.terminating,
+                      self.syncTaskGeneration == currentGeneration else { return }
                 switch writeResult {
                 case .success(let readBack):
                     self.handleSyncSnapshotSuccess(
@@ -3164,6 +3230,7 @@ final class ScanScheduler: ObservableObject {
                 }
             }
         }
+        snapshotSyncTask = task
     }
 
     private func handleSyncSnapshotSuccess(
@@ -3748,6 +3815,12 @@ final class ScanScheduler: ObservableObject {
         selfCheckGeneration &+= 1
         selfCheckTask?.cancel()
         selfCheckTask = nil
+        workspaceAggregationGeneration &+= 1
+        pendingItemEvaluationGeneration &+= 1
+        workspaceSuggestionGeneration &+= 1
+        invalidatePendingSnapshotSync()
+        snapshotSyncTask?.cancel()
+        snapshotSyncTask = nil
         repositoryRetryDrainGeneration &+= 1
         repositoryRetryDrainTask?.cancel()
         repositoryRetryDrainTask = nil

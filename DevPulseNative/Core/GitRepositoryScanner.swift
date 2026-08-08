@@ -1359,80 +1359,6 @@ enum GitRepositoryScanner {
         }
     }
 
-    /// Fast filesystem-level check to determine whether a git repository's
-    /// state has likely changed since the last scan.
-    ///
-    /// Checks the modification timestamps of `.git/HEAD` and `.git/index`.
-    /// If both are older than `lastSuccessfulScanAt`, the repo is treated as
-    /// unchanged and the `previousSnapshot` can be reused directly, avoiding
-    /// an expensive `git status` call.
-    ///
-    /// Returns `true` when the repo can be skipped (no git commands needed).
-    /// Returns `false` when changes are detected OR when the fast check
-    /// cannot be performed (missing timestamps, unparseable dates, etc.)
-    /// — in that case the caller should fall through to `git status`.
-    static func repositoryCanSkipGitStatus(
-        at repoPath: String,
-        lastSuccessfulScanAt lastScanAt: String?,
-        previousSnapshot: RepositorySnapshot?
-    ) -> Bool {
-        // Without a previous successful scan we must re-read.
-        // Only skip repos that were previously .clean — repos with .changed status
-        // might have had their working tree resolved without touching HEAD/index.
-        guard let lastScanAt,
-              let lastScanDate = DateFormatting.date(from: lastScanAt),
-              let previousSnapshot,
-              previousSnapshot.lastSuccessfulScanAt != nil,
-              previousSnapshot.resolvedDataSource == .current,
-              previousSnapshot.status == .clean else {
-            return false
-        }
-
-        let repoURL = URL(fileURLWithPath: repoPath)
-        let gitDirURL: URL
-
-        // Determine the actual .git location (plain dir or worktree gitfile).
-        let dotGitURL = repoURL.appendingPathComponent(".git")
-        if FileManager.default.fileExists(atPath: dotGitURL.path) {
-            gitDirURL = dotGitURL
-        } else {
-            // Could be a worktree with a .git file; fall through to git status.
-            return false
-        }
-
-        do {
-            // Check HEAD modification time.
-            let headURL = gitDirURL.appendingPathComponent("HEAD")
-            guard let headAttrs = try? FileManager.default.attributesOfItem(atPath: headURL.path),
-                  let headModDate = headAttrs[.modificationDate] as? Date else {
-                return false
-            }
-
-            // If HEAD changed at or after the last scan, we must re-read.
-            // Strict '<' ensures same-instant HEAD updates are not skipped.
-            guard headModDate < lastScanDate else {
-                return false
-            }
-
-            // Check index modification time (tracks working tree changes).
-            let indexURL = gitDirURL.appendingPathComponent("index")
-            if FileManager.default.fileExists(atPath: indexURL.path) {
-                guard let indexAttrs = try? FileManager.default.attributesOfItem(atPath: indexURL.path),
-                      let indexModDate = indexAttrs[.modificationDate] as? Date else {
-                    return false
-                }
-                guard indexModDate < lastScanDate else {
-                    return false
-                }
-            }
-
-            // HEAD and index both unchanged since last successful scan — safe to skip.
-            return true
-        } catch {
-            return false
-        }
-    }
-
     private static func isMissingFileError(_ error: Error) -> Bool {
         let nsError = error as NSError
         return nsError.domain == NSCocoaErrorDomain
@@ -1549,22 +1475,10 @@ enum GitRepositoryScanner {
         var timedOut = false
         var cancelled = false
 
-        // Pre-scan: identify repos where filesystem state is clearly unchanged
-        // so we can skip git commands entirely.
-        var skipIndexes = Set<Int>()
-        for (index, path) in indexedPaths {
-            let canonicalPath = RepositoryIdentity.canonicalPath(path)
-            if let previousSnapshot = previousByPath[canonicalPath],
-               repositoryCanSkipGitStatus(
-                   at: canonicalPath,
-                   lastSuccessfulScanAt: previousSnapshot.lastSuccessfulScanAt,
-                   previousSnapshot: previousSnapshot
-               ) {
-                skipIndexes.insert(index)
-                metrics.recordRepositorySkipped()
-            }
-        }
-
+        // A working-tree edit does not reliably change `.git/HEAD` or
+        // `.git/index`. Every readable repository must therefore execute
+        // `git status`; metadata-only timestamp shortcuts can silently keep a
+        // previously-clean snapshot after tracked or untracked files change.
         await withTaskGroup(of: SnapshotReadResult?.self) { group in
             if Task.isCancelled {
                 cancelled = true
@@ -1581,44 +1495,6 @@ enum GitRepositoryScanner {
                 let workspaceKind = workspaceKindsByPath[canonicalPath]
                     ?? previousSnapshot?.workspaceKind
                 nextIndex += 1
-
-                // Fast skip: if filesystem indicates no change, reuse previous snapshot.
-                if skipIndexes.contains(originalIndex),
-                   let previous = previousSnapshot {
-                    // Preserve .current dataSource since the repo is genuinely
-                    // unchanged — the fast filesystem check proves it.
-                    let retained = RepositorySnapshot(
-                        id: previous.id, name: previous.name, path: canonicalPath,
-                        workspaceKind: workspaceKind ?? previous.workspaceKind,
-                        branch: previous.branch, status: previous.status,
-                        modifiedFileCount: previous.modifiedFileCount,
-                        addedFileCount: previous.addedFileCount,
-                        deletedFileCount: previous.deletedFileCount,
-                        untrackedFileCount: previous.untrackedFileCount,
-                        stagedFileCount: previous.stagedFileCount,
-                        unstagedFileCount: previous.unstagedFileCount,
-                        conflictedFileCount: previous.conflictedFileCount,
-                        aheadCount: previous.aheadCount, behindCount: previous.behindCount,
-                        hasUpstream: previous.hasUpstream,
-                        changedFileCount: previous.changedFileCount,
-                        changedFilesPreview: previous.changedFilesPreview,
-                        risk: previous.risk,
-                        lastScannedAt: previous.lastScannedAt,
-                        dataSource: .current,
-                        lastSuccessfulScanAt: previous.lastSuccessfulScanAt,
-                        lastChangedAt: previous.lastChangedAt,
-                        lastCommitID: previous.lastCommitID,
-                        lastCommitSummary: previous.lastCommitSummary,
-                        lastCommitMetadataAvailable: previous.lastCommitMetadataAvailable,
-                        lastActivityAt: previous.lastActivityAt,
-                        errorMessage: nil,
-                        isPinned: previous.isPinned
-                    )
-                    resultsByIndex[originalIndex] = SnapshotReadResult(
-                        index: originalIndex, snapshot: retained, elapsed: 0
-                    )
-                    return
-                }
 
                 group.addTask {
                     guard !Task.isCancelled else { return nil }

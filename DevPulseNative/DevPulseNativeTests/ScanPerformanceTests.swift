@@ -1444,10 +1444,10 @@ private actor NonCooperativeRetryProbe {
 // MARK: - Incremental scan tests
 
 extension ScanPerformanceTests {
-    /// Verify that unchanged repos are skipped via fast filesystem check.
-    /// All repos have HEAD and index timestamps older than last scan → no git status commands.
-    @Test func incrementalFastCheckSkipsUnchangedRepos() async throws {
-        let root = try temporaryDirectory(named: "incremental-skip")
+    /// Every readable repository must run `git status`, even when its Git
+    /// metadata timestamps have not changed since the previous scan.
+    @Test func fullScanReadsEveryUnchangedRepository() async throws {
+        let root = try temporaryDirectory(named: "full-scan-unchanged")
         defer { try? FileManager.default.removeItem(at: root) }
 
         let repoURLs = try (0..<3).map { index -> URL in
@@ -1457,7 +1457,6 @@ extension ScanPerformanceTests {
         }
         let repoPaths = repoURLs.map(\.path)
 
-        // First full scan establishes baselines.
         let firstMetrics = ScanMetricsCollector()
         let first = await GitRepositoryScanner.scan(
             config: scanConfig(maxConcurrentGitOps: 3),
@@ -1470,26 +1469,6 @@ extension ScanPerformanceTests {
         #expect(first.data.repositories.count == repoPaths.count)
         #expect(first.data.repositories.allSatisfy { $0.resolvedDataSource == .current })
 
-        // Set HEAD and index mtimes to the past so the fast check sees them as unchanged.
-        // Wait briefly to ensure timestamps are distinguishable.
-        try await Task.sleep(for: .milliseconds(50))
-        let pastDate = Date().addingTimeInterval(-3600)  // 1 hour ago
-        for repoURL in repoURLs {
-            let headURL = repoURL.appendingPathComponent(".git/HEAD")
-            let indexURL = repoURL.appendingPathComponent(".git/index")
-            try FileManager.default.setAttributes(
-                [.modificationDate: pastDate],
-                ofItemAtPath: headURL.path
-            )
-            if FileManager.default.fileExists(atPath: indexURL.path) {
-                try FileManager.default.setAttributes(
-                    [.modificationDate: pastDate],
-                    ofItemAtPath: indexURL.path
-                )
-            }
-        }
-
-        // Second scan: fast check should skip all repos.
         let secondMetrics = ScanMetricsCollector()
         let second = await GitRepositoryScanner.scan(
             config: scanConfig(maxConcurrentGitOps: 3),
@@ -1500,34 +1479,26 @@ extension ScanPerformanceTests {
         )
         let secondSnapshot = secondMetrics.snapshot()
 
-        // All repos were skipped — zero git status commands.
-        #expect(secondSnapshot.repositorySkippedCount == repoPaths.count)
-        #expect(secondSnapshot.gitStatusCommandCount == 0)
-        #expect(secondSnapshot.gitCommandCount == 0)
+        #expect(secondSnapshot.repositorySkippedCount == 0)
+        #expect(secondSnapshot.repositoryReadCount == repoPaths.count)
+        #expect(secondSnapshot.gitStatusCommandCount == repoPaths.count)
+        #expect(secondSnapshot.gitCommandCount == repoPaths.count)
         #expect(second.data.repositories.count == repoPaths.count)
-        // Skipped repos retain .current dataSource since state is genuinely unchanged.
         #expect(second.data.repositories.allSatisfy { $0.resolvedDataSource == .current })
-        // Fields preserved from previous scan.
+
         let firstByPath = Dictionary(uniqueKeysWithValues: first.data.repositories.map { ($0.path, $0) })
         for repo in second.data.repositories {
-            let prev = firstByPath[repo.path]
-            #expect(repo.lastCommitID == prev?.lastCommitID)
-            #expect(repo.branch == prev?.branch)
-            #expect(repo.changedFileCount == prev?.changedFileCount)
+            let previous = firstByPath[repo.path]
+            #expect(repo.lastCommitID == previous?.lastCommitID)
+            #expect(repo.branch == previous?.branch)
+            #expect(repo.changedFileCount == previous?.changedFileCount)
         }
-
-        print(String(
-            format: "incremental_skip.repos=%d skipped=%d git_calls=%d",
-            repoPaths.count,
-            secondSnapshot.repositorySkippedCount,
-            secondSnapshot.gitCommandCount
-        ))
     }
 
-    /// Verify that when HEAD changes on a repo, only that repo gets git status.
-    /// Other repos remain skipped via fast check.
-    @Test func incrementalFastCheckRunsGitOnlyOnChangedRepo() async throws {
-        let root = try temporaryDirectory(named: "incremental-changed")
+    /// Regression: an unstaged tracked-file write changes neither `.git/HEAD`
+    /// nor `.git/index`, but a refresh must still discover it.
+    @Test func fullScanDetectsUnstagedWorkingTreeChange() async throws {
+        let root = try temporaryDirectory(named: "full-scan-unstaged")
         defer { try? FileManager.default.removeItem(at: root) }
 
         let repoURLs = try (0..<3).map { index -> URL in
@@ -1537,7 +1508,6 @@ extension ScanPerformanceTests {
         }
         let repoPaths = repoURLs.map(\.path)
 
-        // First full scan.
         let firstMetrics = ScanMetricsCollector()
         let first = await GitRepositoryScanner.scan(
             config: scanConfig(maxConcurrentGitOps: 3),
@@ -1548,33 +1518,12 @@ extension ScanPerformanceTests {
             metrics: firstMetrics
         )
 
-        // Make a new commit in repo-0 only.
-        try "changed\n".write(
+        try "changed but not staged\n".write(
             to: repoURLs[0].appendingPathComponent("README.md"),
             atomically: true,
             encoding: .utf8
         )
-        try runGit(["add", "README.md"], in: repoURLs[0])
-        try runGit(["commit", "-q", "-m", "Second commit"], in: repoURLs[0])
 
-        // Set the unchanged repos' HEAD/index to the past so fast check skips them.
-        let pastDate = Date().addingTimeInterval(-3600)
-        for i in 1..<repoURLs.count {
-            let headURL = repoURLs[i].appendingPathComponent(".git/HEAD")
-            let indexURL = repoURLs[i].appendingPathComponent(".git/index")
-            try FileManager.default.setAttributes(
-                [.modificationDate: pastDate],
-                ofItemAtPath: headURL.path
-            )
-            if FileManager.default.fileExists(atPath: indexURL.path) {
-                try FileManager.default.setAttributes(
-                    [.modificationDate: pastDate],
-                    ofItemAtPath: indexURL.path
-                )
-            }
-        }
-
-        // Second scan: only repo-0 should run git status.
         let secondMetrics = ScanMetricsCollector()
         let second = await GitRepositoryScanner.scan(
             config: scanConfig(maxConcurrentGitOps: 3),
@@ -1585,26 +1534,17 @@ extension ScanPerformanceTests {
         )
         let secondSnapshot = secondMetrics.snapshot()
 
-        // Two repos skipped, one repo had changes → 1 status + 1 log command.
-        #expect(secondSnapshot.repositorySkippedCount == repoPaths.count - 1)
-        #expect(secondSnapshot.gitStatusCommandCount == 1)
-        #expect(secondSnapshot.gitLogCommandCount == 1)
+        #expect(secondSnapshot.repositorySkippedCount == 0)
+        #expect(secondSnapshot.repositoryReadCount == repoPaths.count)
+        #expect(secondSnapshot.gitStatusCommandCount == repoPaths.count)
+        #expect(secondSnapshot.gitLogCommandCount == 0)
         #expect(second.data.repositories.count == repoPaths.count)
 
-        // All repos have .current dataSource — fast-skipped repos preserve their
-        // previous state as current since the filesystem proves nothing changed.
-        let repo0 = try #require(second.data.repositories.first { $0.name == "repo-0" })
-        #expect(repo0.resolvedDataSource == .current)
-        let repo1 = try #require(second.data.repositories.first { $0.name == "repo-1" })
-        #expect(repo1.resolvedDataSource == .current)
-
-        print(String(
-            format: "incremental_changed.repos=%d skipped=%d git_status=%d git_log=%d",
-            repoPaths.count,
-            secondSnapshot.repositorySkippedCount,
-            secondSnapshot.gitStatusCommandCount,
-            secondSnapshot.gitLogCommandCount
-        ))
+        let changed = try #require(second.data.repositories.first { $0.name == "repo-0" })
+        #expect(changed.status == .changed)
+        #expect(changed.modifiedFileCount >= 1)
+        #expect(changed.unstagedFileCount == 1)
+        #expect(second.data.repositories.filter { $0.name != "repo-0" }.allSatisfy { $0.status == .clean })
     }
 
     /// Verify that cancelling a scan preserves partial results from completed repos.
@@ -1745,11 +1685,9 @@ extension ScanPerformanceTests {
     /// Verify that deleting and recreating a repo is properly handled.
     // MARK: - Full fallback and exception recovery
 
-    /// Verify that repos with .lastSuccessful dataSource are NOT fast-skipped.
-    /// The fast check only applies to repos with .current dataSource and a valid
-    /// lastSuccessfulScanAt — the guard in repositoryCanSkipGitStatus explicitly
-    /// rejects anything else.
-    @Test func fastCheckSkipsOnlyWhenSafe() async throws {
+    /// A repository retained from the last successful scan must be retried on
+    /// the next refresh so it can recover to current data.
+    @Test func lastSuccessfulRepositoryIsRetried() async throws {
         let root = try temporaryDirectory(named: "safe-skip")
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -1788,23 +1726,7 @@ extension ScanPerformanceTests {
         #expect(second.data.repositories.first?.status == .error)
         #expect(second.data.repositories.first?.resolvedDataSource == .lastSuccessful)
 
-        // Set HEAD/index timestamps to past so fast check would try to skip
-        let pastDate = Date().addingTimeInterval(-3600)
-        let headURL = repoURL.appendingPathComponent(".git/HEAD")
-        let indexURL = repoURL.appendingPathComponent(".git/index")
-        try FileManager.default.setAttributes(
-            [.modificationDate: pastDate],
-            ofItemAtPath: headURL.path
-        )
-        if FileManager.default.fileExists(atPath: indexURL.path) {
-            try FileManager.default.setAttributes(
-                [.modificationDate: pastDate],
-                ofItemAtPath: indexURL.path
-            )
-        }
-
-        // Third scan: even with old timestamps, repo is NOT skipped
-        // because its resolvedDataSource is .lastSuccessful
+        // Third scan retries the repository and restores current data.
         let thirdMetrics = ScanMetricsCollector()
         let third = await GitRepositoryScanner.scan(
             config: scanConfig(maxConcurrentGitOps: 1),
@@ -2055,19 +1977,7 @@ extension ScanPerformanceTests {
         #expect(first.data.repositories.first?.status == .clean)
         #expect(first.data.repositories.first?.resolvedDataSource == .current)
 
-        // Make a change so the second scan cannot fast-skip via HEAD timestamps.
-        // Without this, the fast filesystem check would skip the repo entirely
-        // and our custom gitCommandRunner (which simulates the error) would
-        // never be called.
-        try "change-for-error\n".write(
-            to: repoURL.appendingPathComponent("README.md"),
-            atomically: true, encoding: .utf8
-        )
-        try runGit(["add", "README.md"], in: repoURL)
-        try runGit(["commit", "-q", "-m", "Prep error simulation"], in: repoURL)
-
-        // Simulate failure via timeout. Because HEAD changed, the fast check
-        // falls through and our custom runner is called for git status.
+        // Simulate a status timeout on the next normal full scan.
         let secondMetrics = ScanMetricsCollector()
         let second = await GitRepositoryScanner.scan(
             config: config, scanRoots: [root.path],
@@ -2106,9 +2016,9 @@ extension ScanPerformanceTests {
         ))
     }
 
-    /// Verify that the metrics totals are consistent: skipped count + read
-    /// count should equal the repo count for a stable scan (no cancellation).
-    @Test func incrementalSkipMetricConsistency() async throws {
+    /// Verify that a stable full scan reads every repository and reports
+    /// internally consistent command metrics.
+    @Test func fullScanMetricConsistency() async throws {
         let root = try temporaryDirectory(named: "metric-consist")
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -2142,27 +2052,8 @@ extension ScanPerformanceTests {
         try runGit(["add", "README.md"], in: repoURLs[0])
         try runGit(["commit", "-q", "-m", "Metric test"], in: repoURLs[0])
 
-        // Set repo-1 and repo-2 HEAD AND INDEX to past so fast check skips them.
-        // Setting only HEAD is insufficient — Git may have refreshed the index
-        // during the first scan's git status command, making the index mod date
-        // newer than lastSuccessfulScanAt.
-        let pastDate = Date().addingTimeInterval(-3600)
-        for i in 1..<repoURLs.count {
-            let headURL = repoURLs[i].appendingPathComponent(".git/HEAD")
-            try FileManager.default.setAttributes(
-                [.modificationDate: pastDate],
-                ofItemAtPath: headURL.path
-            )
-            let indexURL = repoURLs[i].appendingPathComponent(".git/index")
-            if FileManager.default.fileExists(atPath: indexURL.path) {
-                try FileManager.default.setAttributes(
-                    [.modificationDate: pastDate],
-                    ofItemAtPath: indexURL.path
-                )
-            }
-        }
-
-        // Second scan: repo-1 and repo-2 fast-skipped, repo-0 runs git status + log
+        // Second scan reads all repositories; only the changed commit needs a
+        // fresh log command because unchanged commit metadata can be reused.
         let secondMetrics = ScanMetricsCollector()
         let second = await GitRepositoryScanner.scan(
             config: config, scanRoots: [root.path],
@@ -2174,10 +2065,9 @@ extension ScanPerformanceTests {
 
         #expect(second.data.repositories.count == repoURLs.count)
         #expect(second.data.repositories.allSatisfy { $0.resolvedDataSource == .current })
-        // Metrics: 2 skipped, 1 read = 3 total
-        #expect(secondSnapshot.repositorySkippedCount == repoURLs.count - 1)
-        #expect(secondSnapshot.repositoryReadCount == 1)
-        #expect(secondSnapshot.gitStatusCommandCount == 1)
+        #expect(secondSnapshot.repositorySkippedCount == 0)
+        #expect(secondSnapshot.repositoryReadCount == repoURLs.count)
+        #expect(secondSnapshot.gitStatusCommandCount == repoURLs.count)
         #expect(secondSnapshot.gitLogCommandCount == 1)
 
         print(String(

@@ -31,39 +31,40 @@ final class BackupRetentionPolicy: @unchecked Sendable {
 
         var candidates = Set<String>() // track by backup ID
         let sortedByAge = backups.sorted { $0.createdAt < $1.createdAt }
+        let protectedFullID = backups
+            .filter { !$0.isIncremental }
+            .max(by: { $0.createdAt < $1.createdAt })?.id
 
         // 1. Remove backups older than retentionDays
-        let cutoffDate = Date().addingTimeInterval(-TimeInterval(config.retentionDays * 86400))
+        let retentionInterval = Double(max(0, config.retentionDays)) * 86_400
+        let cutoffDate = Date().addingTimeInterval(-retentionInterval)
         for backup in sortedByAge where backup.createdAt < cutoffDate {
             candidates.insert(backup.id)
         }
 
         // 2. Enforce max count: remove oldest beyond limit
         let remaining = backups.filter { !candidates.contains($0.id) }
-        if remaining.count > config.maxBackupCount {
+        let maximumCount = max(1, config.maxBackupCount)
+        if remaining.count > maximumCount {
             let sortedRemaining = remaining.sorted { $0.createdAt < $1.createdAt }
-            let excess = sortedRemaining.prefix(remaining.count - config.maxBackupCount)
+            let excess = sortedRemaining.prefix(remaining.count - maximumCount)
             for backup in excess {
                 candidates.insert(backup.id)
             }
         }
 
-        // 3. Ensure we keep at least one full (non-incremental) backup
-        let keptBackups = backups.filter { !candidates.contains($0.id) }
-        let hasFullBackup = keptBackups.contains { !$0.isIncremental }
-        if !hasFullBackup {
-            // Find the most recent full backup and remove it from candidates
-            if let newestFull = backups.filter({ !$0.isIncremental })
-                .sorted(by: { $0.createdAt > $1.createdAt }).first {
-                candidates.remove(newestFull.id)
-            }
+        // 3. Always protect the newest full backup.
+        if let protectedFullID {
+            candidates.remove(protectedFullID)
         }
 
-        // 4. Enforce max total size: remove oldest candidates until under limit
+        // 4. Enforce max total size without deleting the protected full backup.
         let remainingAfterCount = backups.filter { !candidates.contains($0.id) }
         var totalSize = remainingAfterCount.reduce(0) { $0 + $1.totalSizeBytes }
         let oversizedByAge = remainingAfterCount.sorted { $0.createdAt < $1.createdAt }
-        for backup in oversizedByAge where totalSize > config.maxTotalSizeBytes {
+        let maximumSize = max(0, config.maxTotalSizeBytes)
+        for backup in oversizedByAge where totalSize > maximumSize {
+            guard backup.id != protectedFullID else { continue }
             candidates.insert(backup.id)
             totalSize -= backup.totalSizeBytes
         }
@@ -99,7 +100,7 @@ final class BackupRetentionPolicy: @unchecked Sendable {
         guard let enumerator = fileManager.enumerator(
             at: url,
             includingPropertiesForKeys: [.fileSizeKey],
-            options: [.skipsSubdirectoryDescendants, .skipsHiddenFiles]
+            options: [.skipsHiddenFiles]
         ) else { return 0 }
 
         var total: Int64 = 0

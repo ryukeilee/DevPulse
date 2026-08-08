@@ -229,7 +229,13 @@ build_signed_app() {
             fail "Cannot find Apple Development signing identity for re-signing."
         fi
         info "Re-signing after test bundle removal"
-        codesign --force --sign "$identity_hash" --timestamp=none --generate-entitlement-der "$BUILD_APP"
+        # `--generate-entitlement-der` alone re-signs without embedding any
+        # entitlements, which silently drops the App Group capability and
+        # makes UserDefaults(suiteName:) fall back to ~/Library/Preferences.
+        # Re-sign with the explicit entitlements file (see 04e2b16).
+        codesign --force --sign "$identity_hash" \
+            --entitlements "$PROJECT_DIR/App/DevPulse.entitlements" \
+            --timestamp=none "$BUILD_APP"
     fi
 
     codesign --verify --deep --strict --verbose=2 "$BUILD_APP"

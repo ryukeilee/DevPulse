@@ -18,6 +18,7 @@ private final class MockGitCommandRunner: @unchecked Sendable {
     private var _defaultLogResult: ProcessRunResult = .success(output: MockGitCommandRunner.defaultLogOutput())
     private var _delay: TimeInterval = 0
     private var _pollingPaths: Set<String> = []
+    private var _pollingLogPaths: Set<String> = []
     private var _calls: [Call] = []
     private var _activeCount = 0
     private var _peakActive = 0
@@ -52,6 +53,11 @@ private final class MockGitCommandRunner: @unchecked Sendable {
         lock.withLock { _pollingPaths.insert(path) }
     }
 
+    /// Mark only the `git log` command for a path as polling cancellation.
+    func setPollingLogPath(_ path: String) {
+        lock.withLock { _pollingLogPaths.insert(path) }
+    }
+
     /// Create the GitCommandRunner closure. The captured `mock` reference
     /// is safe because `MockGitCommandRunner` is `@unchecked Sendable`.
     nonisolated func runner() -> RefreshEngine.GitCommandRunner {
@@ -66,6 +72,7 @@ private final class MockGitCommandRunner: @unchecked Sendable {
             mock._peakActive = max(mock._peakActive, mock._activeCount)
             let delay = mock._delay
             let isPolling = mock._pollingPaths.contains(workingDirectory)
+                || (!isStatus && mock._pollingLogPaths.contains(workingDirectory))
             let result: ProcessRunResult = isStatus
                 ? (mock._statusResults[workingDirectory] ?? mock._defaultStatusResult)
                 : (mock._logResults[workingDirectory] ?? mock._defaultLogResult)
@@ -968,19 +975,18 @@ struct RefreshEngineIntegrationTests {
         #expect(extDiag != nil)
         #expect(extDiag!.repositoriesCompleted <= coreDiag!.repositoriesCompleted)
 
-        // Final result has fewer repos than total discovered due to budget
-        #expect(result.data.repositories.count < 5)
-        #expect(result.data.repositories.count >= 1)
+        // Every discovered path remains represented. Work that missed the
+        // stage budget is explicitly degraded instead of silently disappearing.
+        #expect(result.data.repositories.count == 5)
+        #expect(result.data.repositories.contains { $0.status == .error })
+        #expect(Set(result.data.repositories.map(\.path)).count == 5)
     }
 
-    // MARK: - 17. Skipped first repository does not stall the batch
+    // MARK: - 17. Serial full scan reads every repository
 
-    /// Regression: with maxConcurrentGitOps == 1, a first path that is
-    /// filesystem-skippable must not leave the task group empty. Previously
-    /// the skip consumed the single submission slot without adding a task, so
-    /// the result loop never ran and every remaining repository was silently
-    /// dropped from the scan (the snapshot retained only the skipped repo).
-    @Test func skippableFirstRepositoryDoesNotStallRemainingBatch() async throws {
+    /// Every repository executes a status command even when a previous clean
+    /// snapshot exists, and serial scheduling must retain the complete batch.
+    @Test func serialFullScanReadsEveryRepository() async throws {
         let root = reposRoot("skip-batch")
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -991,10 +997,7 @@ struct RefreshEngineIntegrationTests {
         }
 
         let formatter = ISO8601DateFormatter()
-        // repo-0 is pinned, so it always sorts first in the priority order.
-        // Its scan time lies in the future: HEAD/index mtimes (now) are
-        // strictly older, so the fast filesystem skip fires for it. repo-1 and
-        // repo-2 use past scan times, so they are never skippable.
+        // repo-0 is pinned, so it always sorts first in priority order.
         let repoSnapshots: [RepositorySnapshot] = try repoURLs.enumerated().map { (i, url) in
             let canonPath = RepositoryIdentity.canonicalPath(url.path)
             let id = RepositoryIdentity.id(for: canonPath)
@@ -1053,9 +1056,7 @@ struct RefreshEngineIntegrationTests {
             .filter { $0.arguments.first == "status" }
             .map { $0.workingDirectory }
 
-        // repo-0 was skipped via the fast filesystem check; repo-1 and repo-2
-        // must still be read even though the skip consumed the single slot.
-        #expect(statusPaths.count == 2, "Expected 2 status calls, got \(statusPaths.count)")
+        #expect(statusPaths.count == 3, "Expected 3 status calls, got \(statusPaths.count)")
         #expect(result.data.repositories.count == 3, "Expected all 3 repos retained, got \(result.data.repositories.count)")
         #expect(result.data.repositories.allSatisfy { $0.resolvedDataSource == .current })
     }

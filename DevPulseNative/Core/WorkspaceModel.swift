@@ -189,7 +189,9 @@ final class WorkspaceStore: @unchecked Sendable {
     private let fileURL: URL
     private let lockURL: URL
     private let queue: DispatchQueue
-    private let processLock = NSLock()
+    // POSIX record locks are process-scoped, so separate store instances need
+    // a shared in-process lock to remain mutually exclusive.
+    private static let processLock = NSLock()
     private let logger = Logger(subsystem: "local.devpulse.app", category: "WorkspaceStore")
 
     // In-memory cache
@@ -280,7 +282,10 @@ final class WorkspaceStore: @unchecked Sendable {
             // Migrate if needed
             if archive.schemaVersion < WorkspaceArchive.currentSchemaVersion {
                 let migrated = migrate(archive: archive)
-                switch saveUnsafe(migrated) {
+                // `loadUnsafe` already holds the file lock. Re-entering
+                // `saveUnsafe` would try to acquire the non-recursive process
+                // lock again and deadlock during migration.
+                switch saveUnsafeUnlocked(migrated) {
                 case .success:
                     cachedArchive = migrated
                     return .success(migrated)
@@ -310,40 +315,45 @@ final class WorkspaceStore: @unchecked Sendable {
 
     private func saveUnsafe(_ archive: WorkspaceArchive) -> Result<WorkspaceArchive, WorkspaceStoreError> {
         withFileLock {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data: Data
-            do {
-                data = try encoder.encode(archive)
-            } catch {
-                return .failure(.writeFailed("encode failed: \(error.localizedDescription)"))
-            }
-
-            let directory = fileURL.deletingLastPathComponent()
-            do {
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            } catch {
-                return .failure(.writeFailed("directory creation: \(error.localizedDescription)"))
-            }
-
-            // Atomic write via temporary file + rename
-            let tmpURL = directory.appendingPathComponent(".workspaces.tmp-\(UUID().uuidString)")
-            defer { try? FileManager.default.removeItem(at: tmpURL) }
-
-            do {
-                try data.write(to: tmpURL, options: [.withoutOverwriting])
-                try fsyncFile(at: tmpURL)
-            } catch {
-                return .failure(.writeFailed("staging: \(error.localizedDescription)"))
-            }
-
-            guard Darwin.rename(tmpURL.path, fileURL.path) == 0 else {
-                return .failure(.writeFailed("atomic rename: \(String(cString: strerror(errno)))"))
-            }
-
-            fsyncDirectory(at: directory)
-            return .success(archive)
+            saveUnsafeUnlocked(archive)
         }
+    }
+
+    /// Writes while the caller already owns `withFileLock`.
+    private func saveUnsafeUnlocked(_ archive: WorkspaceArchive) -> Result<WorkspaceArchive, WorkspaceStoreError> {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data: Data
+        do {
+            data = try encoder.encode(archive)
+        } catch {
+            return .failure(.writeFailed("encode failed: \(error.localizedDescription)"))
+        }
+
+        let directory = fileURL.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            return .failure(.writeFailed("directory creation: \(error.localizedDescription)"))
+        }
+
+        // Atomic write via temporary file + rename
+        let tmpURL = directory.appendingPathComponent(".workspaces.tmp-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+        do {
+            try data.write(to: tmpURL, options: [.withoutOverwriting])
+            try fsyncFile(at: tmpURL)
+        } catch {
+            return .failure(.writeFailed("staging: \(error.localizedDescription)"))
+        }
+
+        guard Darwin.rename(tmpURL.path, fileURL.path) == 0 else {
+            return .failure(.writeFailed("atomic rename: \(String(cString: strerror(errno)))"))
+        }
+
+        fsyncDirectory(at: directory)
+        return .success(archive)
     }
 
     // MARK: - Mutations
@@ -531,8 +541,8 @@ final class WorkspaceStore: @unchecked Sendable {
     // MARK: - File lock
 
     private func withFileLock<T>(_ body: () throws -> T) rethrows -> T {
-        processLock.lock()
-        defer { processLock.unlock() }
+        Self.processLock.lock()
+        defer { Self.processLock.unlock() }
 
         let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
         guard descriptor >= 0 else {

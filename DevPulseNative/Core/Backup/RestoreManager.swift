@@ -1,4 +1,3 @@
-import Compression
 import CryptoKit
 import Foundation
 import OSLog
@@ -95,8 +94,7 @@ final class RestoreManager: @unchecked Sendable {
             : nil
 
         // Check free space
-        let entriesDir = backupURL.appendingPathComponent(BackupFileLayout.entriesDirectoryName)
-        let neededSize = estimateRestoreSize(entriesDir: entriesDir, manifest: manifest)
+        let neededSize = estimateRestoreSize(manifest: manifest)
         let free = BackupFreeSpace.availableBytes(at: dir) ?? 0
         if free < neededSize + config.retention.minimumFreeSpaceBytes {
             return RestorePrecheckResult(
@@ -240,14 +238,49 @@ final class RestoreManager: @unchecked Sendable {
         resolveConflicts: [String: RestoreConflictResolution] = [:],
         progress: ((Double) -> Void)? = nil
     ) throws -> RestoreResult {
-        guard !_isRestoring else { throw BackupManagerError.restoreInProgress }
+        processLock.lock()
+        guard !_isRestoring else {
+            processLock.unlock()
+            throw BackupManagerError.restoreInProgress
+        }
         _isRestoring = true
-        defer { _isRestoring = false }
+        processLock.unlock()
+        defer {
+            processLock.lock()
+            _isRestoring = false
+            processLock.unlock()
+        }
 
         let dir = backupManager.backupDirectoryURL(config: config)
         let backupURL = dir.appendingPathComponent(backupID)
         guard let manifest = loadManifest(from: backupURL) else {
             throw BackupManagerError.manifestMissing(backupID)
+        }
+        let integrity = backupManager.verifyIntegrity(backupID: backupID, config: config)
+        guard integrity.overallIntegrity else {
+            throw BackupManagerError.backupCorrupted(integrity.errors.joined(separator: "; "))
+        }
+
+        // Refuse to start a transaction unless every entry that can modify
+        // state has a writer. Missing hooks previously produced a successful
+        // result without restoring any data.
+        var storesToModify = Set<BackupStoreType>()
+        for entryID in manifest.content.entryOrder {
+            guard let entry = manifest.content.entries[entryID] else { continue }
+            let current = currentStores[entry.storeType]
+            let alreadyMatches = current.map {
+                $0.schemaVersion == entry.schemaVersion
+                    && storeDataHash($0.data) == entry.dataHash
+            } ?? false
+            let resolution = resolveConflicts[entryID]
+                ?? resolveConflicts["schema-\(entry.storeType.rawValue)"]
+            let intentionallySkipped = resolution == .skip || resolution == .useExistingVersion
+            if !alreadyMatches, !intentionallySkipped {
+                guard storeWriters[entry.storeType] != nil else {
+                    throw BackupManagerError.storeUnavailable(entry.storeType.displayName)
+                }
+                storesToModify.insert(entry.storeType)
+            }
         }
 
         // Create snapshot directory
@@ -255,7 +288,6 @@ final class RestoreManager: @unchecked Sendable {
         try fileManager.createDirectory(at: snapshotDir, withIntermediateDirectories: true)
 
         let isoNow = ISO8601DateFormatter().string(from: Date())
-        let entriesDir = backupURL.appendingPathComponent(BackupFileLayout.entriesDirectoryName)
 
         // Write transaction state (before any modifications)
         var txState = RestoreTransactionState(
@@ -270,7 +302,7 @@ final class RestoreManager: @unchecked Sendable {
 
         // Phase 1: Snapshot all current data
         var snapshotSuccess = true
-        for (storeType, storeData) in currentStores {
+        for (storeType, storeData) in currentStores where storesToModify.contains(storeType) {
             let snapshotURL = snapshotDir.appendingPathComponent("\(storeType.rawValue).json")
             do {
                 try storeData.data.write(to: snapshotURL, options: .atomic)
@@ -284,8 +316,10 @@ final class RestoreManager: @unchecked Sendable {
             txState.phase = .failed
             txState.failedEntries["__snapshot__"] = "当前数据快照失败"
             saveTransactionState(txState, in: dir)
-            rollback(txState: txState)
-            throw BackupManagerError.ioError("当前数据快照失败，已回滚")
+            // No store write has happened yet, so cleanup is sufficient.
+            try? fileManager.removeItem(at: snapshotDir)
+            cleanupTransactionState(in: dir)
+            throw BackupManagerError.ioError("当前数据快照失败，未执行恢复写入")
         }
 
         txState.phase = .writing
@@ -301,7 +335,6 @@ final class RestoreManager: @unchecked Sendable {
             guard let entryInfo = manifest.content.entries[entryID] else { continue }
             let storeType = entryInfo.storeType
             let entryFileName = storeType.entryFileName
-            let entryURL = entriesDir.appendingPathComponent(entryFileName)
 
             let entryProgress = 0.15 + (Double(entryIndex) / totalEntries) * 0.7
             progress?(entryProgress)
@@ -315,33 +348,18 @@ final class RestoreManager: @unchecked Sendable {
             }
 
             do {
-                // Read compressed entry
-                guard fileManager.fileExists(atPath: entryURL.path) else {
-                    // Entry might have been skipped during incremental backup
-                    if entryInfo.compressedSizeBytes == 0 {
-                        // Was referenced from previous backup, try to find it
-                        restoredEntries.append(entryID)
-                        continue
-                    }
-                    throw BackupManagerError.entryMissing(entryFileName)
-                }
+                // Load, decompress, and validate the logical entry before any
+                // store writer sees it.
+                let restoredData = try backupManager.loadEntryData(
+                    backupID: backupID,
+                    entry: entryInfo,
+                    config: config
+                )
 
-                let compressedData = try Data(contentsOf: entryURL)
-
-                // Decompress
-                let decompressed = decompress(data: compressedData)
-
-                // Apply schema migration if needed
-                let migratedData: Data
-                if entryInfo.schemaVersion != BackupSchema.currentVersion {
-                    migratedData = try BackupMigrationEngine.migrateEntry(
-                        storeType: storeType,
-                        data: decompressed,
-                        fromVersion: entryInfo.schemaVersion
-                    )
-                } else {
-                    migratedData = decompressed
-                }
+                // Entry schema versions belong to each store, not to the backup
+                // envelope. Preserve the payload here; a schema mismatch is
+                // surfaced by precheck and handled by the store-specific writer.
+                let migratedData = restoredData
 
                 // Merge if applicable
                 let resolvedData: Data
@@ -357,18 +375,18 @@ final class RestoreManager: @unchecked Sendable {
                 }
 
                 // Check if a conflict resolution says "skip"
-                let conflictKey = manifest.content.entries.first(where: { $0.value.storeType == storeType })?.key
-                if let conflictKey,
-                   let resolution = resolveConflicts[conflictKey],
-                   resolution == .skip || resolution == .useExistingVersion {
+                let resolution = resolveConflicts[entryID]
+                    ?? resolveConflicts["schema-\(storeType.rawValue)"]
+                if resolution == .skip || resolution == .useExistingVersion {
                     restoredEntries.append(entryID)
                     continue
                 }
 
-                // Write to store
-                if let writer = storeWriters[storeType] {
-                    try writer(resolvedData)
+                // Writer availability was validated before the transaction.
+                guard let writer = storeWriters[storeType] else {
+                    throw BackupManagerError.storeUnavailable(storeType.displayName)
                 }
+                try writer(resolvedData)
 
                 restoredEntries.append(entryID)
 
@@ -376,16 +394,20 @@ final class RestoreManager: @unchecked Sendable {
                 failedEntries[entryID] = error.localizedDescription
                 logger.error("恢复条目失败：\(entryFileName): \(error.localizedDescription)")
 
-                // If critical entries fail, rollback
-                if storeType == .repositorySnapshot || storeType == .workspaces {
-                    txState.failedEntries = failedEntries
-                    txState.phase = .failed
-                    saveTransactionState(txState, in: dir)
-                    rollback(txState: txState)
-                    throw BackupManagerError.restoreRollbackRequired(
-                        reason: "关键条目恢复失败：\(error.localizedDescription)"
-                    )
-                }
+                // The restore is transactional: any failed store write rolls
+                // back all entries already written, not only selected stores.
+                txState.failedEntries = failedEntries
+                txState.phase = .failed
+                saveTransactionState(txState, in: dir)
+                let rolledBack = rollback(
+                    txState: txState,
+                    storeWriters: storeWriters
+                )
+                throw BackupManagerError.restoreRollbackRequired(
+                    reason: rolledBack
+                        ? "恢复条目失败，已回滚：\(error.localizedDescription)"
+                        : "恢复条目失败且回滚未完成：\(error.localizedDescription)"
+                )
             }
         }
 
@@ -421,47 +443,66 @@ final class RestoreManager: @unchecked Sendable {
 
     // MARK: - Rollback
 
-    /// Rollback from a transaction state. Can be called after a crash or
-    /// failed restore to recover original data.
-    func rollback(txState: RestoreTransactionState) {
+    /// Rollback from a transaction state. Snapshot data is retained unless
+    /// every original store can be written successfully.
+    @discardableResult
+    func rollback(
+        txState: RestoreTransactionState,
+        storeWriters: [BackupStoreType: (Data) throws -> Void]
+    ) -> Bool {
         let snapshotDir = URL(fileURLWithPath: txState.snapshotDir)
-
         guard fileManager.fileExists(atPath: snapshotDir.path) else {
-            logger.warning("回滚：快照目录不存在，跳过回滚")
-            return
+            logger.warning("回滚：快照目录不存在")
+            return false
         }
-
         guard let snapshotContents = try? fileManager.contentsOfDirectory(
             at: snapshotDir,
             includingPropertiesForKeys: nil
         ) else {
             logger.error("回滚：无法读取快照目录")
-            return
+            return false
         }
 
-        logger.notice("开始回滚：\(snapshotContents.count) 个文件")
-        for snapshotURL in snapshotContents {
-            guard snapshotURL.pathExtension == "json" else { continue }
-            let storeTypeRaw = snapshotURL.deletingPathExtension().lastPathComponent
-            guard let storeType = BackupStoreType(rawValue: storeTypeRaw) else { continue }
-
+        var originals: [(BackupStoreType, Data)] = []
+        for snapshotURL in snapshotContents where snapshotURL.pathExtension == "json" {
+            let rawValue = snapshotURL.deletingPathExtension().lastPathComponent
+            guard let storeType = BackupStoreType(rawValue: rawValue) else { continue }
+            guard storeWriters[storeType] != nil else {
+                logger.error("回滚缺少存储写入器：\(storeType.rawValue)")
+                return false
+            }
             do {
-                let data = try Data(contentsOf: snapshotURL)
-                // Write back to original location (caller provides writer)
-                // Note: actual store writing is handled by the caller's hooks
-                logger.notice("回滚文件：\(storeType.rawValue)")
+                originals.append((storeType, try Data(contentsOf: snapshotURL)))
             } catch {
-                logger.error("回滚失败：\(storeType.rawValue): \(error.localizedDescription)")
+                logger.error("回滚快照读取失败：\(storeType.rawValue): \(error.localizedDescription)")
+                return false
             }
         }
 
-        // Clean up snapshot
-        try? fileManager.removeItem(at: snapshotDir)
+        logger.notice("开始回滚：\(originals.count) 个存储")
+        for (storeType, data) in originals {
+            do {
+                try storeWriters[storeType]?(data)
+            } catch {
+                logger.error("回滚写入失败：\(storeType.rawValue): \(error.localizedDescription)")
+                return false
+            }
+        }
 
         var updated = txState
         updated.hasRolledBack = true
         updated.phase = .rolledBack
+        let transactionDirectory = snapshotDir.deletingLastPathComponent()
+        saveTransactionState(updated, in: transactionDirectory)
+        do {
+            try fileManager.removeItem(at: snapshotDir)
+            cleanupTransactionState(in: transactionDirectory)
+        } catch {
+            logger.error("回滚清理失败：\(error.localizedDescription)")
+            return false
+        }
         logger.notice("回滚完成")
+        return true
     }
 
     /// Check for any incomplete restore transaction (from a crash).
@@ -483,11 +524,20 @@ final class RestoreManager: @unchecked Sendable {
         return txState
     }
 
-    /// Recover from a pending transaction (rollback).
-    func recoverPendingTransaction(config: BackupIntegrationConfiguration) {
-        guard let txState = pendingTransaction(config: config) else { return }
-        logger.notice("发现未完成的恢复事务，执行回滚：\(txState.backupID)")
-        rollback(txState: txState)
+    /// Recover from a pending transaction (rollback). Without store writers,
+    /// preserve the transaction and snapshot for a later recoverable attempt.
+    @discardableResult
+    func recoverPendingTransaction(
+        config: BackupIntegrationConfiguration,
+        storeWriters: [BackupStoreType: (Data) throws -> Void] = [:]
+    ) -> Bool {
+        guard let txState = pendingTransaction(config: config) else { return true }
+        logger.notice("发现未完成的恢复事务，尝试回滚：\(txState.backupID)")
+        let recovered = rollback(txState: txState, storeWriters: storeWriters)
+        if !recovered {
+            logger.error("未完成恢复事务缺少可用写入器；已保留回滚快照")
+        }
+        return recovered
     }
 
     // MARK: - Private helpers
@@ -511,7 +561,7 @@ final class RestoreManager: @unchecked Sendable {
         return manifest
     }
 
-    private func estimateRestoreSize(entriesDir: URL, manifest: BackupManifest) -> Int64 {
+    private func estimateRestoreSize(manifest: BackupManifest) -> Int64 {
         var total: Int64 = 0
         for entryID in manifest.content.entryOrder {
             guard let info = manifest.content.entries[entryID] else { continue }
@@ -537,27 +587,6 @@ final class RestoreManager: @unchecked Sendable {
         } catch {
             logger.warning("Failed to clean up transaction state: \(error.localizedDescription)")
         }
-    }
-
-    private func decompress(data: Data) -> Data {
-        guard !data.isEmpty else { return data }
-        let sourceSize = data.count
-        let destSize = sourceSize * 10
-        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: destSize)
-        defer { buffer.deallocate() }
-
-        let decoded = data.withUnsafeBytes { src in
-            guard let base = src.baseAddress else { return 0 }
-            return compression_decode_buffer(
-                buffer, destSize,
-                base.assumingMemoryBound(to: UInt8.self), sourceSize,
-                nil, COMPRESSION_ZLIB
-            )
-        }
-        if decoded > 0 {
-            return Data(bytes: buffer, count: decoded)
-        }
-        return data
     }
 
     private var _isRestoring: Bool = false

@@ -143,7 +143,9 @@ final class ChangeImpactStore: @unchecked Sendable {
                 && Double(totalAnalyses) > self.config.compactionThreshold * Double(self.config.maxTotalAnalyses)
 
             if shouldCompact || totalAnalyses > self.config.maxTotalAnalyses {
-                self.compact()
+                // Already executing on `queue`; calling public `compact()` here
+                // would synchronously re-enter the same serial queue and hang.
+                self.compactUnsafe(persistChanges: false)
             }
 
             return self.saveStore()
@@ -199,56 +201,7 @@ final class ChangeImpactStore: @unchecked Sendable {
     /// Compact old analyses according to retention policy.
     func compact() {
         queue.sync { [self] in
-            let before = self.container.analysesByRepo.values.reduce(0) { $0 + $1.count }
-
-            // Per-repo cap
-            for (repoID, records) in self.container.analysesByRepo {
-                if records.count > self.config.maxAnalysesPerRepo {
-                    self.container.analysesByRepo[repoID] = Array(records.suffix(self.config.maxAnalysesPerRepo))
-                }
-            }
-
-            // Retention period
-            if let retentionDays = self.config.retentionDays {
-                let cutoff = Date().addingTimeInterval(-Double(retentionDays) * 86400)
-                for (repoID, records) in self.container.analysesByRepo {
-                    self.container.analysesByRepo[repoID] = records.filter { record in
-                        guard let date = ISO8601DateFormatter().date(from: record.analyzedAt) else {
-                            return false
-                        }
-                        return date >= cutoff
-                    }
-                }
-            }
-
-            // Total cap
-            var allRecords: [(repoID: String, record: AnalysisRecord)] = []
-            for (repoID, records) in self.container.analysesByRepo {
-                for record in records {
-                    allRecords.append((repoID, record))
-                }
-            }
-            if allRecords.count > self.config.maxTotalAnalyses {
-                let sorted = allRecords.sorted { $0.record.analyzedAt > $1.record.analyzedAt }
-                let kept = Set(sorted.prefix(self.config.maxTotalAnalyses).map { "\($0.repoID)-\($0.record.id)" })
-                for (repoID, records) in self.container.analysesByRepo {
-                    self.container.analysesByRepo[repoID] = records.filter {
-                        kept.contains("\(repoID)-\($0.id)")
-                    }
-                }
-            }
-
-            let after = self.container.analysesByRepo.values.reduce(0) { $0 + $1.count }
-            let removed = before - after
-            self.container.lastCompactedAt = ISO8601DateFormatter().string(from: Date())
-            self.writeCountSinceLastCompaction = 0
-
-            if removed > 0 {
-                self.logger.debug("Compacted \(removed) old analyses (\(before) → \(after))")
-                self.diagnostics.totalCompactions += 1
-                self.diagnostics.totalCompactedRecords += removed
-                _ = self.saveStore()
-            }
+            self.compactUnsafe(persistChanges: true)
         }
     }
 
@@ -324,6 +277,64 @@ final class ChangeImpactStore: @unchecked Sendable {
     }
 
     // MARK: - Private
+
+    /// Must only be called while executing on `queue`.
+    private func compactUnsafe(persistChanges: Bool) {
+        let before = container.analysesByRepo.values.reduce(0) { $0 + $1.count }
+        let perRepoLimit = max(0, config.maxAnalysesPerRepo)
+        let totalLimit = max(0, config.maxTotalAnalyses)
+
+        // Per-repo cap
+        for (repoID, records) in container.analysesByRepo {
+            if records.count > perRepoLimit {
+                container.analysesByRepo[repoID] = Array(records.suffix(perRepoLimit))
+            }
+        }
+
+        // Retention period
+        if let retentionDays = config.retentionDays {
+            let cutoff = Date().addingTimeInterval(-Double(max(0, retentionDays)) * 86400)
+            for (repoID, records) in container.analysesByRepo {
+                container.analysesByRepo[repoID] = records.filter { record in
+                    guard let date = ISO8601DateFormatter().date(from: record.analyzedAt) else {
+                        return false
+                    }
+                    return date >= cutoff
+                }
+            }
+        }
+
+        // Total cap
+        var allRecords: [(repoID: String, record: AnalysisRecord)] = []
+        for (repoID, records) in container.analysesByRepo {
+            for record in records {
+                allRecords.append((repoID, record))
+            }
+        }
+        if allRecords.count > totalLimit {
+            let sorted = allRecords.sorted { $0.record.analyzedAt > $1.record.analyzedAt }
+            let kept = Set(sorted.prefix(totalLimit).map { "\($0.repoID)-\($0.record.id)" })
+            for (repoID, records) in container.analysesByRepo {
+                container.analysesByRepo[repoID] = records.filter {
+                    kept.contains("\(repoID)-\($0.id)")
+                }
+            }
+        }
+
+        let after = container.analysesByRepo.values.reduce(0) { $0 + $1.count }
+        let removed = before - after
+        container.lastCompactedAt = ISO8601DateFormatter().string(from: Date())
+        writeCountSinceLastCompaction = 0
+
+        if removed > 0 {
+            logger.debug("Compacted \(removed) old analyses (\(before) → \(after))")
+            diagnostics.totalCompactions += 1
+            diagnostics.totalCompactedRecords += removed
+            if persistChanges {
+                _ = saveStore()
+            }
+        }
+    }
 
     private func loadStore() {
         let fm = FileManager.default

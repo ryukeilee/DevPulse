@@ -138,6 +138,10 @@ struct VersionedSnapshotProtocolTests {
 @Suite("BoundedRecoveryContext")
 struct BoundedRecoveryContextTests {
 
+    private static func blockCurrentThread(for duration: TimeInterval) {
+        Thread.sleep(forTimeInterval: duration)
+    }
+
     @Test("run returns success for fast operation")
     func runFastOperation() async {
         let ctx = BoundedRecoveryContext(totalBudget: 5, operationTimeout: 2)
@@ -162,6 +166,25 @@ struct BoundedRecoveryContextTests {
             Issue.record("Expected .timeout, got \(result)")
             return
         }
+    }
+
+    @Test("timeout does not wait for a non-cooperative operation")
+    func nonCooperativeOperationIsWallClockBounded() async {
+        let ctx = BoundedRecoveryContext(totalBudget: 1, operationTimeout: 0.03)
+        var deadline: TimeInterval?
+        let startedAt = ProcessInfo.processInfo.systemUptime
+
+        let result = await ctx.run(operation: {
+            Self.blockCurrentThread(for: 0.5)
+            return "too late"
+        }, deadline: &deadline)
+
+        let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+        guard case .timeout = result else {
+            Issue.record("Expected .timeout, got \(result)")
+            return
+        }
+        #expect(elapsed < 0.3, "Timeout waited \(elapsed)s for a blocking child")
     }
 }
 

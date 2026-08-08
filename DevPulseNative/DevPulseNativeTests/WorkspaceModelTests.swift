@@ -534,6 +534,33 @@ struct WorkspaceStoreTests {
         }
     }
 
+    @Test func testOlderArchiveMigrationCompletes() throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ws-migrate-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let fileURL = tmpDir.appendingPathComponent("test.json")
+        let oldArchive = WorkspaceArchive(
+            schemaVersion: 0,
+            workspaces: [Workspace(name: "Migrated", repositoryIDs: ["r1"])]
+        )
+        try JSONEncoder().encode(oldArchive).write(to: fileURL, options: .atomic)
+
+        let store = WorkspaceStore(fileURL: fileURL)
+        guard case .success(let archive) = store.load() else {
+            Issue.record("Expected old workspace archive to migrate")
+            return
+        }
+
+        #expect(archive.schemaVersion == WorkspaceArchive.currentSchemaVersion)
+        #expect(archive.workspaces.first?.name == "Migrated")
+        #expect(archive.migrationLog.count == 1)
+
+        let persisted = try JSONDecoder().decode(WorkspaceArchive.self, from: Data(contentsOf: fileURL))
+        #expect(persisted.schemaVersion == WorkspaceArchive.currentSchemaVersion)
+    }
+
     @Test func testDeleteWorkspace() {
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("ws-del-\(UUID().uuidString)")
