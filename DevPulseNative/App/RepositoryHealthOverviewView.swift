@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// 项目健康状态概览：对每个已扫描项目渲染一条概览项，同时呈现
-/// 最近活动时间、仓库状态、扫描状态与活跃程度四维信息。
+/// 综合健康分、最近活动时间、仓库状态、扫描状态与活跃程度。
 ///
 /// 纯内存派生自 `scheduler.lastResult.repositories` 同源数据（经
 /// `RepositoryHealthOverviewBuilder`），不订阅额外异步源，不触发任何
@@ -44,7 +44,7 @@ struct RepositoryHealthOverviewView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("项目健康状态")
                     .font(.headline)
-                Text("基于最近一次刷新结果，共 \(items.count) 个已扫描项目。")
+                Text("综合活跃度、维护状态、数据可信度和变更风险；共 \(items.count) 个已扫描项目。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -91,6 +91,11 @@ struct RepositoryHealthOverviewView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+
+                Label(item.healthScore.displayLabel, systemImage: healthScoreIcon(for: item.healthScore.status))
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(healthScoreColor(for: item.healthScore.status))
+                    .lineLimit(1)
             }
 
             HStack(spacing: 10) {
@@ -110,6 +115,17 @@ struct RepositoryHealthOverviewView: View {
                     color: activityLevelColor(for: item.activityLevel)
                 )
                 Spacer(minLength: 0)
+            }
+
+            HStack(alignment: .top, spacing: 5) {
+                Image(systemName: healthScoreIcon(for: item.healthScore.status))
+                    .font(.caption2)
+                    .foregroundStyle(healthScoreColor(for: item.healthScore.status))
+                Text(item.healthScore.explanation)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.vertical, 9)
@@ -183,6 +199,25 @@ struct RepositoryHealthOverviewView: View {
         case .moderate: return .orange
         case .dormant: return .secondary
         case .noActivity: return .secondary.opacity(0.55)
+        }
+    }
+
+    private func healthScoreIcon(for status: RepositoryHealthScoreStatus) -> String {
+        switch status {
+        case .healthy: return "checkmark.seal"
+        case .attention: return "exclamationmark.circle"
+        case .critical: return "exclamationmark.triangle.fill"
+        case .insufficientData: return "questionmark.circle"
+        case .unavailable: return "xmark.octagon"
+        }
+    }
+
+    private func healthScoreColor(for status: RepositoryHealthScoreStatus) -> Color {
+        switch status {
+        case .healthy: return .green
+        case .attention: return .orange
+        case .critical, .unavailable: return .red
+        case .insufficientData: return .secondary
         }
     }
 }

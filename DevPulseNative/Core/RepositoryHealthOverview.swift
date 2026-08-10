@@ -2,13 +2,13 @@ import Foundation
 
 // MARK: - 项目健康概览（纯派生，无 I/O）
 
-/// 四维健康概览的派生逻辑。输入为内存中已存在的 `RepositorySnapshot`
+/// 健康概览与综合评分的派生逻辑。输入为内存中已存在的 `RepositorySnapshot`
 /// 刷新结果（与 `scheduler.lastResult.repositories` 同源），不触发任何
 /// 新的 Git 读取、文件读取或后台任务。
 
 // MARK: 活跃程度分级
 
-/// 基于最近活动时间（`lastActivityAt` → `lastChangedAt` 兜底）的分级结论。
+/// 基于两个已有活动时间戳中较新的有效值分级。
 enum RepositoryActivityLevel: String, Equatable {
     /// 最近 24 小时内有活动
     case active
@@ -73,10 +73,47 @@ enum RepositoryHealthRepoState: Equatable {
     }
 }
 
+// MARK: 综合评分
+
+/// 概览层的健康评分状态。评分只用于当前项目概览，不改变扫描结果中的
+/// `risk`（后者仍表示当前变更文件风险）。
+enum RepositoryHealthScoreStatus: String, Equatable {
+    case healthy
+    case attention
+    case critical
+    case insufficientData
+    case unavailable
+
+    var label: String {
+        switch self {
+        case .healthy: return "健康"
+        case .attention: return "需关注"
+        case .critical: return "风险较高"
+        case .insufficientData: return "数据不足"
+        case .unavailable: return "无法评估"
+        }
+    }
+}
+
+/// 可解释的项目健康评分。`value == nil` 表示现有扫描数据不足以给出
+/// 可信分数，避免把读取异常伪装成低分或正常。
+struct RepositoryHealthScore: Equatable {
+    let value: Int?
+    let status: RepositoryHealthScoreStatus
+    let explanation: String
+
+    var displayLabel: String {
+        if let value {
+            return "\(value) 分 · \(status.label)"
+        }
+        return status.label
+    }
+}
+
 // MARK: 概览行
 
-/// 一个已扫描项目的健康概览行，同时携带四维信息：
-/// 最近活动时间、仓库状态、扫描状态、活跃程度。
+/// 一个已扫描项目的健康概览行，同时携带最近活动、仓库状态、扫描状态、
+/// 活跃程度和可解释的综合健康分。
 struct RepositoryHealthOverviewItem: Identifiable, Equatable {
     let id: String
     let name: String
@@ -89,6 +126,7 @@ struct RepositoryHealthOverviewItem: Identifiable, Equatable {
     let repositoryState: RepositoryHealthRepoState
     let scanState: RepositoryHealthScanState
     let activityLevel: RepositoryActivityLevel
+    let healthScore: RepositoryHealthScore
 }
 
 // MARK: Builder
@@ -101,6 +139,15 @@ enum RepositoryHealthOverviewBuilder {
     static let activeThreshold: TimeInterval = 24 * 60 * 60
     /// 沉寂阈值：超过 7 天无活动为「沉寂」
     static let dormantThreshold: TimeInterval = 7 * 24 * 60 * 60
+
+    /// 评分权重：活跃度 35、维护状态 35、数据可信度 20、变更风险 10。
+    /// 权重集中在此处，便于审查和测试；所有输入仍来自已有快照。
+    private enum ScoreWeights {
+        static let activity = 35
+        static let maintenance = 35
+        static let reliability = 20
+        static let changeRisk = 10
+    }
 
     static func build(
         snapshots: [RepositorySnapshot],
@@ -134,14 +181,151 @@ enum RepositoryHealthOverviewBuilder {
     ) -> RepositoryActivityLevel {
         guard let activityDate else { return .noActivity }
         let interval = now.timeIntervalSince(activityDate)
+        guard interval >= -60 else { return .noActivity }
         if interval <= activeThreshold { return .active }
         if interval <= dormantThreshold { return .moderate }
         return .dormant
     }
 
-    /// 取最近活动时间戳：`lastActivityAt` 优先，`lastChangedAt` 兜底。
-    static func activityTimestamp(snapshot: RepositorySnapshot) -> String? {
-        snapshot.lastActivityAt ?? snapshot.lastChangedAt
+    /// 取两个已有活动时间戳中较新的有效值，避免旧的活动标记遮住新提交。
+    static func activityTimestamp(
+        snapshot: RepositorySnapshot,
+        now: Date = Date()
+    ) -> String? {
+        let candidates = [snapshot.lastActivityAt, snapshot.lastChangedAt]
+            .compactMap { $0 }
+            .compactMap { timestamp -> (String, Date)? in
+                guard let date = DateFormatting.date(from: timestamp) else { return nil }
+                guard now.timeIntervalSince(date) >= -60 else { return nil }
+                return (timestamp, date)
+            }
+        return candidates.max { $0.1 < $1.1 }?.0
+    }
+
+    /// 计算项目健康分。纯函数，不触发任何扫描或文件读取。
+    static func healthScore(
+        snapshot: RepositorySnapshot,
+        now: Date
+    ) -> RepositoryHealthScore {
+        let scanState = classifyScanState(snapshot: snapshot)
+        switch scanState {
+        case .unavailable:
+            return RepositoryHealthScore(
+                value: nil,
+                status: .unavailable,
+                explanation: "仓库当前不可访问，无法可靠评估健康状态。"
+            )
+        case .error:
+            return RepositoryHealthScore(
+                value: nil,
+                status: .unavailable,
+                explanation: "最近一次读取失败，暂不显示健康分；完成一次成功刷新后再评估。"
+            )
+        case .unknown:
+            return RepositoryHealthScore(
+                value: nil,
+                status: .insufficientData,
+                explanation: "尚未获得可信的扫描数据，暂不显示健康分。"
+            )
+        case .current, .lastSuccessful:
+            break
+        }
+
+        let activityDate = activityDate(snapshot: snapshot, now: now)
+        let activityLevel = classifyActivityLevel(activityDate: activityDate, now: now)
+        let activityPoints: Int
+        switch activityLevel {
+        case .active: activityPoints = ScoreWeights.activity
+        case .moderate: activityPoints = 26
+        case .dormant: activityPoints = 12
+        case .noActivity: activityPoints = 4
+        }
+
+        var reasons: [String] = []
+        if activityLevel == .moderate {
+            reasons.append("最近 1–7 天有活动，活跃度一般")
+        } else if activityLevel == .dormant {
+            reasons.append("超过 7 天未检测到活动")
+        } else if activityLevel == .noActivity {
+            reasons.append("暂无可用活动时间，活跃度证据不足")
+        }
+
+        var maintenancePoints = ScoreWeights.maintenance
+        switch snapshot.status {
+        case .clean:
+            break
+        case .changed:
+            let changedCount = max(0, snapshot.changedFileCount)
+            let changePenalty = min(18, Int(ceil(Double(changedCount) * 1.5)))
+            maintenancePoints -= changePenalty
+            if changedCount > 0 {
+                reasons.append("工作区有 \(changedCount) 处未提交改动")
+            }
+        case .error:
+            maintenancePoints = 0
+        }
+
+        if let conflicts = snapshot.conflictedFileCount, conflicts > 0 {
+            maintenancePoints -= min(25, conflicts * 8)
+            reasons.append("存在 \(conflicts) 个冲突文件")
+        }
+        if let ahead = snapshot.aheadCount, ahead > 0 {
+            maintenancePoints -= min(8, ahead * 2)
+            reasons.append("有 \(ahead) 个本地提交未推送")
+        }
+        if let behind = snapshot.behindCount, behind > 0 {
+            maintenancePoints -= min(12, behind * 2)
+            reasons.append("落后远端 \(behind) 个提交")
+        }
+        maintenancePoints = max(0, maintenancePoints)
+
+        let reliabilityPoints: Int
+        switch scanState {
+        case .current:
+            reliabilityPoints = ScoreWeights.reliability
+        case .lastSuccessful:
+            reliabilityPoints = 10
+            reasons.append("当前使用上次成功扫描数据，状态可能已变化")
+        case .unknown, .unavailable, .error:
+            reliabilityPoints = 0
+        }
+
+        let changeRiskPoints: Int
+        switch snapshot.risk {
+        case .low:
+            changeRiskPoints = ScoreWeights.changeRisk
+        case .medium:
+            changeRiskPoints = 5
+            reasons.append("当前改动包含需要关注的文件")
+        case .high:
+            changeRiskPoints = 0
+            reasons.append("当前改动被判定为高风险")
+        }
+
+        var value = activityPoints + maintenancePoints + reliabilityPoints + changeRiskPoints
+        // 上次成功数据不能呈现为“健康”，即使其保留字段看起来完整。
+        if scanState == .lastSuccessful {
+            value = min(value, 74)
+        }
+        value = min(100, max(0, value))
+
+        let status: RepositoryHealthScoreStatus
+        if value >= 80 {
+            status = .healthy
+        } else if value >= 60 {
+            status = .attention
+        } else {
+            status = .critical
+        }
+
+        let explanation: String
+        if reasons.isEmpty {
+            explanation = "当前扫描数据显示项目活跃、工作区干净，未发现明显维护问题。"
+        } else {
+            explanation = reasons.prefix(2).joined(separator: "；")
+        }
+
+        return RepositoryHealthScore(value: value, status: status, explanation: explanation)
     }
 
     /// 仓库状态映射：`status` → clean / changed(变更计数) / error。
@@ -159,11 +343,12 @@ enum RepositoryHealthOverviewBuilder {
         snapshot: RepositorySnapshot,
         now: Date
     ) -> RepositoryHealthOverviewItem {
-        let timestamp = activityTimestamp(snapshot: snapshot)
-        let activityDate = timestamp.flatMap(DateFormatting.date(from:))
+        let activityDate = activityDate(snapshot: snapshot, now: now)
+        let timestamp = activityDate.map(DateFormatting.isoString(from:))
         let activityLabel = timestamp.flatMap {
             DateFormatting.relativeTimeChinese(from: $0, relativeTo: now)
         }
+        let activityLevel = classifyActivityLevel(activityDate: activityDate, now: now)
         return RepositoryHealthOverviewItem(
             id: snapshot.id,
             name: snapshot.name,
@@ -173,8 +358,18 @@ enum RepositoryHealthOverviewBuilder {
             activityLabel: activityLabel,
             repositoryState: repositoryState(for: snapshot),
             scanState: classifyScanState(snapshot: snapshot),
-            activityLevel: classifyActivityLevel(activityDate: activityDate, now: now)
+            activityLevel: activityLevel,
+            healthScore: healthScore(snapshot: snapshot, now: now)
         )
+    }
+
+    private static func activityDate(snapshot: RepositorySnapshot, now: Date) -> Date? {
+        guard let timestamp = activityTimestamp(snapshot: snapshot, now: now),
+              let date = DateFormatting.date(from: timestamp),
+              now.timeIntervalSince(date) >= -60 else {
+            return nil
+        }
+        return date
     }
 
     private static func ordering(

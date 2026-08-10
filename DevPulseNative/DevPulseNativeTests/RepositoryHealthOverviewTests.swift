@@ -22,6 +22,9 @@ struct RepositoryHealthOverviewTests {
         added: Int = 0,
         deleted: Int = 0,
         untracked: Int = 0,
+        conflicted: Int = 0,
+        ahead: Int = 0,
+        behind: Int = 0,
         risk: RiskLevel = .low,
         dataSource: RepositoryDataSource = .current,
         lastSuccessfulScanAt: String? = nil,
@@ -43,9 +46,9 @@ struct RepositoryHealthOverviewTests {
             untrackedFileCount: untracked,
             stagedFileCount: 0,
             unstagedFileCount: 0,
-            conflictedFileCount: 0,
-            aheadCount: 0,
-            behindCount: 0,
+            conflictedFileCount: conflicted,
+            aheadCount: ahead,
+            behindCount: behind,
             hasUpstream: true,
             changedFileCount: changed,
             changedFilesPreview: [],
@@ -130,6 +133,37 @@ struct RepositoryHealthOverviewTests {
         )
         let item = RepositoryHealthOverviewBuilder.build(snapshots: [repo], now: now).first!
         #expect(item.activityLabel == "10 分钟前")
+        #expect(item.activityLevel == .active)
+    }
+
+    @Test func activityTimestampUsesNewestAvailableTimestamp() {
+        let repo = snapshot(
+            name: "Newest",
+            lastChangedAt: iso(-600),
+            lastActivityAt: iso(-3 * 86_400)
+        )
+        let item = RepositoryHealthOverviewBuilder.build(snapshots: [repo], now: now).first!
+        #expect(item.activityDate == now.addingTimeInterval(-600))
+        #expect(item.activityLabel == "10 分钟前")
+    }
+
+    @Test func futureActivityTimestampIsNotPresentedAsActive() {
+        let repo = snapshot(name: "Future", lastActivityAt: iso(3_600))
+        let item = RepositoryHealthOverviewBuilder.build(snapshots: [repo], now: now).first!
+        #expect(item.activityDate == nil)
+        #expect(item.activityLabel == nil)
+        #expect(item.activityLevel == .noActivity)
+        #expect(item.healthScore.explanation.contains("证据不足"))
+    }
+
+    @Test func futureTimestampDoesNotHideOlderValidActivity() {
+        let repo = snapshot(
+            name: "FutureWithFallback",
+            lastChangedAt: iso(-7_200),
+            lastActivityAt: iso(3_600)
+        )
+        let item = RepositoryHealthOverviewBuilder.build(snapshots: [repo], now: now).first!
+        #expect(item.activityDate == now.addingTimeInterval(-7_200))
         #expect(item.activityLevel == .active)
     }
 
@@ -237,6 +271,71 @@ struct RepositoryHealthOverviewTests {
         #expect(item.activityLevel == .active)
     }
 
+    // MARK: 综合评分
+
+    @Test func healthyScoreReflectsActiveCleanCurrentRepository() {
+        let repo = snapshot(
+            name: "Healthy",
+            dataSource: .current,
+            lastActivityAt: iso(-3_600)
+        )
+        let item = RepositoryHealthOverviewBuilder.build(snapshots: [repo], now: now).first!
+        #expect(item.healthScore.value == 100)
+        #expect(item.healthScore.status == .healthy)
+        #expect(item.healthScore.explanation.contains("未发现明显维护问题"))
+    }
+
+    @Test func scoreWeightsDormancyAndOutstandingChanges() {
+        let repo = snapshot(
+            name: "NeedsAttention",
+            status: .changed,
+            modified: 8,
+            conflicted: 2,
+            ahead: 4,
+            behind: 4,
+            risk: .high,
+            lastActivityAt: iso(-10 * 86_400)
+        )
+        let score = RepositoryHealthOverviewBuilder.build(snapshots: [repo], now: now).first!.healthScore
+        #expect(score.value == 32)
+        #expect(score.status == .critical)
+        #expect(score.explanation.contains("超过 7 天"))
+    }
+
+    @Test func staleSuccessfulDataIsCappedAndExplained() {
+        let repo = snapshot(
+            name: "Stale",
+            dataSource: .lastSuccessful,
+            lastSuccessfulScanAt: iso(-3_600),
+            lastActivityAt: iso(-3_600)
+        )
+        let score = RepositoryHealthOverviewBuilder.build(snapshots: [repo], now: now).first!.healthScore
+        #expect(score.value == 74)
+        #expect(score.status == .attention)
+        #expect(score.explanation.contains("上次成功扫描"))
+    }
+
+    @Test func unavailableAndUnknownSnapshotsDoNotReceiveFalseScores() {
+        let unavailable = snapshot(
+            name: "Unavailable",
+            dataSource: .lastSuccessful,
+            unavailableSince: iso(-3_600)
+        )
+        let unknown = snapshot(name: "Unknown", dataSource: .unknown)
+
+        let items = RepositoryHealthOverviewBuilder.build(
+            snapshots: [unavailable, unknown],
+            now: now
+        )
+        let unavailableScore = items.first { $0.name == "Unavailable" }!.healthScore
+        let unknownScore = items.first { $0.name == "Unknown" }!.healthScore
+
+        #expect(unavailableScore.value == nil)
+        #expect(unavailableScore.status == .unavailable)
+        #expect(unknownScore.value == nil)
+        #expect(unknownScore.status == .insufficientData)
+    }
+
     // MARK: 文案（阈值与文案集中一处定义）
 
     @Test func dimensionLabels() {
@@ -254,5 +353,11 @@ struct RepositoryHealthOverviewTests {
         #expect(RepositoryActivityLevel.moderate.label == "一般")
         #expect(RepositoryActivityLevel.dormant.label == "沉寂")
         #expect(RepositoryActivityLevel.noActivity.label == "无活动记录")
+
+        #expect(RepositoryHealthScoreStatus.healthy.label == "健康")
+        #expect(RepositoryHealthScoreStatus.attention.label == "需关注")
+        #expect(RepositoryHealthScoreStatus.critical.label == "风险较高")
+        #expect(RepositoryHealthScoreStatus.insufficientData.label == "数据不足")
+        #expect(RepositoryHealthScoreStatus.unavailable.label == "无法评估")
     }
 }
