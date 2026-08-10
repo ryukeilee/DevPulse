@@ -35,8 +35,12 @@ struct DailyDevelopmentSummary: Equatable {
         let trend: Trend
     }
 
+    /// Number of scan-detected latest-commit transitions. This is not a full
+    /// `git log` count because the refresh pipeline only records transitions.
     let commitCount: Int
     let activeProjectCount: Int
+    /// Number of development-change records retained for today.
+    let activityCount: Int
     /// Estimated minutes based on contiguous activity-event sessions.
     let focusMinutes: Int
     let mostActiveProject: MostActiveProject?
@@ -44,9 +48,19 @@ struct DailyDevelopmentSummary: Equatable {
     let activeProjectTrend: Trend
     let focusTimeTrend: Trend
     let comparisonDayCount: Int
+    /// Number of previous days that contain development-change records and
+    /// therefore provide a meaningful daily-average comparison.
+    let comparisonActivityDayCount: Int
+    /// Repositories that had a read failure today. Development counts exclude
+    /// those events, but the UI should still make the incomplete data visible.
+    let unavailableProjectCount: Int
 
     var hasActivity: Bool {
-        commitCount > 0 || activeProjectCount > 0 || focusMinutes > 0
+        activityCount > 0
+    }
+
+    var hasDataWarning: Bool {
+        unavailableProjectCount > 0
     }
 }
 
@@ -77,8 +91,7 @@ enum DailyDevelopmentSummaryBuilder {
 
         var buckets: [Date: DayBucket] = [:]
         for event in events {
-            guard isDevelopmentActivity(event.kind),
-                  let date = DateFormatting.date(from: event.occurredAt),
+            guard let date = DateFormatting.date(from: event.occurredAt),
                   date >= historyStart,
                   date <= now else {
                 continue
@@ -86,6 +99,15 @@ enum DailyDevelopmentSummaryBuilder {
 
             let day = calendar.startOfDay(for: date)
             guard day <= todayStart else { continue }
+
+            if event.kind == .readFailed {
+                buckets[day, default: DayBucket()]
+                    .unavailableProjectIDs
+                    .insert(event.repositoryID)
+                continue
+            }
+            guard isDevelopmentActivity(event.kind) else { continue }
+
             buckets[day, default: DayBucket()].add(
                 event: event,
                 date: date
@@ -103,44 +125,44 @@ enum DailyDevelopmentSummaryBuilder {
             }
             return buckets[day] ?? DayBucket()
         }
-        let hasPreviousActivity = previousBuckets.contains { !$0.timestamps.isEmpty }
+        let previousActivityBuckets = previousBuckets.filter { !$0.timestamps.isEmpty }
+        let comparisonActivityDayCount = previousActivityBuckets.count
 
         let commitTrend = trend(
             value: Double(today.commitCount),
-            previousValues: previousBuckets.map { Double($0.commitCount) },
-            hasPreviousActivity: hasPreviousActivity,
-            comparisonDayCount: comparisonDayCount
+            previousValues: previousActivityBuckets.map { Double($0.commitCount) },
+            comparisonDayCount: comparisonActivityDayCount
         )
         let activeProjectTrend = trend(
             value: Double(today.projectIDs.count),
-            previousValues: previousBuckets.map { Double($0.projectIDs.count) },
-            hasPreviousActivity: hasPreviousActivity,
-            comparisonDayCount: comparisonDayCount
+            previousValues: previousActivityBuckets.map { Double($0.projectIDs.count) },
+            comparisonDayCount: comparisonActivityDayCount
         )
         let focusTimeTrend = trend(
             value: Double(focusMinutes(for: today.timestamps)),
-            previousValues: previousBuckets.map {
+            previousValues: previousActivityBuckets.map {
                 Double(focusMinutes(for: $0.timestamps))
             },
-            hasPreviousActivity: hasPreviousActivity,
-            comparisonDayCount: comparisonDayCount
+            comparisonDayCount: comparisonActivityDayCount
         )
 
         let mostActiveProject = topProject(
             in: today,
-            previousBuckets: previousBuckets,
-            comparisonDayCount: comparisonDayCount
+            previousBuckets: previousBuckets
         )
 
         return DailyDevelopmentSummary(
             commitCount: today.commitCount,
             activeProjectCount: today.projectIDs.count,
+            activityCount: today.timestamps.count,
             focusMinutes: focusMinutes(for: today.timestamps),
             mostActiveProject: mostActiveProject,
             commitTrend: commitTrend,
             activeProjectTrend: activeProjectTrend,
             focusTimeTrend: focusTimeTrend,
-            comparisonDayCount: comparisonDayCount
+            comparisonDayCount: comparisonDayCount,
+            comparisonActivityDayCount: comparisonActivityDayCount,
+            unavailableProjectCount: today.unavailableProjectIDs.count
         )
     }
 
@@ -151,6 +173,7 @@ enum DailyDevelopmentSummaryBuilder {
         var activityCountsByProject: [String: Int] = [:]
         var namesByProject: [String: String] = [:]
         var latestActivityByProject: [String: Date] = [:]
+        var unavailableProjectIDs = Set<String>()
 
         mutating func add(event: ActivityEvent, date: Date) {
             if event.kind == .newCommit {
@@ -205,8 +228,7 @@ enum DailyDevelopmentSummaryBuilder {
 
     private static func topProject(
         in bucket: DayBucket,
-        previousBuckets: [DayBucket],
-        comparisonDayCount: Int
+        previousBuckets: [DayBucket]
     ) -> DailyDevelopmentSummary.MostActiveProject? {
         guard !bucket.activityCountsByProject.isEmpty else { return nil }
 
@@ -227,11 +249,11 @@ enum DailyDevelopmentSummaryBuilder {
         }
 
         guard let id = candidateIDs.first else { return nil }
-        let previousValues = previousBuckets.map {
-            Double($0.activityCountsByProject[id, default: 0])
-        }
-        let hasPreviousActivity = previousBuckets.contains {
-            ($0.activityCountsByProject[id] ?? 0) > 0
+        let previousValues = previousBuckets.compactMap { bucket -> Double? in
+            guard let count = bucket.activityCountsByProject[id], count > 0 else {
+                return nil
+            }
+            return Double(count)
         }
 
         return DailyDevelopmentSummary.MostActiveProject(
@@ -241,8 +263,7 @@ enum DailyDevelopmentSummaryBuilder {
             trend: trend(
                 value: Double(bucket.activityCountsByProject[id, default: 0]),
                 previousValues: previousValues,
-                hasPreviousActivity: hasPreviousActivity,
-                comparisonDayCount: comparisonDayCount
+                comparisonDayCount: previousValues.count
             )
         )
     }
@@ -250,10 +271,9 @@ enum DailyDevelopmentSummaryBuilder {
     private static func trend(
         value: Double,
         previousValues: [Double],
-        hasPreviousActivity: Bool,
         comparisonDayCount: Int
     ) -> DailyDevelopmentSummary.Trend {
-        guard hasPreviousActivity, !previousValues.isEmpty else {
+        guard !previousValues.isEmpty else {
             return .unavailable(comparisonDayCount: comparisonDayCount)
         }
 

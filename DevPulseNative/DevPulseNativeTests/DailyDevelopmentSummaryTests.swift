@@ -23,11 +23,12 @@ struct DailyDevelopmentSummaryTests {
 
         #expect(summary.commitCount == 1)
         #expect(summary.activeProjectCount == 2)
+        #expect(summary.activityCount == 3)
         #expect(summary.focusMinutes == 30)
         #expect(summary.mostActiveProject?.id == "repo-a")
         #expect(summary.mostActiveProject?.name == "Alpha")
         #expect(summary.mostActiveProject?.activityCount == 2)
-        #expect(summary.commitTrend.direction == .increased)
+        #expect(summary.commitTrend.direction == .unchanged)
         #expect(summary.activeProjectTrend.direction == .increased)
         #expect(summary.focusTimeTrend.direction == .increased)
         #expect(summary.mostActiveProject?.trend.direction == .unavailable)
@@ -86,6 +87,25 @@ struct DailyDevelopmentSummaryTests {
         #expect(summary.activeProjectTrend.direction == .unchanged)
     }
 
+    @Test func sparseHistoryUsesOnlyDaysWithActivityForAverage() {
+        let calendar = utcCalendar()
+        let now = date("2026-07-20T12:00:00Z")
+        let events = [
+            event(id: "today", repositoryID: "repo-a", name: "Alpha", kind: .newCommit, at: "2026-07-20T09:00:00Z"),
+            event(id: "previous", repositoryID: "repo-a", name: "Alpha", kind: .newCommit, at: "2026-07-18T09:00:00Z")
+        ]
+
+        let summary = DailyDevelopmentSummaryBuilder.build(
+            events: events,
+            now: now,
+            calendar: calendar
+        )
+
+        #expect(summary.commitTrend.direction == .unchanged)
+        #expect(summary.commitTrend.recentDailyAverage == 1)
+        #expect(summary.comparisonActivityDayCount == 1)
+    }
+
     @Test func excludesFutureAndReadOnlyEventsAndShowsUnavailableTrendWithoutHistory() {
         let calendar = utcCalendar()
         let now = date("2026-07-20T00:30:00Z")
@@ -108,6 +128,23 @@ struct DailyDevelopmentSummaryTests {
         #expect(summary.commitTrend.direction == .decreased)
         #expect(summary.activeProjectTrend.direction == .decreased)
         #expect(summary.focusTimeTrend.direction == .decreased)
+    }
+
+    @Test func readFailuresAreExcludedButExposedAsDataWarning() {
+        let calendar = utcCalendar()
+        let summary = DailyDevelopmentSummaryBuilder.build(
+            events: [
+                event(id: "failed", repositoryID: "repo-a", name: "Alpha", kind: .readFailed, at: "2026-07-20T09:00:00Z"),
+                event(id: "work", repositoryID: "repo-b", name: "Beta", kind: .workingTreeChanged, at: "2026-07-20T10:00:00Z")
+            ],
+            now: date("2026-07-20T12:00:00Z"),
+            calendar: calendar
+        )
+
+        #expect(summary.activityCount == 1)
+        #expect(summary.activeProjectCount == 1)
+        #expect(summary.unavailableProjectCount == 1)
+        #expect(summary.hasDataWarning)
     }
 
     @Test func noActivityHistoryProducesUnavailableTrends() {

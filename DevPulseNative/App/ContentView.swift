@@ -173,7 +173,15 @@ struct StatusTab: View {
                     openDiagnostics: openDiagnostics
                 )
 
-                TodayDevelopmentSummaryView(events: scheduler.activityEvents)
+                RepositoryHealthOverviewView(
+                    repositories: scheduler.lastResult.repositories
+                )
+
+                TodayDevelopmentSummaryView(
+                    events: scheduler.activityEvents,
+                    lastScanAt: scheduler.lastSuccessfulRefreshAt,
+                    isScanning: scheduler.isScanning
+                )
 
                 ActivityTimelineView(
                     events: scheduler.activityEvents,

@@ -8,6 +8,18 @@ struct TodayDevelopmentSummaryView: View {
     }
 
     let events: [ActivityEvent]
+    let lastScanAt: Date?
+    let isScanning: Bool
+
+    init(
+        events: [ActivityEvent],
+        lastScanAt: Date? = nil,
+        isScanning: Bool = false
+    ) {
+        self.events = events
+        self.lastScanAt = lastScanAt
+        self.isScanning = isScanning
+    }
 
     private var summary: DailyDevelopmentSummary {
         DailyDevelopmentSummaryBuilder.build(events: events)
@@ -17,9 +29,10 @@ struct TodayDevelopmentSummaryView: View {
         VStack(alignment: .leading, spacing: 12) {
             header
             metrics
+            stateMessage
             mostActiveProject
 
-            Text("趋势对比过去 7 天日均；专注时间按扫描发现的活动间隔估算。")
+            Text(comparisonDescription)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -36,7 +49,7 @@ struct TodayDevelopmentSummaryView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("今日开发摘要")
                     .font(.headline)
-                Text("复用现有扫描活动记录，不会触发额外扫描。")
+                Text("基于扫描发现的变化记录，不会触发额外扫描。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -57,7 +70,7 @@ struct TodayDevelopmentSummaryView: View {
             spacing: 10
         ) {
             metric(
-                title: "今日提交",
+                title: "发现新提交",
                 value: "\(summary.commitCount)",
                 systemImage: "checkmark.circle",
                 trend: summary.commitTrend,
@@ -79,11 +92,68 @@ struct TodayDevelopmentSummaryView: View {
             )
             metric(
                 title: "活动记录",
-                value: summary.hasActivity ? "有活动" : "暂无活动",
+                value: "\(summary.activityCount)",
                 systemImage: "waveform.path.ecg",
                 trend: nil
             )
         }
+    }
+
+    @ViewBuilder
+    private var stateMessage: some View {
+        if summary.hasDataWarning {
+            Label(
+                "包含读取异常",
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.orange)
+            .help("今天有 \(summary.unavailableProjectCount) 个项目曾读取失败；摘要仅统计可读取的变化。")
+        }
+
+        if !summary.hasActivity {
+            Label(
+                emptyStateTitle,
+                systemImage: emptyStateSymbol
+            )
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.secondary)
+
+            Text(emptyStateDetail)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if isScanning {
+            Label("正在扫描，摘要将在本轮完成后更新", systemImage: "arrow.triangle.2.circlepath")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var hasSuccessfulScanToday: Bool {
+        guard let lastScanAt else { return false }
+        return Calendar.current.isDate(lastScanAt, inSameDayAs: Date())
+    }
+
+    private var emptyStateTitle: String {
+        guard lastScanAt != nil else { return "等待首次成功扫描" }
+        return hasSuccessfulScanToday ? "今天暂无开发变化" : "今天尚未完成成功扫描"
+    }
+
+    private var emptyStateSymbol: String {
+        lastScanAt == nil || !hasSuccessfulScanToday
+            ? "clock.badge.questionmark"
+            : "checkmark.circle"
+    }
+
+    private var emptyStateDetail: String {
+        guard lastScanAt != nil else {
+            return "完成首次成功扫描后，这里会显示检测到的提交和项目变化。"
+        }
+        guard hasSuccessfulScanToday else {
+            return "摘要等待今天的成功扫描；上次扫描不代表今天没有开发变化。"
+        }
+        return "摘要只记录扫描发现的变化；没有变化不代表扫描失败。"
     }
 
     @ViewBuilder
@@ -116,7 +186,7 @@ struct TodayDevelopmentSummaryView: View {
             }
             .padding(.vertical, 2)
         } else {
-            Label("最活跃项目 · 今天还没有扫描到活动变化", systemImage: "minus.circle")
+            Label("最活跃项目 · 暂无可展示项目", systemImage: "minus.circle")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -146,7 +216,7 @@ struct TodayDevelopmentSummaryView: View {
                     .foregroundStyle(trendColor(trend))
                     .lineLimit(1)
             } else {
-                Text("活动事件统计")
+                Text("扫描变化记录")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -175,14 +245,21 @@ struct TodayDevelopmentSummaryView: View {
     ) -> String {
         switch trend.direction {
         case .increased:
-            return "↑ 较近 7 天 +\(formattedDelta(trend.delta, unit: unit))"
+            return "↑ 较近 7 天有活动日均 +\(formattedDelta(trend.delta, unit: unit))"
         case .decreased:
-            return "↓ 较近 7 天 \(formattedDelta(trend.delta, unit: unit))"
+            return "↓ 较近 7 天有活动日均 \(formattedDelta(trend.delta, unit: unit))"
         case .unchanged:
-            return "→ 与近 7 天持平"
+            return "→ 与近 7 天有活动日均持平"
         case .unavailable:
-            return "近期数据不足"
+            return "近期无可比较活动"
         }
+    }
+
+    private var comparisonDescription: String {
+        let history = summary.comparisonActivityDayCount == 0
+            ? "近 7 天暂无可比较活动"
+            : "趋势按近 7 天内 \(summary.comparisonActivityDayCount) 个有活动日均比较"
+        return "\(history)；专注时间按扫描发现的活动间隔估算。"
     }
 
     private func formattedDelta(_ delta: Double?, unit: TrendUnit) -> String {

@@ -146,3 +146,93 @@
 - **修改**：无（零代码变更，未强行修改）。
 - **验证**：`bash ./scripts/verify.sh build` → `[verify] Build succeeded`（确认今日编译基线）。
 - **剩余风险**：本轮未运行完整测试套件（无具体问题指向时不强制，见 `loop.md`）；Loop 3 的「需手动确认」项（摘要视觉布局、首次基线数据不足）仍未做人工确认。
+
+---
+
+## Loop 5 — 2026-08-10
+
+- **问题**：无（本轮判定无高价值问题，记录「无变更」）。
+- **证据**：
+  - 工作区：`git status --porcelain=v2 --branch` → `branch.ab +0 -0`，无未提交改动，与 origin/main 同步
+  - 最近提交：`git log --oneline -15` → HEAD `60683d3 docs(agent): record maintenance loop 4`（即 Loop 4 的记录提交，本轮无新提交）
+  - `grep -rn -e TODO -e FIXME DevPulseNative/` → 无匹配（exit 1）
+  - 上次验证：Loop 4 在同一 commit 上 `verify.sh build` 通过；本轮 `bash ./scripts/verify.sh build` → `[verify] Build succeeded`
+  - 历史遗留：Loop 3 剩余风险仅为「摘要视觉布局需手动确认」「首次基线数据不足」等已注明的手动确认项，非 CLI 可验证 Bug
+  - 本轮无用户反馈的具体问题（任务为「运行一次 loop」）
+- **原因**：不满足 `loop.md` Evidence 阶段的任何有效依据（可复现 Bug / 测试失败 / 行为异常 / 用户反馈 / 稳定性风险 / 性能问题 / 测试缺口）。按规则「没有足够证据 → 不修改」「无高价值问题 → 记录无变更，不要强行修改」。
+- **修改**：无（零代码变更，未强行修改）。
+- **验证**：`bash ./scripts/verify.sh build` → `[verify] Build succeeded`（确认今日编译基线）。
+- **剩余风险**：本轮未运行完整测试套件（无具体问题指向时不强制，见 `loop.md`）；Loop 3 与 Loop 4 已注明的「需手动确认」项（摘要视觉布局、首次基线数据不足）仍未做人工确认。
+
+---
+
+## Loop 6 — 2026-08-10
+
+- **问题**：今日开发摘要把扫描事件直接呈现为“今日提交”，活动记录只显示布尔状态；稀疏历史会因空天数按 0 参与平均而放大趋势；读取失败和首次/跨日未扫描状态没有在摘要中显式区分。
+- **证据**：
+  - `DailyDevelopmentSummaryBuilder` 原实现对前 7 天所有日桶求平均，仅用 `hasPreviousActivity` 判断是否可用；今天 1 次提交、前 7 天仅 1 天 1 次提交时平均值为 `1/7`，会误报增长。
+  - `TodayDevelopmentSummaryView` 原实现将第四张卡片渲染为“有活动/暂无活动”，且仅接收 `activityEvents`，无法区分首次扫描、跨日未扫描和今天确实无变化。
+  - 原逻辑过滤 `.readFailed` 后不保留异常提示，读取异常会与“暂无活动”混淆。
+- **原因**：属于用户可见的数据正确性和空/异常状态问题，且可在摘要层复用已有扫描事件和刷新状态解决，不触碰扫描管线或 Widget 契约。
+- **修改**：
+  - `DailyDevelopmentSummary.swift`：明确提交统计为“扫描检测到的提交变化”；新增真实活动记录数、读取异常项目数和有效历史活动日数；趋势平均仅使用近 7 天内有开发变化的日期，并保留读取失败告警信息。
+  - `TodayDevelopmentSummaryView.swift`：提交卡片改为“发现新提交”，活动卡片显示数量；补充有读取异常、首次成功扫描、跨日未扫描、今日无变化和扫描进行中的状态展示；趋势和底部说明明确“有活动日均”语义。
+  - `ContentView.swift`：向摘要传入 `lastSuccessfulRefreshAt` 与 `isScanning`，沿用现有刷新状态来源。
+  - `DailyDevelopmentSummaryTests.swift`：更新稀疏历史趋势预期，新增活动数、稀疏平均和读取失败告警覆盖。
+- **验证**：
+  - `bash ./scripts/verify.sh build` → Build succeeded。
+  - `bash ./scripts/verify.sh test DevPulseTests/DailyDevelopmentSummaryTests` → tests passed。
+  - `bash ./scripts/verify.sh widgetkit` → 15 PASS, 0 FAIL。
+  - `bash ./scripts/verify.sh final` → full test suite passed，Final acceptance passed。
+  - `git diff --check` → 通过；无生成物或 Widget/扫描管线改动。
+- **剩余风险**：摘要仍基于有界的本地扫描变化事件，无法推断未运行 DevPulse 期间的真实提交总数；专注时间仍是事件间隔估算，视觉效果需在 macOS App 中手动确认。
+
+---
+
+## Loop 7 — 2026-08-10
+
+- **问题**：无（本轮判定无高价值问题，记录「无变更」）。
+- **证据**：
+  - 工作区存在用户未提交改动，范围为 `DailyDevelopmentSummary` 及其视图/测试与本记录；本轮未覆盖或回退这些改动。
+  - 最近提交：`git log --oneline -15` → HEAD `60683d3 docs(agent): record maintenance loop 4`。
+  - `grep -rn -e TODO -e FIXME DevPulseNative/` → 无匹配。
+  - 本轮 `bash ./scripts/verify.sh build` → `[verify] Build succeeded`。
+  - 受影响定向测试 `bash ./scripts/verify.sh test DevPulseTests/DailyDevelopmentSummaryTests` → `tests passed`。
+  - `git diff --check` → 通过；本轮无新增业务行为或用户反馈。
+- **原因**：没有新的可复现 Bug、失败测试、明确行为异常、稳定性/性能风险或测试缺口；按规则「没有足够证据 → 不修改」。
+- **修改**：无业务代码修改；仅追加本轮 Loop 记录。
+- **验证**：上述 build、定向测试和 `git diff --check` 均通过。
+- **剩余风险**：工作区原有未提交改动仍需其作者审阅；Loop 6 已注明的摘要视觉布局与首次/跨日数据状态仍需 macOS App 手动确认；本轮未运行完整测试套件。
+
+---
+
+## Loop 8 — 2026-08-10（项目健康状态概览：复用并验证现有未提交实现）
+
+- **问题**：目标「为 DevPulse 增加项目健康状态概览」；工作区已存在未提交实现（`RepositoryHealthOverview.swift` / `RepositoryHealthOverviewView.swift` / `RepositoryHealthOverviewTests.swift` + `ContentView.swift` 接入 + pbxproj 成员），按计划复用并验证，而非重写。
+- **证据**：
+  - 四维覆盖复核：最近活动时间（`lastActivityAt` → `lastChangedAt` 兜底）、仓库状态（clean / changed 计数 / error）、扫描状态（current / lastSuccessful / unknown / unavailable / error，优先级 unavailable > current > lastSuccessful > unknown/error）、活跃程度（≤24h 活跃、≤7d 一般、>7d 沉寂、无记录无活动）。
+  - 纯派生约束：`RepositoryHealthOverview.swift` 与视图文件 grep 无 `ProcessRunner` / git / URLSession / FileManager / Timer / Task / async / await；数据源只读 `scheduler.lastResult.repositories`（`AppGroupData`）。
+  - 范围：`git status` / `git diff --stat` 改动仅限三个概览新文件 + `ContentView.swift` 接入 + pbxproj 新文件成员；扫描链路（GitRepositoryScanner / RefreshEngine / ScanScheduler / SharedSnapshotStore / AppGroupStore / Models / project.yml）零改动；`git diff --check` 通过。
+- **原因**：实现已符合计划验收标准，验证路径为「编译链接 + 纯派生单元测试 + 源码结构审查」。
+- **修改**：无代码改动（复用既有未提交实现并验证）。
+- **验证**：
+  - `bash ./scripts/verify.sh build` → Build succeeded；直跑 `build-for-testing` → `** TEST BUILD SUCCEEDED **`，概览三文件均编译进 app / 测试 target。
+  - `bash ./scripts/verify.sh test DevPulseTests/RepositoryHealthOverviewTests` → tests passed；直跑 test-without-building → 21 个用例全部通过、0 失败。
+  - `bash ./scripts/verify.sh final` → Final acceptance passed；直跑全量 test-without-building → `Test run with 832 tests passed`、`** TEST EXECUTE SUCCEEDED **`、0 失败。
+- **剩余风险**：概览为 macOS 原生 GUI，CLI 无法无头启动窗口做端到端视觉验证；四维行的最终视觉布局需签名安装后在 App 中人工确认（计划已列入剩余风险）。
+
+---
+
+## Loop 9 — 2026-08-10（执行维护循环后合并提交推送前）
+
+- **问题**：无（本轮判定无高价值问题，记录「无变更」后进入合并提交推送流程）。
+- **证据**：
+  - 工作区未提交改动 = 用户既有 WIP（`DailyDevelopmentSummary` 系列，Loop 6/7）+ 项目健康状态概览（`RepositoryHealthOverview` 系列 + `ContentView` 接入 + pbxproj 成员，Loop 8）+ `.agent/history.md` 记录；`git status --porcelain=v2 --branch` → `branch.ab +0 -0`，HEAD `60683d3`，与 origin/main 同步。
+  - `grep -rn -e TODO -e FIXME DevPulseNative/` → 无匹配。
+  - 本轮 `bash ./scripts/verify.sh build` → `[verify] Build succeeded`（编译基线正常）。
+  - `git diff --check` → 通过。
+  - Loop 8 已对该工作树跑全量测试：`Test run with 832 tests passed`、`** TEST EXECUTE SUCCEEDED **`、0 失败。
+- **原因**：无新增可复现 Bug / 测试失败 / 行为异常 / 用户反馈；按规则「没有足够证据 → 不修改」。用户授权将既有未提交改动合并提交并推送。
+- **修改**：无代码改动；追加本轮 Loop 记录。
+- **验证**：build 通过、diff --check 通过（全量测试证据沿用 Loop 8 同一工作树结果）。
+- **剩余风险**：概览与摘要的最终视觉布局仍需签名安装后在 macOS App 中人工确认。
