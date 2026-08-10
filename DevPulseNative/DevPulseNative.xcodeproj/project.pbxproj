@@ -81,6 +81,7 @@
 		998D6C47DA344299BA8ECE32 /* AnalysisCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3E6EF5E7EDCA17FE9EE9CD0 /* AnalysisCache.swift */; };
 		9B01E92C9CF771D753C49343 /* PendingItemNotificationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BDBBAA1899120A5A68273B7 /* PendingItemNotificationStore.swift */; };
 		9B19A55E5FC74558F4E6FB3E /* AppGroupStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5466A47E7000C06E8F25116F /* AppGroupStore.swift */; };
+		9D84F3F90B2CCE0AA127BA81 /* DailyDevelopmentSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 698CC214DDF7CDBF9A96146C /* DailyDevelopmentSummary.swift */; };
 		9DCD2F1F6A28D3A9708D26FD /* FileCategoryClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FC3F7A1C981438F997EE56F /* FileCategoryClassifier.swift */; };
 		9E00F89F4C14534E5665E091 /* SharedSnapshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E71B108728D45F02D3FFBAD2 /* SharedSnapshotStore.swift */; };
 		9F4ECE573F04F84D9E73B2A6 /* ChangeImpactDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BBDC6D1EB593E4452622EF9 /* ChangeImpactDiagnostics.swift */; };
@@ -105,6 +106,7 @@
 		C45996D1F2C316A0C59224B5 /* LifecycleIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC0D8FCCB223755048CB3FDE /* LifecycleIntegrationTests.swift */; };
 		CE1614797CB028768F0D21B6 /* LaunchAtLoginController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DE4B7BA5FC4D5078129AEE9 /* LaunchAtLoginController.swift */; };
 		CE4CE8E2E9E2299A0EA65298 /* ImpactPropagationEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3E3AAB1F6A9DB3247FDE9BB /* ImpactPropagationEngine.swift */; };
+		D0FEF8C629D353E121F8924C /* DailyDevelopmentSummaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A98FC43933C8DF73FD989C7F /* DailyDevelopmentSummaryTests.swift */; };
 		D11F728D12D9F5CE98F72397 /* ScanLocationProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = BADDD7619E8E0E8039AA7191 /* ScanLocationProvider.swift */; };
 		D2D94BC43DAA71525D5C7DDD /* PendingItemEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46A07EDB2AD5CCB309A2E38A /* PendingItemEvaluator.swift */; };
 		D5C29D5E66379FD6644FE3FC /* CommitReadinessEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = F57AB6845B384BF0D02696FE /* CommitReadinessEngine.swift */; };
@@ -129,6 +131,7 @@
 		FB29D9E09ED33D3ACE700E55 /* FileCategoryClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAB879833D061CF68A12B3FD /* FileCategoryClassifierTests.swift */; };
 		FCE281428C518AFEB049B14D /* BuildConfigConsistencyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47E6795FFA7C4C7B1687D59D /* BuildConfigConsistencyTests.swift */; };
 		FD91F63465149AA13A9675BD /* DevPulseWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 193D9DD3EE1AFEEAD2F6BD9B /* DevPulseWidget.swift */; };
+		FECE954C9C32B0BBBD8C69E9 /* TodayDevelopmentSummaryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D76819B413383311C227DE72 /* TodayDevelopmentSummaryView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -214,6 +217,7 @@
 		620FF1BB48B7D01C3F3053C3 /* RegressionGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RegressionGate.swift; sourceTree = "<group>"; };
 		68DFF34995F91119178611A4 /* RefreshEngineIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RefreshEngineIntegrationTests.swift; sourceTree = "<group>"; };
 		6905C32690CB29628B456791 /* LaunchAtLoginControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchAtLoginControllerTests.swift; sourceTree = "<group>"; };
+		698CC214DDF7CDBF9A96146C /* DailyDevelopmentSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyDevelopmentSummary.swift; sourceTree = "<group>"; };
 		6B83D6676ABCBF8EC2ECC312 /* CommitReadinessBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommitReadinessBadge.swift; sourceTree = "<group>"; };
 		6B921ED1D9421AAA53BFE19C /* UnifiedLifecycleSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnifiedLifecycleSystem.swift; sourceTree = "<group>"; };
 		6C0803CED3ED0B599315D845 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -244,6 +248,7 @@
 		A3E6EF5E7EDCA17FE9EE9CD0 /* AnalysisCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisCache.swift; sourceTree = "<group>"; };
 		A5D455DE534BFFF61045A382 /* PendingItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingItem.swift; sourceTree = "<group>"; };
 		A744371F18D02CDEFFD89C4A /* BackupMergeResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupMergeResolver.swift; sourceTree = "<group>"; };
+		A98FC43933C8DF73FD989C7F /* DailyDevelopmentSummaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyDevelopmentSummaryTests.swift; sourceTree = "<group>"; };
 		AB1A1522AC03BFB505888F70 /* RepositoryDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryDetailView.swift; sourceTree = "<group>"; };
 		AC44F1EA75D3F120FE363517 /* RepositoryHistoryEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryHistoryEntry.swift; sourceTree = "<group>"; };
 		B33FBC37F193D2A7308A29DA /* WorkspaceDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDetailView.swift; sourceTree = "<group>"; };
@@ -265,6 +270,7 @@
 		CC5BDD5A5BB8B8572ABF035A /* ImpactOverviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImpactOverviewView.swift; sourceTree = "<group>"; };
 		CF683314F14D97DC1AB36120 /* ScenarioGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScenarioGenerator.swift; sourceTree = "<group>"; };
 		D142EDD66FD491D63230418F /* ReleaseReadinessEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReleaseReadinessEngineTests.swift; sourceTree = "<group>"; };
+		D76819B413383311C227DE72 /* TodayDevelopmentSummaryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TodayDevelopmentSummaryView.swift; sourceTree = "<group>"; };
 		D8015118F910E22CA99AAF4B /* ImpactPropagationEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImpactPropagationEngineTests.swift; sourceTree = "<group>"; };
 		D841CCB9CB4CD3921CB11160 /* GitStatusParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitStatusParser.swift; sourceTree = "<group>"; };
 		DC0D8FCCB223755048CB3FDE /* LifecycleIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LifecycleIntegrationTests.swift; sourceTree = "<group>"; };
@@ -368,6 +374,7 @@
 				E13C2425946524467A7DE5BD /* ChangeImpactStore.swift */,
 				6B83D6676ABCBF8EC2ECC312 /* CommitReadinessBadge.swift */,
 				F57AB6845B384BF0D02696FE /* CommitReadinessEngine.swift */,
+				698CC214DDF7CDBF9A96146C /* DailyDevelopmentSummary.swift */,
 				097812C7417A0B2A649EAA68 /* DependencyInferenceEngine.swift */,
 				4B086D3B23AF18A17561FA07 /* DiagnosticMigration.swift */,
 				3FE5420253894ED36B74D9DF /* DiagnosticReport.swift */,
@@ -436,6 +443,7 @@
 				5372E9A7A4D214017A6A3E05 /* RepositoryListView.swift */,
 				317BDD24648E8023D33489F0 /* ScanStatusView.swift */,
 				430D01D16B454ECCF1FD87B6 /* SettingsView.swift */,
+				D76819B413383311C227DE72 /* TodayDevelopmentSummaryView.swift */,
 				B33FBC37F193D2A7308A29DA /* WorkspaceDetailView.swift */,
 				DFE617E9CBD6118C3B6BF10B /* WorkspaceListView.swift */,
 			);
@@ -453,6 +461,7 @@
 				048FC2CF2173C1D892EC77ED /* CommitReadinessEngineTests.swift */,
 				063E338F89DD7847F4B6F450 /* CrossProcessConcurrencyTests.swift */,
 				2BB1A121BDF872845E028B42 /* CrossProcessPipelineTests.swift */,
+				A98FC43933C8DF73FD989C7F /* DailyDevelopmentSummaryTests.swift */,
 				5FD66E90A974075BC0D66016 /* DataFreshnessStateTests.swift */,
 				CAB879833D061CF68A12B3FD /* FileCategoryClassifierTests.swift */,
 				D8015118F910E22CA99AAF4B /* ImpactPropagationEngineTests.swift */,
@@ -637,6 +646,7 @@
 				AC5843D6975B89D2C8ECDB28 /* CommitReadinessEngineTests.swift in Sources */,
 				450AE7616CDDE6EF3CD4E68F /* CrossProcessConcurrencyTests.swift in Sources */,
 				6B483934B4FE0B83A25EF106 /* CrossProcessPipelineTests.swift in Sources */,
+				D0FEF8C629D353E121F8924C /* DailyDevelopmentSummaryTests.swift in Sources */,
 				E75AC50DC06518A792C0474D /* DataFreshnessStateTests.swift in Sources */,
 				FD91F63465149AA13A9675BD /* DevPulseWidget.swift in Sources */,
 				FB29D9E09ED33D3ACE700E55 /* FileCategoryClassifierTests.swift in Sources */,
@@ -708,6 +718,7 @@
 				34042E4DE0DC21FD99275E03 /* CommitReadinessBadge.swift in Sources */,
 				D5C29D5E66379FD6644FE3FC /* CommitReadinessEngine.swift in Sources */,
 				5FFD80DCF59731AFD754DB3F /* ContentView.swift in Sources */,
+				9D84F3F90B2CCE0AA127BA81 /* DailyDevelopmentSummary.swift in Sources */,
 				E76DF359857A4DB4A65D11A7 /* DateFormatting.swift in Sources */,
 				B3CFFFC70C5D198A78D32D0B /* DependencyInferenceEngine.swift in Sources */,
 				5A48594A116CA9170601D985 /* DevPulseApp.swift in Sources */,
@@ -753,6 +764,7 @@
 				20A336F3EFA672F008D452E4 /* SettingsView.swift in Sources */,
 				3A53ECD0BEABA5A9FB370792 /* SharedSnapshotStore.swift in Sources */,
 				C2FC7F15EA6C36092792324F /* StartupDiagnostics.swift in Sources */,
+				FECE954C9C32B0BBBD8C69E9 /* TodayDevelopmentSummaryView.swift in Sources */,
 				BE01D2FC2D4201596B0A602B /* UnifiedLifecycleSystem.swift in Sources */,
 				833F0CD938C2F79B70A2C386 /* WorkspaceAggregationEngine.swift in Sources */,
 				932E31C7DADDBAC455692186 /* WorkspaceAutoSuggestEngine.swift in Sources */,
