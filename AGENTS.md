@@ -29,7 +29,7 @@ git config core.hooksPath .githooks
 
 ```
 .
-├── .agent/                   # Evidence-driven Maintenance Loop (loop.md/rules.md/memory.md/history.md)
+├── .agent/                   # Evidence-driven Maintenance Loop (loop.md/rules.md/memory.md/history.md/archive/)
 ├── .claude/worktrees/        # Claude worktree sessions
 ├── .githooks/
 │   ├── pre-commit            # runs scripts/secret-scan.sh staged
@@ -40,7 +40,7 @@ git config core.hooksPath .githooks
 │   │   └── Backup/           # backup/restore engine, migration, privacy filter, retention
 │   ├── Utilities/            # ProcessRunner, DateFormatting
 │   ├── Widget/               # WidgetKit extension (DevPulseWidget.swift, entitlements, plist)
-│   ├── DevPulseNativeTests/  # Swift Testing coverage (30+ test files)
+│   ├── DevPulseNativeTests/  # Swift Testing coverage (36 test files)
 │   ├── Assets.xcassets/      # app icon
 │   ├── project.yml           # XcodeGen declarative project spec
 │   └── AGENTS.md             # detailed native-app agent guidelines
@@ -54,6 +54,7 @@ git config core.hooksPath .githooks
 │   ├── verify-activity-timeline.sh  # activity timeline logic check
 │   ├── secret-scan.sh               # secrets scanning (staged/tracked)
 │   ├── generate-icon.mjs            # app icon generation
+│   ├── build-and-install.sh         # 通用多项目签名安装脚本（DevPulse/TinyBuddy 等）
 │   └── build-and-install.sh.disabled  # replaced by install-and-self-check.sh
 ├── docs/
 │   └── widgetkit-troubleshooting.md
@@ -111,6 +112,7 @@ Boundary rules in this file and `DevPulseNative/AGENTS.md` take precedence.
 | `ReleaseReadinessEngine.swift` | release readiness assessment |
 | `RiskHintEngine.swift` | flag risky changes |
 | `RepositoryHealthEngine.swift` | repository health analysis |
+| `RepositoryHealthOverview.swift` | repository health overview + composite score derivation |
 | `RegressionGate.swift` | regression detection |
 
 ### Activity & Events
@@ -118,6 +120,7 @@ Boundary rules in this file and `DevPulseNative/AGENTS.md` take precedence.
 | File | Purpose |
 |------|---------|
 | `ActivityEvent.swift` | activity event model and derivation |
+| `DailyDevelopmentSummary.swift` | today development summary derivation from activity events |
 | `RepositorySorter.swift` | sort repos by recency, dirtiness, branch |
 
 ### Refresh & Lifecycle
@@ -196,6 +199,7 @@ Boundary rules in this file and `DevPulseNative/AGENTS.md` take precedence.
 | `CommitReadinessEngineTests.swift` | readiness rules |
 | `CrossProcessConcurrencyTests.swift` | cross-process concurrency safety |
 | `CrossProcessPipelineTests.swift` | cross-process pipeline integrity |
+| `DailyDevelopmentSummaryTests.swift` | today development summary derivation |
 | `DataFreshnessStateTests.swift` | data freshness state management |
 | `FileCategoryClassifierTests.swift` | file classification |
 | `ImpactPropagationEngineTests.swift` | impact propagation |
@@ -212,8 +216,11 @@ Boundary rules in this file and `DevPulseNative/AGENTS.md` take precedence.
 | `ReliabilityLabTests.swift` | reliability stress tests |
 | `RepositoryDiscoveryExperienceTests.swift` | discovery flow |
 | `RepositoryHistoryStoreTests.swift` | repository history persistence |
+| `RepositoryHealthOverviewTests.swift` | repository health overview scoring |
 | `ScanConcurrencyTests.swift` | scan concurrency |
+| `ScanConfigSanitizationTests.swift` | scan config value sanitization/clamping |
 | `ScanDataConsistencyTests.swift` | scan data consistency |
+| `ScannerTimeoutErrorTests.swift` | timeout continuation double-resume safety |
 | `ScanPerformanceTests.swift` | scanning performance |
 | `SharedSnapshotStoreTests.swift` | snapshot persistence |
 | `SnapshotStoreRecoveryTests.swift` | snapshot store recovery |
@@ -318,6 +325,7 @@ in seconds.
 | `Core/Backup/*.swift` | `DevPulseTests/BackupEngineTests` |
 | `Core/ChangeImpact*.swift` | `DevPulseTests/ChangeImpactDataModelTests` |
 | `Core/CommitReadinessEngine.swift` | `DevPulseTests/CommitReadinessEngineTests` |
+| `Core/DailyDevelopmentSummary.swift` | `DevPulseTests/DailyDevelopmentSummaryTests` |
 | `Core/FileCategoryClassifier.swift` | `DevPulseTests/FileCategoryClassifierTests` |
 | `Core/ImpactPropagationEngine.swift` | `DevPulseTests/ImpactPropagationEngineTests` |
 | `Core/LaunchAtLoginController.swift` | `DevPulseTests/LaunchAtLoginControllerTests` |
@@ -326,12 +334,13 @@ in seconds.
 | `Core/RefreshEngine.swift` | `DevPulseTests/RefreshEngineIntegrationTests`, `DevPulseTests/RefreshCompletionTests` |
 | `Core/ReleaseReadinessEngine.swift` | `DevPulseTests/ReleaseReadinessEngineTests` |
 | `Core/RepositoryHistoryStore.swift` | `DevPulseTests/RepositoryHistoryStoreTests` |
+| `Core/RepositoryHealthOverview.swift` | `DevPulseTests/RepositoryHealthOverviewTests` |
 | `Core/ScanScheduler.swift` | `DevPulseTests/CommitReadinessEngineTests` |
 | `Core/SharedSnapshotStore.swift` | `DevPulseTests/SharedSnapshotStoreTests`, `DevPulseTests/SnapshotStoreRecoveryTests` |
 | `Core/UnifiedLifecycleSystem.swift` | `DevPulseTests/LifecycleIntegrationTests`, `DevPulseTests/LifecycleSystemTests`, `DevPulseTests/LifecycleSleepWakeTests` |
 | `Core/Workspace*.swift` | `DevPulseTests/WorkspaceModelTests` |
 | repository discovery | `DevPulseTests/RepositoryDiscoveryExperienceTests` |
-| scanning / concurrency | `DevPulseTests/ScanPerformanceTests`, `DevPulseTests/ScanConcurrencyTests` |
+| scanning / concurrency | `DevPulseTests/ScanPerformanceTests`, `DevPulseTests/ScanConcurrencyTests`, `DevPulseTests/ScanConfigSanitizationTests`, `DevPulseTests/ScannerTimeoutErrorTests` |
 | data consistency | `DevPulseTests/ScanDataConsistencyTests`, `DevPulseTests/DataFreshnessStateTests` |
 | Widget extension | `DevPulseTests/WidgetDegradedRenderingTests`, `DevPulseTests/WidgetLifecycleScenariosTests` |
 | Lifecycle / sleep-wake | `DevPulseTests/LifecycleIntegrationTests`, `DevPulseTests/LifecycleSystemTests`, `DevPulseTests/LifecycleSleepWakeTests` |

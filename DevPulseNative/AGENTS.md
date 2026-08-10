@@ -16,16 +16,16 @@ The scanner currently derives state from `git status --porcelain=v2 --branch` an
 
 ## Repository Layout
 
-- `App/`: SwiftUI app entry point, repository screens, activity timeline, pending center (PendingCenterView, PendingItemDetailView), settings, and diagnostics UI
-- `Core/`: repository discovery and scanning, scheduling, readiness/risk logic, models, activity events, pending items (PendingItem, PendingItemStore, PendingItemEvaluator, PendingItemNotificationStore), launch-at-login, and shared snapshot persistence
+- `App/`: SwiftUI app entry point, repository screens, repository health overview (RepositoryHealthOverviewView), today development summary (TodayDevelopmentSummaryView), activity timeline, pending center (PendingCenterView, PendingItemDetailView), settings, and diagnostics UI
+- `Core/`: repository discovery and scanning, scheduling, readiness/risk logic, repository health overview and daily summary derivation, models, activity events, pending items (PendingItem, PendingItemStore, PendingItemEvaluator, PendingItemNotificationStore), launch-at-login, and shared snapshot persistence
 - `Utilities/`: process execution and date formatting helpers
 - `Widget/`: WidgetKit extension and its property list/entitlements
-- `DevPulseNativeTests/`: Swift Testing coverage for scanning, discovery, readiness, activity events, snapshots, performance, and launch-at-login
+- `DevPulseNativeTests/`: Swift Testing coverage for scanning, discovery, readiness, health overview, development summary, activity events, snapshots, performance, and launch-at-login
 - `Assets.xcassets/`: app icon and asset catalog
 - `project.yml`: XcodeGen project definition
 - `DevPulseNative.xcodeproj/`: checked-in Xcode project and shared schemes
 
-There are currently no repository-owned `scripts/` or `docs/` verification entry points. Do not cite or depend on nonexistent helpers.
+Repository-root `scripts/` provides the unified verification entry points (`verify.sh`, `verify-widgetkit.sh`, `verify-activity-timeline.sh`, `install-and-self-check.sh`); see the Build and Test section below. Do not cite or depend on helpers that do not exist.
 
 ## Project Configuration
 
@@ -121,17 +121,20 @@ bundle — no recompilation, re-linking, or re-indexing.
 |----------------------------------|--------------------------------------------------|
 | `Core/ActivityEvent.swift`       | `DevPulseTests/ActivityEventTests`               |
 | `Core/CommitReadiness*.swift`    | `DevPulseTests/CommitReadinessEngineTests`       |
+| `Core/DailyDevelopmentSummary.swift` | `DevPulseTests/DailyDevelopmentSummaryTests`  |
 | `Core/LaunchAtLoginController.swift` | `DevPulseTests/LaunchAtLoginControllerTests`  |
 | `Core/Models.swift`              | `DevPulseTests/SharedSnapshotStoreTests`, `DevPulseTests/ActivityEventTests` |
 | `Core/PendingItem*.swift`        | `DevPulseTests/PendingItemStaleLifecycleTests`   |
 | `Core/SharedSnapshotStore.swift` | `DevPulseTests/SharedSnapshotStoreTests`         |
 | `Core/RefreshEngine.swift`       | `DevPulseTests/RefreshEngineIntegrationTests`    |
+| `Core/RepositoryHealthOverview.swift` | `DevPulseTests/RepositoryHealthOverviewTests` |
+| `Core/RepositoryHistoryStore.swift` | `DevPulseTests/RepositoryHistoryStoreTests`   |
 | `Core/ScanScheduler.swift`       | `DevPulseTests/CommitReadinessEngineTests`       |
 | repository discovery             | `DevPulseTests/RepositoryDiscoveryExperienceTests` |
-| scanning / performance           | `DevPulseTests/ScanPerformanceTests`             |
+| scanning / performance           | `DevPulseTests/ScanPerformanceTests`, `DevPulseTests/ScanConfigSanitizationTests`, `DevPulseTests/ScannerTimeoutErrorTests` |
 | data consistency                 | `DevPulseTests/ScanDataConsistencyTests`         |
 | Widget extension                 | `DevPulseTests/WidgetDegradedRenderingTests`, `DevPulseTests/WidgetLifecycleScenariosTests` |
-| Lifecycle / sleep-wake           | `DevPulseTests/LifecycleIntegrationTests`, `DevPulseTests/LifecycleSystemTests` |
+| Lifecycle / sleep-wake           | `DevPulseTests/LifecycleIntegrationTests`, `DevPulseTests/LifecycleSystemTests`, `DevPulseTests/LifecycleSleepWakeTests` |
 | Build config consistency         | `DevPulseTests/BuildConfigConsistencyTests`      |
 
 ### Timeouts and failure logs
