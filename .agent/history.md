@@ -290,3 +290,51 @@
 - **修改**：无（零代码变更，未强行修改）。
 - **验证**：`bash ./scripts/verify.sh build` → `[verify] Build succeeded`（确认编译基线）；`git status` / `git log` / `grep` 结果均无异常。
 - **剩余风险**：本轮未运行完整测试套件（无具体问题指向时不强制，见 `loop.md`）；Loop 10/11 已注明的「需手动确认」项（评分视觉布局、基于最近快照的评分估计）仍需人工确认。
+
+---
+
+## Loop 13 — 2026-08-11（开发信息总览体验优化）
+
+- **问题**：Overview 中今日摘要、最近变化、项目健康和趋势各自占据完整区块，存在统计口径提示重复、活动记录与变化列表语义不清、健康问题可能被最近活动项目挤到后面，以及首次扫描/扫描中/读取异常状态不够突出的体验问题。
+- **证据**：
+  - `TodayDevelopmentSummaryView` 原先在三个指标卡片内重复显示「近 7 天有活动日均」长趋势文案，第四张「活动记录」卡片又重复了最近变化列表的记录数量。
+  - `RepositoryHealthOverviewBuilder` 原实现仅按最近活动时间排序，健康分较低、仓库不可用或数据不足的项目可能排在健康项目之后。
+  - `StatusTab` 原先把刷新状态放在页面底部；摘要与健康视图分别调用 `Date()`，跨日重绘时可能使用不同的参照日；健康和最近变化空态未单独说明扫描进行中。
+- **原因**：这是用户打开 Overview 后快速理解当前开发状态的直接阻碍，属于用户可见的信息优先级、数据口径和异常状态问题；可在既有内存派生与 SwiftUI 展示层解决，不触碰扫描、共享快照或 Widget 链路。
+- **修改**：
+  - `App/ContentView.swift`：Overview 先展示刷新可信度，再展示今日摘要、项目健康和最近变化；同一次 body 使用统一 `now` 传给摘要与健康派生。
+  - `App/TodayDevelopmentSummaryView.swift`：将指标收敛为提交/活跃项目/估算专注时间，新增单一「开发趋势」区块，集中说明比较口径；强化读取异常、扫描中、首次扫描、跨日未扫描和今日无变化空态，减少无历史时的重复提示。
+  - `App/RepositoryHealthOverviewView.swift`：健康问题优先、分数徽标突出，健康行不重复渲染解释；增加整体状态汇总、扫描中/失败/降级/首次扫描空态。
+  - `App/ActivityTimelineView.swift`：改为「最近变化」，默认只展示最近 8 条并保留「显示全部」入口，单独提示冲突/读取异常；不再重复渲染无需动作的建议。
+  - `Core/RepositoryHealthOverview.swift`：增加与实际行同源的状态汇总，并按健康严重度/分数优先排序。
+  - `DevPulseNativeTests/RepositoryHealthOverviewTests.swift`：更新排序预期，覆盖概览汇总与数据异常计数一致性。
+- **验证**：
+  - `bash ./scripts/verify.sh build` → Build succeeded。
+  - `bash ./scripts/verify.sh test DevPulseTests/DailyDevelopmentSummaryTests` → tests passed。
+  - `bash ./scripts/verify.sh test DevPulseTests/RepositoryHealthOverviewTests` → tests passed。
+  - `bash ./scripts/verify.sh widgetkit` → 15 PASS, 0 FAIL。
+  - `bash ./scripts/verify.sh final` → full test suite passed，Final acceptance passed。
+  - `git diff --check` → 通过；未修改扫描、共享快照、Widget 源文件或项目配置。
+- **剩余风险**：CLI 无法证明 macOS 窗口在最小宽度下的最终视觉换行、滚动高度和颜色对比，需在应用窗口中手动确认；未执行签名安装或运行时视觉验收。
+
+---
+
+## Loop 14 — 2026-08-11（复验现有总览体验改动并完成签名安装）
+
+- **问题**：无（本轮未发现新的高价值问题）；工作区已有 Loop 13 的总览体验改动，本轮只复验、签名安装并运行新 App，未重写或扩大业务范围。
+- **证据**：
+  - `git status --porcelain=v2 --branch` → `main` 与 `origin/main` 同步，已有 7 个未提交文件；改动集中在总览视图、健康派生逻辑、健康测试和 Loop 记录。
+  - `grep -rn -e TODO -e FIXME DevPulseNative/` → 无匹配。
+  - `git diff --check` → 通过。
+  - 本轮无新的 Bug 复现、失败测试或具体行为异常反馈。
+- **原因**：没有新证据支持业务修改；最高价值动作是确认现有改动可构建、测试通过，并完成用户要求的签名安装运行验收。
+- **修改**：无业务代码修改；追加本轮 Loop 记录。
+- **验证**：
+  - `bash ./scripts/verify.sh build` → Build succeeded。
+  - `bash ./scripts/verify.sh test DevPulseTests/DailyDevelopmentSummaryTests` → tests passed。
+  - `bash ./scripts/verify.sh test DevPulseTests/RepositoryHealthOverviewTests` → tests passed。
+  - `bash ./scripts/verify.sh widgetkit` → 15 PASS, 0 FAIL。
+  - `bash ./scripts/verify.sh final` → full test suite passed，Final acceptance passed。
+  - 标准 `bash ./scripts/install-and-self-check.sh` → 被本机环境阻塞：`No Xcode Apple account is configured on this Mac`。
+  - 使用当前已安装且匹配 bundle 的本地签名资料完成手动签名安装：`codesign --verify --deep --strict` 通过；`/Applications/DevPulse.app` 运行进程路径校验通过；测试 bundle 不存在；`--self-check` → `self_check.result=pass`、`self_check.validation=pass`、`lifecycle.widget_registration=active`。
+- **剩余风险**：标准自动签名流程仍需在 Xcode 登录 Apple 账号并刷新 provisioning profiles；本次手动签名安装和运行时自检已通过，但 Overview 最小窗口下的最终视觉换行、滚动高度和颜色对比仍需人工确认。

@@ -165,7 +165,9 @@ struct StatusTab: View {
     let openDiagnostics: () -> Void
 
     var body: some View {
-        ScrollView {
+        let now = Date()
+
+        return ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 OverviewFocusCard(
                     openRepositories: openRepositories,
@@ -173,14 +175,24 @@ struct StatusTab: View {
                     openDiagnostics: openDiagnostics
                 )
 
-                RepositoryHealthOverviewView(
-                    repositories: scheduler.lastResult.repositories
-                )
+                // 先给出快照可信度，再展示今天和近期的开发信息；本次 body
+                // 使用同一个 now，避免摘要与健康状态在跨日瞬间出现不一致。
+                refreshStatus
 
                 TodayDevelopmentSummaryView(
                     events: scheduler.activityEvents,
                     lastScanAt: scheduler.lastSuccessfulRefreshAt,
-                    isScanning: scheduler.isScanning
+                    isScanning: scheduler.isScanning,
+                    now: now
+                )
+
+                RepositoryHealthOverviewView(
+                    repositories: scheduler.lastResult.repositories,
+                    now: now,
+                    lastSuccessfulScanAt: scheduler.lastSuccessfulRefreshAt,
+                    isScanning: scheduler.isScanning,
+                    refreshPhase: scheduler.refreshPhase,
+                    refreshFailureMessage: scheduler.refreshFailureMessage
                 )
 
                 ActivityTimelineView(
@@ -190,8 +202,6 @@ struct StatusTab: View {
                     isScanning: scheduler.isScanning,
                     onRescan: scheduler.rescan
                 )
-
-                refreshStatus
             }
             .padding(DevPulseVisualStyle.pageInset)
         }

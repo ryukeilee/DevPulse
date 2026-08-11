@@ -110,6 +110,34 @@ struct RepositoryHealthScore: Equatable {
     }
 }
 
+/// 概览头部使用的健康状态汇总。它只汇总已经生成的行，避免视图各自
+/// 根据快照重新解释状态，确保数量与下面实际展示的项目完全一致。
+struct RepositoryHealthOverviewSummary: Equatable {
+    let totalCount: Int
+    let healthyCount: Int
+    let attentionCount: Int
+    let criticalCount: Int
+    let insufficientDataCount: Int
+    let unavailableCount: Int
+
+    /// 有健康分但需要处理的项目，不包含无法可靠评分的数据异常。
+    var needsAttentionCount: Int {
+        attentionCount + criticalCount
+    }
+
+    var dataIssueCount: Int {
+        insufficientDataCount + unavailableCount
+    }
+
+    var hasDataIssues: Bool {
+        dataIssueCount > 0
+    }
+
+    var hasIssues: Bool {
+        needsAttentionCount > 0 || hasDataIssues
+    }
+}
+
 // MARK: 概览行
 
 /// 一个已扫描项目的健康概览行，同时携带最近活动、仓库状态、扫描状态、
@@ -132,8 +160,8 @@ struct RepositoryHealthOverviewItem: Identifiable, Equatable {
 // MARK: Builder
 
 /// 把 `[RepositorySnapshot]` 派生为概览行列表。纯函数：输入快照数组与
-/// 可选参照时间，无 I/O、无状态，输出按最近活动时间降序排列（无活动
-/// 记录的排最后，同名按名称排序保持稳定）。
+/// 可选参照时间，无 I/O、无状态，输出按健康严重度和分数优先排列；同一
+/// 严重度内再按最近活动时间排序，同名按名称排序保持稳定。
 enum RepositoryHealthOverviewBuilder {
     /// 活跃阈值：最近 24 小时内有活动为「活跃」
     static let activeThreshold: TimeInterval = 24 * 60 * 60
@@ -156,6 +184,18 @@ enum RepositoryHealthOverviewBuilder {
         snapshots
             .map { makeItem(snapshot: $0, now: now) }
             .sorted(by: ordering)
+    }
+
+    /// 汇总与 `build` 同一批行，供概览头部显示整体状态。
+    static func summary(for items: [RepositoryHealthOverviewItem]) -> RepositoryHealthOverviewSummary {
+        RepositoryHealthOverviewSummary(
+            totalCount: items.count,
+            healthyCount: items.filter { $0.healthScore.status == .healthy }.count,
+            attentionCount: items.filter { $0.healthScore.status == .attention }.count,
+            criticalCount: items.filter { $0.healthScore.status == .critical }.count,
+            insufficientDataCount: items.filter { $0.healthScore.status == .insufficientData }.count,
+            unavailableCount: items.filter { $0.healthScore.status == .unavailable }.count
+        )
     }
 
     /// 扫描状态分类。优先级：unavailable > current > lastSuccessful > unknown/error。
@@ -376,6 +416,25 @@ enum RepositoryHealthOverviewBuilder {
         _ lhs: RepositoryHealthOverviewItem,
         _ rhs: RepositoryHealthOverviewItem
     ) -> Bool {
+        let lhsPriority = healthStatusPriority(lhs.healthScore.status)
+        let rhsPriority = healthStatusPriority(rhs.healthScore.status)
+        if lhsPriority != rhsPriority {
+            return lhsPriority < rhsPriority
+        }
+
+        // 在同一严重度内先放分数更低的项目；用户打开 Overview 时，
+        // 需要处理的问题不会被刚刚有活动的健康项目挤到后面。
+        switch (lhs.healthScore.value, rhs.healthScore.value) {
+        case let (lhsValue?, rhsValue?) where lhsValue != rhsValue:
+            return lhsValue < rhsValue
+        case (nil, _?):
+            return true
+        case (_?, nil):
+            return false
+        default:
+            break
+        }
+
         switch (lhs.activityDate, rhs.activityDate) {
         case let (lhsDate?, rhsDate?):
             if lhsDate != rhsDate { return lhsDate > rhsDate }
@@ -386,6 +445,19 @@ enum RepositoryHealthOverviewBuilder {
             return false
         case (_, nil):
             return true
+        }
+    }
+
+    private static func healthStatusPriority(_ status: RepositoryHealthScoreStatus) -> Int {
+        switch status {
+        case .unavailable, .critical:
+            return 0
+        case .attention:
+            return 1
+        case .insufficientData:
+            return 2
+        case .healthy:
+            return 3
         }
     }
 }

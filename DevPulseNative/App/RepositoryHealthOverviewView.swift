@@ -8,9 +8,34 @@ import SwiftUI
 /// 新的扫描、Git 读取或文件读取。无已扫描项目时显示明确空态。
 struct RepositoryHealthOverviewView: View {
     let repositories: [RepositorySnapshot]
+    let now: Date
+    let lastSuccessfulScanAt: Date?
+    let isScanning: Bool
+    let refreshPhase: RefreshPhase
+    let refreshFailureMessage: String?
+
+    init(
+        repositories: [RepositorySnapshot],
+        now: Date = Date(),
+        lastSuccessfulScanAt: Date? = nil,
+        isScanning: Bool = false,
+        refreshPhase: RefreshPhase = .idle,
+        refreshFailureMessage: String? = nil
+    ) {
+        self.repositories = repositories
+        self.now = now
+        self.lastSuccessfulScanAt = lastSuccessfulScanAt
+        self.isScanning = isScanning
+        self.refreshPhase = refreshPhase
+        self.refreshFailureMessage = refreshFailureMessage
+    }
 
     private var items: [RepositoryHealthOverviewItem] {
-        RepositoryHealthOverviewBuilder.build(snapshots: repositories)
+        RepositoryHealthOverviewBuilder.build(snapshots: repositories, now: now)
+    }
+
+    private var overviewSummary: RepositoryHealthOverviewSummary {
+        RepositoryHealthOverviewBuilder.summary(for: items)
     }
 
     var body: some View {
@@ -20,6 +45,8 @@ struct RepositoryHealthOverviewView: View {
             if items.isEmpty {
                 emptyState
             } else {
+                statusSummary
+
                 VStack(spacing: 0) {
                     ForEach(items) { item in
                         row(for: item)
@@ -41,12 +68,13 @@ struct RepositoryHealthOverviewView: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text("项目健康状态")
                     .font(.headline)
-                Text("综合活跃度、维护状态、数据可信度和变更风险；共 \(items.count) 个已扫描项目。")
+                Text(headerSubtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Spacer()
@@ -58,28 +86,120 @@ struct RepositoryHealthOverviewView: View {
         }
     }
 
+    private var headerSubtitle: String {
+        guard !items.isEmpty else {
+            return "优先显示需要确认的项目；健康分基于当前可用快照。"
+        }
+        return "共 \(overviewSummary.totalCount) 个项目 · \(statusSummaryText)"
+    }
+
+    private var statusSummaryText: String {
+        var parts: [String] = []
+        if overviewSummary.healthyCount > 0 {
+            parts.append("\(overviewSummary.healthyCount) 个健康")
+        }
+        if overviewSummary.needsAttentionCount > 0 {
+            parts.append("\(overviewSummary.needsAttentionCount) 个需关注")
+        }
+        if overviewSummary.dataIssueCount > 0 {
+            parts.append("\(overviewSummary.dataIssueCount) 个数据待确认")
+        }
+        return parts.isEmpty ? "暂无可评估数据" : parts.joined(separator: " · ")
+    }
+
+    private var statusSummary: some View {
+        HStack(spacing: 7) {
+            Image(systemName: overviewSummary.hasIssues ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
+                .foregroundStyle(overviewSummary.hasIssues ? Color.orange : Color.green)
+
+            Text(
+                overviewSummary.needsAttentionCount > 0
+                    ? "已按需关注程度排序，先处理前面的项目。"
+                    : overviewSummary.hasDataIssues
+                        ? "部分项目数据待确认，健康分不会替代当前状态。"
+                        : "当前项目没有明显需要优先处理的问题。"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 1)
+    }
+
     private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Label("暂无已扫描项目", systemImage: "tray")
+        let state = emptyStateContent
+        return VStack(alignment: .leading, spacing: 5) {
+            Label(state.title, systemImage: state.systemImage)
                 .font(.callout.weight(.medium))
                 .foregroundStyle(.secondary)
-            Text("完成一次刷新后，这里将展示每个项目的健康状态概览。")
+            Text(state.detail)
                 .font(.caption)
                 .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.vertical, 8)
     }
 
-    private func row(for item: RepositoryHealthOverviewItem) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(item.name)
-                    .font(.callout.weight(.medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+    private var emptyStateContent: (title: String, detail: String, systemImage: String) {
+        if isScanning || refreshPhase == .refreshing {
+            return (
+                "正在建立项目健康状态",
+                "本轮扫描完成后，这里会展示项目健康分和需要确认的原因。",
+                "arrow.triangle.2.circlepath"
+            )
+        }
 
-                if !item.branch.isEmpty {
-                    Text(item.branch)
+        if refreshPhase == .failure {
+            return (
+                "扫描未完成，暂时无法评估项目",
+                refreshFailureMessage ?? "请检查扫描目录或权限后重新刷新。",
+                "exclamationmark.triangle"
+            )
+        }
+
+        if refreshPhase == .degraded {
+            return (
+                "扫描部分完成",
+                "当前没有可用的项目健康数据；请完成一次完整成功刷新后再判断状态。",
+                "exclamationmark.triangle"
+            )
+        }
+
+        if lastSuccessfulScanAt == nil {
+            return (
+                "等待首次成功扫描",
+                "完成一次成功刷新后，这里会展示每个项目的健康状态。",
+                "clock.badge.questionmark"
+            )
+        }
+
+        return (
+            "当前快照没有可评估项目",
+            "最近一次成功刷新没有发现可读取的 Git 仓库；可在 Settings 检查扫描目录。",
+            "tray"
+        )
+    }
+
+    private func row(for item: RepositoryHealthOverviewItem) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(alignment: .firstTextBaseline, spacing: 7) {
+                        Text(item.name)
+                            .font(.callout.weight(.medium))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        if !item.branch.isEmpty {
+                            Text(item.branch)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+
+                    Label(activityText(for: item), systemImage: "clock")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -87,15 +207,7 @@ struct RepositoryHealthOverviewView: View {
 
                 Spacer(minLength: 8)
 
-                Label(activityText(for: item), systemImage: "clock")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-
-                Label(item.healthScore.displayLabel, systemImage: healthScoreIcon(for: item.healthScore.status))
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(healthScoreColor(for: item.healthScore.status))
-                    .lineLimit(1)
+                healthScoreBadge(for: item.healthScore)
             }
 
             HStack(spacing: 10) {
@@ -117,18 +229,48 @@ struct RepositoryHealthOverviewView: View {
                 Spacer(minLength: 0)
             }
 
-            HStack(alignment: .top, spacing: 5) {
-                Image(systemName: healthScoreIcon(for: item.healthScore.status))
-                    .font(.caption2)
-                    .foregroundStyle(healthScoreColor(for: item.healthScore.status))
-                Text(item.healthScore.explanation)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+            if item.healthScore.status != .healthy {
+                HStack(alignment: .top, spacing: 5) {
+                    Image(systemName: healthScoreIcon(for: item.healthScore.status))
+                        .font(.caption2)
+                        .foregroundStyle(healthScoreColor(for: item.healthScore.status))
+                    Text(item.healthScore.explanation)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .padding(.vertical, 9)
+    }
+
+    private func healthScoreBadge(for score: RepositoryHealthScore) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: healthScoreIcon(for: score.status))
+                .font(.caption2.weight(.semibold))
+            if let value = score.value {
+                Text("\(value)")
+                    .font(.headline.weight(.semibold))
+                Text("分")
+                    .font(.caption2)
+            } else {
+                Text(score.status.label)
+                    .font(.caption2.weight(.semibold))
+            }
+        }
+        .foregroundStyle(healthScoreColor(for: score.status))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(healthScoreColor(for: score.status).opacity(0.11))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(healthScoreColor(for: score.status).opacity(0.18), lineWidth: 1)
+        )
+        .help(score.displayLabel)
     }
 
     private func dimensionLabel(

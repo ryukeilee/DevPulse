@@ -6,13 +6,25 @@ struct ActivityTimelineView: View {
     let lastScanAt: Date?
     let isScanning: Bool
     let onRescan: () -> Void
+    @State private var showsAllEvents = false
 
     private var decisionsByRepositoryID: [String: RepositoryDecision] {
         ActivityTimelineDecisionContextBuilder.build(from: repositories)
     }
 
-    /// Only render a bounded window to keep memory stable under high event volume.
+    /// Overview 只先展示最近一小段，避免历史记录把今日状态推到很下面；
+    /// 展开仍沿用同一份本地活动记录，最多保留原有的 100 条上限。
+    private static let initialDisplayedEventCount = 8
     private static let maxDisplayedEvents = 100
+
+    private var orderedEvents: [ActivityEvent] {
+        ActivityEventOrdering.sorted(events)
+    }
+
+    private var displayedEvents: [ActivityEvent] {
+        let limit = showsAllEvents ? Self.maxDisplayedEvents : Self.initialDisplayedEventCount
+        return Array(orderedEvents.prefix(limit))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -21,15 +33,16 @@ struct ActivityTimelineView: View {
             if events.isEmpty {
                 emptyState
             } else {
+                attentionNotice
+
                 VStack(alignment: .leading, spacing: 0) {
-                    let displayed = events.prefix(Self.maxDisplayedEvents)
-                    ForEach(Array(displayed)) { event in
+                    ForEach(displayedEvents) { event in
                         ActivityEventRow(
                             event: event,
                             decision: decisionsByRepositoryID[event.repositoryID]
                         )
 
-                        if event.id != displayed.last?.id {
+                        if event.id != displayedEvents.last?.id {
                             Divider().overlay(DevPulseVisualStyle.separator)
                         }
                     }
@@ -47,43 +60,82 @@ struct ActivityTimelineView: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Activity Timeline")
+                Text("最近变化")
                     .font(.headline)
-                Text("只记录扫描发现的增量变化；相同状态不会重复记账。")
+                Text("按扫描发现时间排列；开发变化与读取状态变化来自同一份活动记录。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            Spacer()
+            Spacer(minLength: 8)
 
             if !events.isEmpty {
-                Text("保留 \(events.count) 条")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text("最近 \(displayedEvents.count) 条 · 共 \(events.count) 条")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+
+                    if events.count > Self.initialDisplayedEventCount {
+                        Button(showsAllEvents ? "收起" : "显示全部") {
+                            withAnimation(.easeOut(duration: 0.16)) {
+                                showsAllEvents.toggle()
+                            }
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption2.weight(.medium))
+                    }
+                }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var attentionNotice: some View {
+        let attentionCount = displayedEvents.filter {
+            $0.kind == .conflictStarted || $0.kind == .readFailed
+        }.count
+
+        if attentionCount > 0 {
+            Label(
+                "列表中有 \(attentionCount) 条冲突或读取异常，建议优先确认",
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.orange)
         }
     }
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label(
-                lastScanAt == nil ? "尚未建立活动基线" : "暂无增量活动",
-                systemImage: lastScanAt == nil ? "clock.badge.questionmark" : "checkmark.circle"
-            )
-            .font(.subheadline.weight(.semibold))
+            if isScanning {
+                Label("正在扫描最近变化", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.subheadline.weight(.semibold))
 
-            Text(
-                lastScanAt == nil
-                    ? "执行一次扫描建立仓库状态基线；后续只有提交、改动、分支、同步、冲突或读取状态变化才会生成事件。"
-                    : "最近扫描没有发现有意义变化。跨日记录会继续保留，直到达到本地容量上限。"
-            )
-            .font(.caption)
-            .foregroundStyle(.secondary)
+                Text("本轮扫描完成后，新的提交、改动、分支或读取状态变化会出现在这里。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Label(
+                    lastScanAt == nil ? "尚未建立活动基线" : "暂无增量变化",
+                    systemImage: lastScanAt == nil ? "clock.badge.questionmark" : "checkmark.circle"
+                )
+                .font(.subheadline.weight(.semibold))
 
-            Button("Rescan Now", action: onRescan)
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(isScanning)
+                Text(
+                    lastScanAt == nil
+                        ? "执行一次扫描建立仓库状态基线；后续只有提交、改动、分支、同步、冲突或读取状态变化才会生成记录。"
+                        : "最近扫描没有发现新的变化。跨日记录会继续保留，直到达到本地容量上限。"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                Button("重新扫描", action: onRescan)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(isScanning)
+            }
         }
     }
 }
@@ -135,7 +187,7 @@ struct ActivityEventRow: View {
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
 
-                if let decision {
+                if let decision, decision.primaryAction.kind != .noActionNeeded {
                     Label("当前建议 · \(decision.primaryAction.title)", systemImage: "arrow.right.circle")
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(.secondary)

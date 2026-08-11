@@ -229,7 +229,7 @@ struct RepositoryHealthOverviewTests {
 
     // MARK: 行组装
 
-    @Test func mixedCollectionOrdersByActivityDescending() {
+    @Test func mixedCollectionOrdersByHealthPriorityThenScore() {
         let active = snapshot(id: "a", name: "Active", lastActivityAt: iso(-600))
         let moderate = snapshot(id: "m", name: "Moderate", lastActivityAt: iso(-3 * 86_400))
         let dormant = snapshot(id: "d", name: "Dormant", lastActivityAt: iso(-20 * 86_400))
@@ -240,11 +240,49 @@ struct RepositoryHealthOverviewTests {
             now: now
         )
 
-        #expect(items.map(\.id) == ["a", "m", "d", "n"])
-        #expect(items[0].activityLevel == .active)
-        #expect(items[1].activityLevel == .moderate)
-        #expect(items[2].activityLevel == .dormant)
-        #expect(items[3].activityLevel == .noActivity)
+        // 无活动和沉寂项目都会落入需关注状态，分数更低的优先；
+        // 健康项目再按分数和最近活动排列。
+        #expect(items.map(\.id) == ["n", "d", "m", "a"])
+        #expect(items[0].activityLevel == .noActivity)
+        #expect(items[1].activityLevel == .dormant)
+        #expect(items[2].activityLevel == .moderate)
+        #expect(items[3].activityLevel == .active)
+    }
+
+    @Test func summaryMatchesTheItemsShownInOverview() {
+        let healthy = snapshot(name: "Healthy", lastActivityAt: iso(-3_600))
+        let attention = snapshot(name: "Attention", lastActivityAt: iso(-10 * 86_400))
+        let critical = snapshot(
+            name: "Critical",
+            status: .changed,
+            modified: 20,
+            conflicted: 2,
+            risk: .high,
+            lastActivityAt: iso(-10 * 86_400)
+        )
+        let unavailable = snapshot(
+            name: "Unavailable",
+            dataSource: .lastSuccessful,
+            unavailableSince: iso(-3_600)
+        )
+        let unknown = snapshot(name: "Unknown", dataSource: .unknown)
+
+        let items = RepositoryHealthOverviewBuilder.build(
+            snapshots: [healthy, attention, critical, unavailable, unknown],
+            now: now
+        )
+        let summary = RepositoryHealthOverviewBuilder.summary(for: items)
+
+        #expect(summary.totalCount == 5)
+        #expect(summary.healthyCount == 1)
+        #expect(summary.attentionCount == 1)
+        #expect(summary.criticalCount == 1)
+        #expect(summary.insufficientDataCount == 1)
+        #expect(summary.unavailableCount == 1)
+        #expect(summary.needsAttentionCount == 2)
+        #expect(summary.dataIssueCount == 2)
+        #expect(summary.hasDataIssues)
+        #expect(summary.hasIssues)
     }
 
     @Test func emptyCollectionProducesEmptyOverview() {
