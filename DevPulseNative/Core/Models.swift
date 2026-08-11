@@ -940,6 +940,28 @@ struct RepositoryActionState: Equatable {
     let sortPriority: Int
 }
 
+extension RepositorySnapshot {
+    /// 跨模块统一的"最近活动"时间戳派生：取 `lastActivityAt` 与 `lastChangedAt`
+    /// 中较新的有效值（过滤未来时间戳），避免旧的活动标记遮住新提交。
+    /// 项目健康概览、项目列表行与 Widget 均使用此口径，保证同一快照在
+    /// 三个模块展示一致的活动时间。返回 nil 表示两者都没有可用时间戳。
+    static func mostRecentActivityTimestamp(
+        lastActivityAt: String?,
+        lastChangedAt: String?,
+        now: Date = Date()
+    ) -> String? {
+        [lastActivityAt, lastChangedAt]
+            .compactMap { $0 }
+            .compactMap { timestamp -> (String, Date)? in
+                guard let date = DateFormatting.date(from: timestamp),
+                      now.timeIntervalSince(date) >= -60 else { return nil }
+                return (timestamp, date)
+            }
+            .max { $0.1 < $1.1 }?
+            .0
+    }
+}
+
 struct RepositoryListItemPresentation: Equatable {
     let dataSource: RepositoryDataSourcePresentation
     let action: RepositoryActionState
@@ -1040,7 +1062,11 @@ enum RepositoryListItemPresentationBuilder {
         if snapshot.resolvedDataSource == .unknown {
             return "当前活动未知"
         }
-        let timestamp = snapshot.lastActivityAt ?? snapshot.lastChangedAt
+        let timestamp = RepositorySnapshot.mostRecentActivityTimestamp(
+            lastActivityAt: snapshot.lastActivityAt,
+            lastChangedAt: snapshot.lastChangedAt,
+            now: now
+        )
         guard let timestamp else { return "暂无活动记录" }
         let label = relativeTime(timestamp, now: now) ?? "时间未知"
         return snapshot.resolvedDataSource == .lastSuccessful
@@ -1157,6 +1183,15 @@ struct ActivityTimelineItem: Identifiable, Equatable {
             return nil
         }
         return lastScannedAt
+    }
+
+    /// 跨模块统一的"最近活动"时间戳（与项目列表、健康概览同一口径），
+    /// Widget 的活跃文案基于此派生。
+    var mostRecentActivityTimestamp: String? {
+        RepositorySnapshot.mostRecentActivityTimestamp(
+            lastActivityAt: lastActivityAt,
+            lastChangedAt: lastChangedAt
+        )
     }
 
     var dataSourcePresentation: RepositoryDataSourcePresentation {

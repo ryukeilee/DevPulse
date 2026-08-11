@@ -27,19 +27,23 @@ struct ActivityTimelineView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
+        // 一次 body 求值只构建一次排序/展示列表与决策上下文，避免
+        // 计算属性在 header / 计数 / 每行渲染处被重复执行。
+        let displayedEvents = self.displayedEvents
+        let decisions = decisionsByRepositoryID
+        return VStack(alignment: .leading, spacing: 12) {
+            header(displayedEvents: displayedEvents)
 
             if events.isEmpty {
                 emptyState
             } else {
-                attentionNotice
+                attentionNotice(displayedEvents: displayedEvents)
 
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(displayedEvents) { event in
                         ActivityEventRow(
                             event: event,
-                            decision: decisionsByRepositoryID[event.repositoryID]
+                            decision: decisions[event.repositoryID]
                         )
 
                         if event.id != displayedEvents.last?.id {
@@ -57,7 +61,7 @@ struct ActivityTimelineView: View {
         )
     }
 
-    private var header: some View {
+    private func header(displayedEvents: [ActivityEvent]) -> some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("最近变化")
@@ -92,7 +96,7 @@ struct ActivityTimelineView: View {
     }
 
     @ViewBuilder
-    private var attentionNotice: some View {
+    private func attentionNotice(displayedEvents: [ActivityEvent]) -> some View {
         let attentionCount = displayedEvents.filter {
             $0.kind == .conflictStarted || $0.kind == .readFailed
         }.count

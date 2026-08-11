@@ -29,12 +29,15 @@ struct TodayDevelopmentSummaryView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
-            metrics
-            trendContent
-            stateMessage
-            mostActiveProject
+        // 一次 body 求值只构建一次摘要派生；各子视图复用同一份结果，
+        // 避免计算属性在 12+ 处被重复执行（每次都会重新遍历全部事件）。
+        let summary = self.summary
+        return VStack(alignment: .leading, spacing: 12) {
+            header(summary: summary)
+            metrics(summary: summary)
+            trendContent(summary: summary)
+            stateMessage(summary: summary)
+            mostActiveProject(summary: summary)
 
             Text("专注时间按扫描发现的活动间隔估算；趋势只与近 7 天内有活动的日期比较。")
                 .font(.caption2)
@@ -48,12 +51,12 @@ struct TodayDevelopmentSummaryView: View {
         )
     }
 
-    private var header: some View {
+    private func header(summary: DailyDevelopmentSummary) -> some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("今日开发摘要")
                     .font(.headline)
-                Text(headerDescription)
+                Text(headerDescription(summary))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -68,14 +71,14 @@ struct TodayDevelopmentSummaryView: View {
         }
     }
 
-    private var headerDescription: String {
+    private func headerDescription(_ summary: DailyDevelopmentSummary) -> String {
         guard summary.activityCount > 0 else {
             return "仅统计扫描发现的开发变化，不会触发额外扫描。"
         }
         return "今天检测到 \(summary.activityCount) 条开发变化；读取异常不计入统计。"
     }
 
-    private var metrics: some View {
+    private func metrics(summary: DailyDevelopmentSummary) -> some View {
         LazyVGrid(
             columns: [
                 GridItem(.flexible(), spacing: 10),
@@ -107,7 +110,7 @@ struct TodayDevelopmentSummaryView: View {
     }
 
     @ViewBuilder
-    private var trendContent: some View {
+    private func trendContent(summary: DailyDevelopmentSummary) -> some View {
         if summary.hasActivity || summary.comparisonActivityDayCount > 0 {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline) {
@@ -153,10 +156,10 @@ struct TodayDevelopmentSummaryView: View {
     }
 
     @ViewBuilder
-    private var stateMessage: some View {
+    private func stateMessage(summary: DailyDevelopmentSummary) -> some View {
         if summary.hasDataWarning {
             Label(
-                "今天有 \(summary.unavailableProjectCount) 个项目读取异常，统计可能不完整",
+                "当前有 \(summary.unavailableProjectCount) 个项目读取异常，统计可能不完整",
                 systemImage: "exclamationmark.triangle.fill"
             )
             .font(.caption.weight(.medium))
@@ -170,13 +173,13 @@ struct TodayDevelopmentSummaryView: View {
                 .foregroundStyle(.secondary)
         } else if !summary.hasActivity {
             Label(
-                emptyStateTitle,
-                systemImage: emptyStateSymbol
+                emptyStateTitle(summary),
+                systemImage: emptyStateSymbol(summary)
             )
             .font(.caption.weight(.medium))
             .foregroundStyle(.secondary)
 
-            Text(emptyStateDetail)
+            Text(emptyStateDetail(summary))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -188,20 +191,20 @@ struct TodayDevelopmentSummaryView: View {
         return Calendar.current.isDate(lastScanAt, inSameDayAs: now)
     }
 
-    private var emptyStateTitle: String {
+    private func emptyStateTitle(_ summary: DailyDevelopmentSummary) -> String {
         guard lastScanAt != nil else { return "等待首次成功扫描" }
         if summary.hasDataWarning { return "今天暂无可确认的开发变化" }
         return hasSuccessfulScanToday ? "今天暂无开发变化" : "今天尚未完成成功扫描"
     }
 
-    private var emptyStateSymbol: String {
+    private func emptyStateSymbol(_ summary: DailyDevelopmentSummary) -> String {
         if summary.hasDataWarning { return "exclamationmark.circle" }
         return lastScanAt == nil || !hasSuccessfulScanToday
             ? "clock.badge.questionmark"
             : "checkmark.circle"
     }
 
-    private var emptyStateDetail: String {
+    private func emptyStateDetail(_ summary: DailyDevelopmentSummary) -> String {
         guard lastScanAt != nil else {
             return "完成首次成功扫描后，这里会显示检测到的提交和项目变化。"
         }
@@ -215,7 +218,7 @@ struct TodayDevelopmentSummaryView: View {
     }
 
     @ViewBuilder
-    private var mostActiveProject: some View {
+    private func mostActiveProject(summary: DailyDevelopmentSummary) -> some View {
         if let project = summary.mostActiveProject {
             HStack(spacing: 10) {
                 Image(systemName: "flame.fill")

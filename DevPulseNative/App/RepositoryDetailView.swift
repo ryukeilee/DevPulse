@@ -617,8 +617,12 @@ struct RepositoryDetailView: View {
     private var changedFilesEmptyText: String {
         switch presentation.dataSource.source {
         case .unknown: return "当前没有可信的文件名预览"
-        case .current, .lastSuccessful:
+        case .current:
             return activeRepository.changedFileCount == 0 ? "没有本地变更文件" : "文件名预览不可用"
+        case .lastSuccessful:
+            return activeRepository.changedFileCount == 0
+                ? "上次成功时没有本地变更文件"
+                : "上次成功的文件名预览不可用"
         }
     }
 

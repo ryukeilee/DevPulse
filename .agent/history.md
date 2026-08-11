@@ -338,3 +338,58 @@
   - 标准 `bash ./scripts/install-and-self-check.sh` → 被本机环境阻塞：`No Xcode Apple account is configured on this Mac`。
   - 使用当前已安装且匹配 bundle 的本地签名资料完成手动签名安装：`codesign --verify --deep --strict` 通过；`/Applications/DevPulse.app` 运行进程路径校验通过；测试 bundle 不存在；`--self-check` → `self_check.result=pass`、`self_check.validation=pass`、`lifecycle.widget_registration=active`。
 - **剩余风险**：标准自动签名流程仍需在 Xcode 登录 Apple 账号并刷新 provisioning profiles；本次手动签名安装和运行时自检已通过，但 Overview 最小窗口下的最终视觉换行、滚动高度和颜色对比仍需人工确认。
+
+---
+
+## Loop 15 — 2026-08-11（六大体验区域证据驱动深度优化：口径统一 + 完整性 + 重复派生清理）
+
+- **问题**：今日摘要 / 最近变化 / 项目健康 / 开发趋势 / 项目列表与详情 / Widget-App 六区域存在跨模块口径不一致与无效重复派生，用户打开 Overview 时可能看到互相矛盾的"最近活动"时间与缺失的完整性警告。
+- **证据**（详见 `{SCRATCH}/review.md`）：
+  - 最近活动时间三处口径不同：健康概览 `max(lastActivityAt, lastChangedAt)`（`Core/RepositoryHealthOverview.swift:230-243`）、列表行 `lastActivityAt ?? lastChangedAt`（`Core/Models.swift:1043`）、Widget `.current` 仅 `lastChangedAt`（`Widget/DevPulseWidget.swift:1738-1740`）；同一快照可显示"活跃 1 小时前"（App）与"改动 3 天前"（Widget）。
+  - 今日摘要完整性漏报：`unavailableProjectCount` 只统计今日新增 `readFailed`（`Core/DailyDevelopmentSummary.swift:101-108`），昨日已失败今日仍不可读的仓库不触发 `hasDataWarning`（`App/TodayDevelopmentSummaryView.swift:157-160`）。
+  - 重复派生：`TodayDevelopmentSummaryView.summary`、`RepositoryHealthOverviewView.items/overviewSummary`、`ActivityTimelineView.decisionsByRepositoryID` 为计算属性，一次 body 求值内被访问 10+ 次，每次都全量重算。
+  - 死分支：`Core/DailyDevelopmentSummary.swift:106-108` `guard day <= todayStart` 恒真。
+- **原因**：六区域数据来源统一但派生口径分裂，属于用户可见的矛盾与无效计算，符合计划要求的检查维度；修复全部落在既有纯函数与视图层，不触碰扫描管线、快照格式与 Widget 刷新策略。
+- **修改**：
+  - `Core/Models.swift`：新增共享纯函数 `RepositorySnapshot.mostRecentActivityTimestamp`（取两者较新、过滤未来时间戳）；列表行 `recentActivityLabel` 与 `ActivityTimelineItem.mostRecentActivityTimestamp` 改用它。
+  - `Core/RepositoryHealthOverview.swift`：`activityTimestamp` 委托同一共享函数。
+  - `Widget/DevPulseWidget.swift`：`.current` 活跃文案改由共享派生（`lastChangedAt` → `mostRecentActivityTimestamp`，前缀"改动"→"活跃"），落在 widget 编译子集内。
+  - `Core/DailyDevelopmentSummary.swift`：`unavailableProjectCount` 改为"窗口内最新读取状态为 readFailed"的仓库数（跨日未恢复计入）；删除恒真死分支；复用今日 focusMinutes。
+  - `App/TodayDevelopmentSummaryView.swift` / `App/RepositoryHealthOverviewView.swift` / `App/ActivityTimelineView.swift`：body 内一次派生后传入子视图；警告文案"今天有 N 个"→"当前有 N 个"。
+  - `App/RepositoryDetailView.swift`：`.lastSuccessful` 仓库变更文件空态改为"上次成功时…"。
+  - `DevPulseNativeTests/RepositoryActivityConsistencyTests.swift`（新增）：同一夹具喂健康/列表/共享派生，断言一致；`DailyDevelopmentSummaryTests.swift`：新增跨日失败计入、恢复后清除、再失败重计三例。
+- **验证**：
+  - `bash scripts/verify.sh build` → Build succeeded。
+  - 定向测试全过：DailyDevelopmentSummaryTests、RepositoryActivityConsistencyTests、RepositoryHealthOverviewTests、CommitReadinessEngineTests、ActivityEventTests、WidgetLifecycleScenariosTests、WidgetDegradedRenderingTests。
+  - `bash scripts/verify.sh final` → full test suite passed，Final acceptance passed。
+  - `bash scripts/verify.sh widgetkit` → 15 PASS, 0 FAIL。
+  - `bash scripts/verify-activity-timeline.sh` → passed；`bash scripts/verify-build-consistency.sh` → 20 pass, 0 fail, 1 skip。
+  - 两次 `--self-check` 启动冒烟（无签名测试构建）：报告除动态 written_at 外逐行一致，退出码一致（exit=1）；`lifecycle.self_heal=^pass`、`widget_registration=active`。扫描自检 fail 系未签名构建无 App Group/扫描根目录权限的环境限制，已按计划回退条款以构建+全量测试+widget 接线作为接受标准。
+  - `git diff --stat`：仅 6 个目标区域文件 + 3 个 Core/Widget 派生文件 + 2 个测试文件；未改 project.yml、entitlements、签名、快照格式、扫描管线。
+- **剩余风险**：Widget 活跃文案（前缀/相对时间）与最活跃项目趋势的视觉呈现需在真实安装 + 桌面上人工确认；`mostRecentActivityTimestamp` 的未来时间戳（时钟偏差）边缘语义在列表与健康概览间仍有"时间未知/无活动记录"措辞差异（语义一致，文案不同）；未做签名安装。
+
+---
+
+## Loop 16 — 2026-08-11（签名安装运行新 app，提交推送 Loop 15 改动）
+
+- **问题**：无新的高价值代码问题（Decide 判定本轮无 Bug）。工作区有 Loop 15 已完成并验证的六区域优化改动，用户要求执行 loop 后签名安装运行新 app，并把改动合并提交推送（明确授权 commit/push）。
+- **证据**：
+  - `git status --porcelain=v2 --branch` → main 与 origin/main 同步（4217561），工作区 11 个未提交文件（Loop 15 改动 + 本文件）。
+  - `grep -rn -e TODO -e FIXME DevPulseNative/` → 无匹配。
+  - Loop 15 已验证：`verify.sh final`（full test suite passed）、`verify.sh widgetkit`（15 PASS, 0 FAIL）、`verify-activity-timeline.sh`、`verify-build-consistency.sh`（20 pass, 0 fail）。
+  - 签名环境：keychain 有 `Apple Development: ryukei_li@hotmail.com (5BJ9GM7VZR)`；本地 provisioning profiles 匹配 bundle（team JYL9G28DP3）；Xcode 无登录账号。
+- **原因**：无新证据支持业务修改；最高价值动作是把已验证改动落地：签名安装运行（用户要求）并提交推送（用户授权）。
+- **修改**：
+  - 无业务代码修改；追加 Loop 16 记录。
+  - 标准 `install-and-self-check.sh` 被环境阻塞：`ERROR: No Xcode Apple account is configured on this Mac`（与 Loop 14 相同）。
+  - 手动签名路径（沿用 Loop 14 成功方案 + 脚本 re-sign 逻辑）：
+    - 用 `verify.sh build` 产物复制、移除测试 bundle、放入 embedded.provisionprofile（host + widget，从已安装 app 复制）。
+    - `codesign --force --sign` host（`--entitlements App/DevPulse.entitlements`，保留 App Group）与 widget（`--entitlements Widget/DevPulseWidgetExtension.entitlements`）。
+    - 安装到 `/Applications/DevPulse.app`（旧版备份到临时目录），`open -n` 启动。
+- **验证**：
+  - `codesign --verify --deep --strict` → valid on disk, satisfies Designated Requirement；host/widget entitlements 均含 `com.apple.security.application-groups`；无测试 bundle。
+  - GUI 进程运行，命令路径 = `/Applications/DevPulse.app/Contents/MacOS/DevPulse`。
+  - `--self-check`（签名后）→ `self_check.result=pass`、`refresh_phase=success`、`repository_count=3`、`validation=pass`、`lifecycle.widget_registration=active`、`lifecycle.self_heal=^pass`、exit=0（对比无签名构建的 result=fail）。
+  - 共享快照：`generatedAt/writtenAt/lastSuccessfulRefreshAt` 为启动后新值；`DevPulse status=changed changed=11` 与工作区 11 个未提交文件一致。
+  - 提交前：`scripts/secret-scan.sh staged`、`git diff --cached --check` 通过；push 到 `origin/main`。
+- **剩余风险**：无签名自动安装能力（需 Xcode 登录 Apple 账号）——手动签名路径已验证可用但每次需人工执行；Widget 在桌面上的实际渲染与交互仍需人工确认。

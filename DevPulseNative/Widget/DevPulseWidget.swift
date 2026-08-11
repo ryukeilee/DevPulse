@@ -1735,8 +1735,8 @@ private extension ActivityTimelineItem {
     var activityLabel: String {
         switch resolvedDataSource {
         case .current:
-            if let lastChangedAt {
-                return "改动 \(DateFormatting.relativeTime(from: lastChangedAt))"
+            if let mostRecentActivityTimestamp {
+                return "活跃 \(DateFormatting.relativeTime(from: mostRecentActivityTimestamp))"
             }
             return "扫描 \(DateFormatting.relativeTime(from: lastScannedAt))"
         case .lastSuccessful:

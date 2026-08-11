@@ -228,18 +228,17 @@ enum RepositoryHealthOverviewBuilder {
     }
 
     /// 取两个已有活动时间戳中较新的有效值，避免旧的活动标记遮住新提交。
+    /// 与项目列表行、Widget 共用 `RepositorySnapshot.mostRecentActivityTimestamp`，
+    /// 保证同一快照在三处展示一致的活动时间。
     static func activityTimestamp(
         snapshot: RepositorySnapshot,
         now: Date = Date()
     ) -> String? {
-        let candidates = [snapshot.lastActivityAt, snapshot.lastChangedAt]
-            .compactMap { $0 }
-            .compactMap { timestamp -> (String, Date)? in
-                guard let date = DateFormatting.date(from: timestamp) else { return nil }
-                guard now.timeIntervalSince(date) >= -60 else { return nil }
-                return (timestamp, date)
-            }
-        return candidates.max { $0.1 < $1.1 }?.0
+        RepositorySnapshot.mostRecentActivityTimestamp(
+            lastActivityAt: snapshot.lastActivityAt,
+            lastChangedAt: snapshot.lastChangedAt,
+            now: now
+        )
     }
 
     /// 计算项目健康分。纯函数，不触发任何扫描或文件读取。

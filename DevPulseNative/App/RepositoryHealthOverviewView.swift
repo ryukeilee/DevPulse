@@ -39,13 +39,17 @@ struct RepositoryHealthOverviewView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
+        // 一次 body 求值只构建一次概览行与其汇总，避免计算属性在
+        // 多处访问时重复执行 healthScore 派生与排序。
+        let items = self.items
+        let overviewSummary = RepositoryHealthOverviewBuilder.summary(for: items)
+        return VStack(alignment: .leading, spacing: 12) {
+            header(summary: overviewSummary, hasItems: !items.isEmpty)
 
             if items.isEmpty {
                 emptyState
             } else {
-                statusSummary
+                statusSummary(summary: overviewSummary)
 
                 VStack(spacing: 0) {
                     ForEach(items) { item in
@@ -66,12 +70,12 @@ struct RepositoryHealthOverviewView: View {
         )
     }
 
-    private var header: some View {
+    private func header(summary: RepositoryHealthOverviewSummary, hasItems: Bool) -> some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("项目健康状态")
                     .font(.headline)
-                Text(headerSubtitle)
+                Text(headerSubtitle(summary: summary, hasItems: hasItems))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -86,36 +90,36 @@ struct RepositoryHealthOverviewView: View {
         }
     }
 
-    private var headerSubtitle: String {
-        guard !items.isEmpty else {
+    private func headerSubtitle(summary: RepositoryHealthOverviewSummary, hasItems: Bool) -> String {
+        guard hasItems else {
             return "优先显示需要确认的项目；健康分基于当前可用快照。"
         }
-        return "共 \(overviewSummary.totalCount) 个项目 · \(statusSummaryText)"
+        return "共 \(summary.totalCount) 个项目 · \(statusSummaryText(summary))"
     }
 
-    private var statusSummaryText: String {
+    private func statusSummaryText(_ summary: RepositoryHealthOverviewSummary) -> String {
         var parts: [String] = []
-        if overviewSummary.healthyCount > 0 {
-            parts.append("\(overviewSummary.healthyCount) 个健康")
+        if summary.healthyCount > 0 {
+            parts.append("\(summary.healthyCount) 个健康")
         }
-        if overviewSummary.needsAttentionCount > 0 {
-            parts.append("\(overviewSummary.needsAttentionCount) 个需关注")
+        if summary.needsAttentionCount > 0 {
+            parts.append("\(summary.needsAttentionCount) 个需关注")
         }
-        if overviewSummary.dataIssueCount > 0 {
-            parts.append("\(overviewSummary.dataIssueCount) 个数据待确认")
+        if summary.dataIssueCount > 0 {
+            parts.append("\(summary.dataIssueCount) 个数据待确认")
         }
         return parts.isEmpty ? "暂无可评估数据" : parts.joined(separator: " · ")
     }
 
-    private var statusSummary: some View {
+    private func statusSummary(summary: RepositoryHealthOverviewSummary) -> some View {
         HStack(spacing: 7) {
-            Image(systemName: overviewSummary.hasIssues ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
-                .foregroundStyle(overviewSummary.hasIssues ? Color.orange : Color.green)
+            Image(systemName: summary.hasIssues ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
+                .foregroundStyle(summary.hasIssues ? Color.orange : Color.green)
 
             Text(
-                overviewSummary.needsAttentionCount > 0
+                summary.needsAttentionCount > 0
                     ? "已按需关注程度排序，先处理前面的项目。"
-                    : overviewSummary.hasDataIssues
+                    : summary.hasDataIssues
                         ? "部分项目数据待确认，健康分不会替代当前状态。"
                         : "当前项目没有明显需要优先处理的问题。"
             )

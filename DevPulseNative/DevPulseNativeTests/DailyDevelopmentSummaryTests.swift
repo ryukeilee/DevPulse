@@ -147,6 +147,56 @@ struct DailyDevelopmentSummaryTests {
         #expect(summary.hasDataWarning)
     }
 
+    @Test func readFailureCarriesOverFromEarlierDayUntilRecovery() {
+        // 昨日已失败、今日仍不可读的仓库没有新的 readFailed 事件，
+        // 但今日统计确实缺该仓库数据，完整性警告不应漏报。
+        let calendar = utcCalendar()
+        let summary = DailyDevelopmentSummaryBuilder.build(
+            events: [
+                event(id: "failed-yesterday", repositoryID: "repo-a", name: "Alpha", kind: .readFailed, at: "2026-07-19T09:00:00Z")
+            ],
+            now: date("2026-07-20T12:00:00Z"),
+            calendar: calendar
+        )
+
+        #expect(summary.activityCount == 0)
+        #expect(summary.unavailableProjectCount == 1)
+        #expect(summary.hasDataWarning)
+    }
+
+    @Test func readFailureClearedByLaterRecovery() {
+        // 昨日失败后已恢复：最新读取状态为 readRecovered，不再计入警告。
+        let calendar = utcCalendar()
+        let summary = DailyDevelopmentSummaryBuilder.build(
+            events: [
+                event(id: "failed", repositoryID: "repo-a", name: "Alpha", kind: .readFailed, at: "2026-07-19T09:00:00Z"),
+                event(id: "recovered", repositoryID: "repo-a", name: "Alpha", kind: .readRecovered, at: "2026-07-20T08:00:00Z")
+            ],
+            now: date("2026-07-20T12:00:00Z"),
+            calendar: calendar
+        )
+
+        #expect(summary.unavailableProjectCount == 0)
+        #expect(!summary.hasDataWarning)
+    }
+
+    @Test func readFailureRecountedAfterLatestFailure() {
+        // 失败→恢复→再失败：最新读取状态为 readFailed，计入警告。
+        let calendar = utcCalendar()
+        let summary = DailyDevelopmentSummaryBuilder.build(
+            events: [
+                event(id: "failed-1", repositoryID: "repo-a", name: "Alpha", kind: .readFailed, at: "2026-07-18T09:00:00Z"),
+                event(id: "recovered", repositoryID: "repo-a", name: "Alpha", kind: .readRecovered, at: "2026-07-19T09:00:00Z"),
+                event(id: "failed-2", repositoryID: "repo-a", name: "Alpha", kind: .readFailed, at: "2026-07-20T09:00:00Z")
+            ],
+            now: date("2026-07-20T12:00:00Z"),
+            calendar: calendar
+        )
+
+        #expect(summary.unavailableProjectCount == 1)
+        #expect(summary.hasDataWarning)
+    }
+
     @Test func noActivityHistoryProducesUnavailableTrends() {
         let calendar = utcCalendar()
         let summary = DailyDevelopmentSummaryBuilder.build(

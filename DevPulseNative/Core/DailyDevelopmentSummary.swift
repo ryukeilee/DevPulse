@@ -51,8 +51,10 @@ struct DailyDevelopmentSummary: Equatable {
     /// Number of previous days that contain development-change records and
     /// therefore provide a meaningful daily-average comparison.
     let comparisonActivityDayCount: Int
-    /// Repositories that had a read failure today. Development counts exclude
-    /// those events, but the UI should still make the incomplete data visible.
+    /// Repositories whose latest read state within the comparison window is a
+    /// read failure (including failures that started on earlier days and have
+    /// not recovered). Development counts exclude those events, but the UI
+    /// should still make the incomplete data visible.
     let unavailableProjectCount: Int
 
     var hasActivity: Bool {
@@ -90,6 +92,10 @@ enum DailyDevelopmentSummaryBuilder {
         ) ?? todayStart
 
         var buckets: [Date: DayBucket] = [:]
+        // 仓库窗口内的最新读取状态（readFailed / readRecovered），用于判断
+        // 仓库当前是否仍处于不可读状态。与"今日新增失败"不同，跨日未恢复
+        // 的失败也会被计入完整性警告，避免"统计可能不完整"漏报。
+        var latestReadStateByRepository: [String: (kind: ActivityEventKind, date: Date)] = [:]
         for event in events {
             guard let date = DateFormatting.date(from: event.occurredAt),
                   date >= historyStart,
@@ -98,12 +104,15 @@ enum DailyDevelopmentSummaryBuilder {
             }
 
             let day = calendar.startOfDay(for: date)
-            guard day <= todayStart else { continue }
 
-            if event.kind == .readFailed {
-                buckets[day, default: DayBucket()]
-                    .unavailableProjectIDs
-                    .insert(event.repositoryID)
+            if event.kind == .readFailed || event.kind == .readRecovered {
+                if let existing = latestReadStateByRepository[event.repositoryID] {
+                    if existing.date < date {
+                        latestReadStateByRepository[event.repositoryID] = (kind: event.kind, date: date)
+                    }
+                } else {
+                    latestReadStateByRepository[event.repositoryID] = (kind: event.kind, date: date)
+                }
                 continue
             }
             guard isDevelopmentActivity(event.kind) else { continue }
@@ -128,6 +137,7 @@ enum DailyDevelopmentSummaryBuilder {
         let previousActivityBuckets = previousBuckets.filter { !$0.timestamps.isEmpty }
         let comparisonActivityDayCount = previousActivityBuckets.count
 
+        let todayFocusMinutes = focusMinutes(for: today.timestamps)
         let commitTrend = trend(
             value: Double(today.commitCount),
             previousValues: previousActivityBuckets.map { Double($0.commitCount) },
@@ -139,7 +149,7 @@ enum DailyDevelopmentSummaryBuilder {
             comparisonDayCount: comparisonActivityDayCount
         )
         let focusTimeTrend = trend(
-            value: Double(focusMinutes(for: today.timestamps)),
+            value: Double(todayFocusMinutes),
             previousValues: previousActivityBuckets.map {
                 Double(focusMinutes(for: $0.timestamps))
             },
@@ -151,18 +161,22 @@ enum DailyDevelopmentSummaryBuilder {
             previousBuckets: previousBuckets
         )
 
+        let unavailableProjectCount = latestReadStateByRepository.values
+            .filter { $0.kind == .readFailed }
+            .count
+
         return DailyDevelopmentSummary(
             commitCount: today.commitCount,
             activeProjectCount: today.projectIDs.count,
             activityCount: today.timestamps.count,
-            focusMinutes: focusMinutes(for: today.timestamps),
+            focusMinutes: todayFocusMinutes,
             mostActiveProject: mostActiveProject,
             commitTrend: commitTrend,
             activeProjectTrend: activeProjectTrend,
             focusTimeTrend: focusTimeTrend,
             comparisonDayCount: comparisonDayCount,
             comparisonActivityDayCount: comparisonActivityDayCount,
-            unavailableProjectCount: today.unavailableProjectIDs.count
+            unavailableProjectCount: unavailableProjectCount
         )
     }
 
@@ -173,7 +187,6 @@ enum DailyDevelopmentSummaryBuilder {
         var activityCountsByProject: [String: Int] = [:]
         var namesByProject: [String: String] = [:]
         var latestActivityByProject: [String: Date] = [:]
-        var unavailableProjectIDs = Set<String>()
 
         mutating func add(event: ActivityEvent, date: Date) {
             if event.kind == .newCommit {
