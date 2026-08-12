@@ -29,13 +29,14 @@ struct ActivityTimelineView: View {
             orderedEvents.prefix(showsAllEvents ? Self.maxDisplayedEvents : Self.initialDisplayedEventCount)
         )
         let decisions = decisionsByRepositoryID
-        // 提示口径覆盖全部冲突/读取异常：折叠态下较早记录中的注意力事件
-        // 同样计入，避免"列表有冲突"因超出前 8 条而漏报。
-        let attentionCount = ActivityTimelineAttention.count(in: displayedEvents)
-        let additionalAttentionCount = max(
-            0,
-            ActivityTimelineAttention.count(in: orderedEvents) - attentionCount
+        // 提示口径覆盖全部未解除的冲突/读取异常：折叠态下较早记录中的
+        // 注意力事件同样计入，避免"列表有冲突"因超出前 8 条而漏报。
+        let attentionSplit = ActivityTimelineAttention.split(
+            events: orderedEvents,
+            displayedPrefix: displayedEvents.count
         )
+        let attentionCount = attentionSplit.displayed
+        let additionalAttentionCount = attentionSplit.additional
         return VStack(alignment: .leading, spacing: 12) {
             header(displayedEvents: displayedEvents)
 

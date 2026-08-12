@@ -159,14 +159,24 @@ struct RefreshCompletionTests {
 
         // First commit advances storageRevision
         let first = fixture(label: "first", timestamp: "2026-07-28T10:00:00Z", directory: directory)
-        try requireSuccess(store.commit(first))
+        let committed = try requireSuccess(store.commit(first))
+        #expect(committed.storageRevision > 0)
 
-        // Try to write with an observed revision that is now stale
+        // Commit with an observed revision older than the on-disk revision is
+        // rejected by the cross-process guard, so a stale writer can never
+        // overwrite newer data.
         let second = fixture(label: "second", timestamp: "2026-07-28T10:01:00Z", directory: directory)
-        let result = store.commit(second, observedStorageRevision: 0)
-        if case .success = result {
-            // Note: this may succeed if storageRevision tracking starts from 1 and 0 is not considered "past"
-            // It depends on whether the baseline revision check considers 0 < actual revision.
+        let result = store.commit(second, observedStorageRevision: committed.storageRevision - 1)
+        switch result {
+        case .success:
+            Issue.record("Expected crossProcessWriteDetected for stale observed revision, got success")
+        case .failure(let error):
+            guard case .crossProcessWriteDetected(let observed, let actual) = error else {
+                Issue.record("Expected crossProcessWriteDetected, got \(error)")
+                return
+            }
+            #expect(observed == committed.storageRevision - 1)
+            #expect(actual == committed.storageRevision)
         }
     }
 

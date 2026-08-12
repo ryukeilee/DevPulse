@@ -158,13 +158,32 @@ struct WidgetLifecycleScenariosTests {
     func timelineReloadThrottling() async {
         let manager = WidgetRecoveryManager()
         let token = GenerationIsolation.Token(generation: 1, epoch: 0)
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        // Throttle 时间戳持久化到共享 UserDefaults（键与生产实现一致），
+        // 可跨重启生效；测试据此观察真实节流行为。
+        let key = "DevPulseWidgetLastForcedReloadAt"
+        let defaults = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)!
+        let previous = defaults.object(forKey: key) as? Date
+        defer {
+            if let previous {
+                defaults.set(previous, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
 
-        // First reload should be accepted
-        await manager.requestTimelineReload(generation: token, force: false, now: Date())
-        // Immediate second reload should be throttled
-        await manager.requestTimelineReload(generation: token, force: false, now: Date())
-        // Force reload should bypass throttle
-        await manager.requestTimelineReload(generation: token, force: true, now: Date())
+        // Force reload 建立基线并持久化时间戳
+        await manager.requestTimelineReload(generation: token, force: true, now: now)
+        #expect(defaults.object(forKey: key) as? Date == now)
+
+        // 间隔内（< 60s）的非强制 reload 被节流：时间戳保持不变
+        await manager.requestTimelineReload(generation: token, force: false, now: now.addingTimeInterval(30))
+        #expect(defaults.object(forKey: key) as? Date == now)
+
+        // 强制 reload 绕过节流并推进时间戳
+        let forcedNow = now.addingTimeInterval(90)
+        await manager.requestTimelineReload(generation: token, force: true, now: forcedNow)
+        #expect(defaults.object(forKey: key) as? Date == forcedNow)
     }
 
     @Test("WidgetRecoveryManager verifyWidgetReadiness handles unavailable App Group")

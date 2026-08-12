@@ -348,7 +348,6 @@ enum ScanSchedulerPolicy {
     }
 
     static let repositoryRediscoveryInterval: TimeInterval = 60 * 60
-    static let widgetReloadThrottleInterval: TimeInterval = 15 * 60
 
     static func allRepositoryDataUnavailable(_ repositories: [RepositorySnapshot]) -> Bool {
         RepositoryDataAvailability.allUnavailable(repositories)
@@ -409,30 +408,27 @@ enum ScanSchedulerPolicy {
     static func shouldRequestWidgetReload(
         previousSnapshot: AppGroupData,
         nextSnapshot: AppGroupData,
-        lastReloadRequestedAt: Date?,
-        reason: String,
-        now: Date = Date()
+        reason: String
     ) -> Bool {
         widgetReloadDecision(
             previousSnapshot: previousSnapshot,
             nextSnapshot: nextSnapshot,
-            lastReloadRequestedAt: lastReloadRequestedAt,
-            reason: reason,
-            now: now
+            reason: reason
         ).shouldRequest
     }
 
     static func widgetReloadDecision(
         previousSnapshot: AppGroupData,
         nextSnapshot: AppGroupData,
-        lastReloadRequestedAt: Date?,
-        reason: String,
-        now: Date = Date()
+        reason: String
     ) -> WidgetReloadDecision {
-        guard reason == "scan" else {
+        // "scan" 与 "scan-nochanges" 都走内容比较：无变化扫描的写回仅用于
+        // 清除 isRefreshing，快照内容无实质变化时跳过 reload（空闲扫描每小时
+        // 6–12 次都 reload 属于无意义开销；Widget 会在 60 秒内自愈重读）。
+        guard reason == "scan" || reason == "scan-nochanges" else {
             return WidgetReloadDecision(
                 shouldRequest: true,
-                detail: "此次同步由 \(reason) 触发，不走扫描节流，已直接请求 Widget reload。"
+                detail: "此次同步由 \(reason) 触发，不走扫描内容比较，已直接请求 Widget reload。"
             )
         }
 
@@ -1393,10 +1389,18 @@ final class ScanScheduler: ObservableObject {
     }
 
     var refreshTrustAssessment: SnapshotTrustAssessment {
-        RefreshStatusFormatter.refreshAssessment(
-            lastUpdatedAt: lastSuccessfulRefreshAt,
-            failureMessage: refreshPhase == .failure ? refreshFailureMessage : nil
-        )
+        if refreshPhase == .failure {
+            return RefreshStatusFormatter.refreshAssessment(
+                lastUpdatedAt: lastSuccessfulRefreshAt,
+                failureMessage: refreshFailureMessage
+            )
+        }
+        // 非失败阶段与 Widget 使用同一份 snapshotAssessment：内容级降级
+        // （仓库读取错误 / 未确认路径）优先于按冻结的 lastSuccessfulRefreshAt
+        // 判 stale/expired，避免同一份快照 App 显示"数据过期"而 Widget 显示
+        // "部分仓库待确认"。phase 在取消/自检中断时会被重置为 .idle，只有
+        // 内容感知判定能覆盖这个窗口。
+        return RefreshStatusFormatter.snapshotAssessment(snapshot: lastResult)
     }
 
     var refreshStatusText: String {
@@ -2985,6 +2989,9 @@ final class ScanScheduler: ObservableObject {
             var restoredSnapshot = migratedPinnedSnapshot
             var sharedSnapshot = snapshot
             var startupWriteError: String?
+            // 写回携带读盘时观察到的 storageRevision，防止与双实例或
+            // --self-check 并发时用旧数据覆盖新写入（跨进程 CAS 保护）。
+            var observedStorageRevision = storedRead.snapshot.storageRevision
             let storageSourceNeedsRewrite: Bool
             switch storedRead.source {
             case .primary:
@@ -2997,10 +3004,11 @@ final class ScanScheduler: ObservableObject {
                 let written = migratedPinnedSnapshot.withWrittenAt(
                     snapshot.writtenAt ?? DateFormatting.nowISO()
                 )
-                switch AppGroupStore.write(written) {
+                switch AppGroupStore.write(written, observedStorageRevision: observedStorageRevision) {
                 case .success(let verified):
                     restoredSnapshot = verified
                     sharedSnapshot = verified
+                    observedStorageRevision = verified.storageRevision
                     requiresStartupScopeRefresh = false
                     if scopeChanged {
                         AppGroupStore.reloadWidgets()
@@ -3040,7 +3048,7 @@ final class ScanScheduler: ObservableObject {
                 // Always clear isRefreshing in memory even if the disk write
                 // fails, so the next scan does not propagate a stale flag.
                 lastResult = cleared
-                switch AppGroupStore.write(cleared) {
+                switch AppGroupStore.write(cleared, observedStorageRevision: observedStorageRevision) {
                 case .success:
                     diagnostics.lastSnapshotStoreDetail = "已清除先前残留的 isRefreshing 状态。"
                 case .failure:
@@ -3266,7 +3274,6 @@ final class ScanScheduler: ObservableObject {
         let reloadDecision = ScanSchedulerPolicy.widgetReloadDecision(
             previousSnapshot: prev,
             nextSnapshot: lastResult,
-            lastReloadRequestedAt: diagnostics.lastReloadRequestedAt,
             reason: reason
         )
         diagnostics.lastWidgetReloadState = reloadDecision.shouldRequest ? .requested : .skipped

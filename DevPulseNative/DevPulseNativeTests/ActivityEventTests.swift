@@ -128,6 +128,7 @@ struct ActivityEventTests {
     @Test func attentionCountCoversConflictsAndReadFailuresOnly() {
         // 「最近变化」提示条只统计需要优先确认的事件（冲突开始 / 读取失败），
         // 冲突解除、读取恢复与普通改动不计入，避免计数与提示口径漂移。
+        // 已解除/已恢复的注意力事件同样不计入：它们不再需要优先确认。
         let readable = snapshot(modified: 2, conflicted: 1)
         let failed = readable.retainingLastSuccessfulData(
             attemptedAt: "2026-07-16T11:00:00Z",
@@ -162,7 +163,7 @@ struct ActivityEventTests {
 
         let all = [conflictStarted, conflictResolved, readFailed, readRecovered, changed].compactMap { $0 }
         #expect(all.count == 5)
-        #expect(ActivityTimelineAttention.count(in: all) == 2)
+        #expect(ActivityTimelineAttention.count(in: all) == 0)
 
         #expect(ActivityTimelineAttention.count(
             in: [conflictStarted, readFailed].compactMap { $0 }
@@ -171,6 +172,110 @@ struct ActivityEventTests {
             in: [conflictResolved, readRecovered, changed].compactMap { $0 }
         ) == 0)
         #expect(ActivityTimelineAttention.count(in: []) == 0)
+    }
+
+    @Test func attentionCountReflectsUnresolvedStateOnly() throws {
+        // 注意力计数只统计「未解除」的冲突开始 / 读取失败：
+        // 后续出现解除/恢复事件后不再计入；再次冲突/再次失败则恢复计入。
+        let conflictStarted = try #require(event(
+            previous: snapshot(conflicted: 0, id: "repo-a"),
+            current: snapshot(conflicted: 1, id: "repo-a"),
+            at: "2026-07-16T10:00:00Z",
+            kind: .conflictStarted
+        ))
+        let conflictResolved = try #require(event(
+            previous: snapshot(conflicted: 1, id: "repo-a"),
+            current: snapshot(conflicted: 0, id: "repo-a"),
+            at: "2026-07-16T10:30:00Z",
+            kind: .conflictResolved
+        ))
+        let conflictRestarted = try #require(event(
+            previous: snapshot(conflicted: 0, id: "repo-a"),
+            current: snapshot(conflicted: 1, id: "repo-a"),
+            at: "2026-07-16T11:00:00Z",
+            kind: .conflictStarted
+        ))
+        let readable = snapshot(id: "repo-b")
+        let failed = readable.retainingLastSuccessfulData(
+            attemptedAt: "2026-07-16T11:00:00Z",
+            errorMessage: "读取失败"
+        )
+        let readFailed = try #require(event(
+            previous: readable,
+            current: failed,
+            at: "2026-07-16T11:00:00Z",
+            kind: .readFailed
+        ))
+        let readRecovered = try #require(event(
+            previous: failed,
+            current: readable,
+            at: "2026-07-16T11:30:00Z",
+            kind: .readRecovered
+        ))
+
+        #expect(ActivityTimelineAttention.count(in: [conflictStarted]) == 1)
+        #expect(ActivityTimelineAttention.count(
+            in: [conflictStarted, conflictResolved]
+        ) == 0)
+        #expect(ActivityTimelineAttention.count(
+            in: [conflictStarted, conflictResolved, conflictRestarted]
+        ) == 1)
+        #expect(ActivityTimelineAttention.count(in: [readFailed]) == 1)
+        #expect(ActivityTimelineAttention.count(
+            in: [readFailed, readRecovered]
+        ) == 0)
+        // 跨仓库独立：repo-a 未解除 + repo-b 已恢复 → 只计 repo-a
+        #expect(ActivityTimelineAttention.count(
+            in: [conflictStarted, readFailed, readRecovered]
+        ) == 1)
+    }
+
+    @Test func attentionSplitSeparatesDisplayedAndEarlierRecords() throws {
+        // 12 条事件按时间倒序（最新在前）排列，模拟视图折叠态输入：
+        // 索引 0-1 repo-a 改动；2 冲突开始（未解除，在折叠区内）；
+        // 3-7 repo-b 改动；8-9 repo-c 改动；10 repo-b 读取失败（未解除，在更早记录）；11 repo-d 改动。
+        let conflictStarted = try #require(event(
+            previous: snapshot(conflicted: 0, id: "repo-a"),
+            current: snapshot(conflicted: 1, id: "repo-a"),
+            at: "2026-07-16T11:50:00Z",
+            kind: .conflictStarted
+        ))
+        let readableB = snapshot(id: "repo-b")
+        let failedB = readableB.retainingLastSuccessfulData(
+            attemptedAt: "2026-07-16T11:10:00Z",
+            errorMessage: "读取失败"
+        )
+        let readFailed = try #require(event(
+            previous: readableB,
+            current: failedB,
+            at: "2026-07-16T11:10:00Z",
+            kind: .readFailed
+        ))
+        var ordered: [ActivityEvent] = []
+        ordered.append(try #require(makeWorkingTreeEvent(from: 0, to: 1, at: "2026-07-16T12:00:00Z")))
+        ordered.append(try #require(makeWorkingTreeEvent(from: 1, to: 2, at: "2026-07-16T11:55:00Z")))
+        ordered.append(conflictStarted)
+        ordered.append(try #require(makeWorkingTreeEvent(from: 0, to: 1, at: "2026-07-16T11:45:00Z")))
+        ordered.append(try #require(makeWorkingTreeEvent(from: 1, to: 2, at: "2026-07-16T11:40:00Z")))
+        ordered.append(try #require(makeWorkingTreeEvent(from: 0, to: 1, at: "2026-07-16T11:35:00Z")))
+        ordered.append(try #require(makeWorkingTreeEvent(from: 1, to: 2, at: "2026-07-16T11:30:00Z")))
+        ordered.append(try #require(makeWorkingTreeEvent(from: 0, to: 1, at: "2026-07-16T11:25:00Z")))
+        ordered.append(try #require(makeWorkingTreeEvent(from: 0, to: 1, at: "2026-07-16T11:20:00Z")))
+        ordered.append(try #require(makeWorkingTreeEvent(from: 1, to: 2, at: "2026-07-16T11:15:00Z")))
+        ordered.append(readFailed)
+        ordered.append(try #require(makeWorkingTreeEvent(from: 0, to: 1, at: "2026-07-16T11:05:00Z")))
+        #expect(ordered.count == 12)
+
+        // 折叠前 8 条：只有索引 2 的冲突开始可见，索引 10 的读取失败在更早记录中
+        #expect(ActivityTimelineAttention.split(events: ordered, displayedPrefix: 8) == (displayed: 1, additional: 1))
+        // 展开全部：两条都在显示区内
+        #expect(ActivityTimelineAttention.split(events: ordered, displayedPrefix: 12) == (displayed: 2, additional: 0))
+        // 显示区为空：全部计入 additional
+        #expect(ActivityTimelineAttention.split(events: ordered, displayedPrefix: 0) == (displayed: 0, additional: 2))
+        // 前 3 条仍含索引 2 的冲突开始
+        #expect(ActivityTimelineAttention.split(events: ordered, displayedPrefix: 3) == (displayed: 1, additional: 1))
+        // 两条未解除事件都未进入显示区
+        #expect(ActivityTimelineAttention.split(events: ordered, displayedPrefix: 1) == (displayed: 0, additional: 2))
     }
 
     @Test func persistedTransitionPreventsReplayAfterSnapshotWriteFailureButAllowsCycles() throws {
@@ -510,6 +615,91 @@ struct ActivityEventTests {
         )
         #expect(events3.count == 1)
         #expect(ActivityEventDeduplicator.newEvents(from: events3, comparedTo: events1) == events3)
+    }
+
+    // ────────────────────────────────────────────────
+    // MARK: - ActivityTimelineBuilder 状态分类
+    // ────────────────────────────────────────────────
+
+    @Test func timelineBuilderClassifiesNeverScannedAndNoRepositories() {
+        #expect(ActivityTimelineBuilder.build(from: [], lastScanAt: nil).state == .neverScanned)
+        #expect(ActivityTimelineBuilder.build(from: [], lastScanAt: Date()).state == .noRepositories)
+    }
+
+    // ────────────────────────────────────────────────
+    // MARK: - Widget 活动摘要（ActivityEventWidgetSummaryBuilder）
+    // ────────────────────────────────────────────────
+
+    private func widgetEvent(
+        id: String,
+        at: String
+    ) -> ActivityEvent {
+        ActivityEvent(
+            id: id,
+            repositoryID: "repo-\(id)",
+            repositoryName: "Repo \(id)",
+            kind: .newCommit,
+            occurredAt: at,
+            before: ActivityEventState(snapshot: snapshot(modified: 0)),
+            after: ActivityEventState(snapshot: snapshot(modified: 1))
+        )
+    }
+
+    @Test func widgetSummaryKeepsOnlyTheThreeMostRecentEvents() {
+        let now = date("2026-07-16T12:00:00Z")
+        let events = [
+            widgetEvent(id: "a", at: "2026-07-16T09:00:00Z"),
+            widgetEvent(id: "b", at: "2026-07-16T09:30:00Z"),
+            widgetEvent(id: "c", at: "2026-07-16T10:00:00Z"),
+            widgetEvent(id: "d", at: "2026-07-16T10:30:00Z"),
+            widgetEvent(id: "e", at: "2026-07-16T11:00:00Z")
+        ]
+
+        let summary = ActivityEventWidgetSummaryBuilder.build(from: events, now: now)
+
+        #expect(summary.count == ActivityEventWidgetSummaryBuilder.maximumCount)
+        #expect(summary.map(\.repositoryID) == ["repo-e", "repo-d", "repo-c"])
+    }
+
+    @Test func widgetSummaryToleratesSmallFutureTimestampsButNotLargeOnes() {
+        let now = date("2026-07-16T12:00:00Z")
+        let events = [
+            widgetEvent(id: "within", at: "2026-07-16T12:00:30Z"),
+            widgetEvent(id: "beyond", at: "2026-07-16T12:01:01Z")
+        ]
+
+        let summary = ActivityEventWidgetSummaryBuilder.build(from: events, now: now)
+
+        #expect(summary.map(\.repositoryID) == ["repo-within"])
+    }
+
+    @Test func widgetSummaryDropsEventsOlderThanRecencyWindow() {
+        let now = date("2026-07-16T12:00:00Z")
+        let events = [
+            widgetEvent(id: "boundary", at: "2026-07-09T12:00:00Z"),
+            widgetEvent(id: "old", at: "2026-07-09T11:59:59Z")
+        ]
+
+        let summary = ActivityEventWidgetSummaryBuilder.build(from: events, now: now)
+
+        #expect(summary.map(\.repositoryID) == ["repo-boundary"])
+    }
+
+    @Test func widgetSummaryFiltersEventsWithInvalidDates() {
+        let now = date("2026-07-16T12:00:00Z")
+        let events = [
+            widgetEvent(id: "valid", at: "2026-07-16T10:00:00Z"),
+            widgetEvent(id: "garbage", at: "not-a-date"),
+            widgetEvent(id: "empty", at: "")
+        ]
+
+        let summary = ActivityEventWidgetSummaryBuilder.build(from: events, now: now)
+
+        #expect(summary.map(\.repositoryID) == ["repo-valid"])
+    }
+
+    private func date(_ value: String) -> Date {
+        DateFormatting.date(from: value)!
     }
 
     private func makeWorkingTreeEvent(

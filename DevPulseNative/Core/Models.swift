@@ -1454,6 +1454,14 @@ enum RepositoryEmptyStateBuilder {
             )
         }
 
+        if refreshPhase == .degraded {
+            return RepositoryEmptyState(
+                title: "扫描部分完成",
+                detail: accessWarning ?? "部分仓库未能确认，当前没有可展示的仓库；可完成一次完整成功刷新后再查看。",
+                systemImage: "exclamationmark.triangle"
+            )
+        }
+
         if lastScanAt == nil {
             return RepositoryEmptyState(
                 title: "尚未开始扫描",

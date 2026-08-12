@@ -468,6 +468,116 @@ struct CommitReadinessEngineTests {
         #expect(RefreshStatusFormatter.updateLabel(for: future, now: now) == "更新时间未知")
     }
 
+    @Test func refreshStatusExactlyThirtyMinutesIsStaleNotExpired() {
+        let now = Date(timeIntervalSince1970: 1_718_000_000)
+        let snapshot = now.addingTimeInterval(-30 * 60)
+
+        // expiredThreshold 判定是严格大于：恰好 30 分钟仍属于 stale。
+        #expect(RefreshStatusFormatter.freshness(for: snapshot, now: now) == .stale)
+        #expect(RefreshStatusFormatter.updateLabel(for: snapshot, now: now) == "30 分钟前更新")
+    }
+
+    @Test func snapshotTrustAssessmentMarksMigratedSnapshotFailed() {
+        let now = Date(timeIntervalSince1970: 1_718_000_000)
+        let snapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-07-03T00:00:00Z",
+            writtenAt: "2026-07-03T00:00:00Z",
+            lastSuccessfulRefreshAt: "2026-07-03T00:00:00Z",
+            scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 0, totalChangedFiles: 0, errorRepositories: 0),
+            repositories: [snapshot(status: .clean, dataSource: .current)],
+            persistenceState: .migrated
+        )
+
+        let assessment = RefreshStatusFormatter.snapshotAssessment(snapshot: snapshot, now: now)
+
+        #expect(assessment.state == .failed)
+        #expect(assessment.title == "旧版快照待确认")
+    }
+
+    @Test func snapshotTrustAssessmentMarksRecoveredSnapshotFailed() {
+        let now = Date(timeIntervalSince1970: 1_718_000_000)
+        let snapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-07-03T00:00:00Z",
+            writtenAt: "2026-07-03T00:00:00Z",
+            lastSuccessfulRefreshAt: "2026-07-03T00:00:00Z",
+            scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 0, totalChangedFiles: 0, errorRepositories: 0),
+            repositories: [snapshot(status: .clean, dataSource: .current)],
+            persistenceState: .recovered
+        )
+
+        let assessment = RefreshStatusFormatter.snapshotAssessment(snapshot: snapshot, now: now)
+
+        #expect(assessment.state == .failed)
+        #expect(assessment.title == "显示恢复数据")
+    }
+
+    @Test func snapshotTrustAssessmentAllUnknownRepositoriesWithoutSuccessfulData() {
+        let now = Date(timeIntervalSince1970: 1_718_000_000)
+        let snapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-07-03T00:05:00Z",
+            writtenAt: "2026-07-03T00:05:00Z",
+            lastSuccessfulRefreshAt: "2026-07-02T00:00:00Z",
+            scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 0, totalChangedFiles: 0, errorRepositories: 1),
+            repositories: [
+                snapshot(
+                    id: "unknown",
+                    name: "unknown",
+                    status: .error,
+                    lastScannedAt: "2026-07-03T00:05:00Z",
+                    dataSource: .unknown,
+                    lastSuccessfulScanAt: nil,
+                    errorMessage: "读取失败"
+                )
+            ]
+        )
+
+        let assessment = RefreshStatusFormatter.snapshotAssessment(snapshot: snapshot, now: now)
+
+        #expect(assessment.state == .failed)
+        #expect(assessment.title == "仓库数据未知")
+    }
+
+    @Test func snapshotTrustAssessmentMixedLastSuccessfulAndUnknownRepositories() {
+        let now = Date(timeIntervalSince1970: 1_718_000_000)
+        let snapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-07-03T00:05:00Z",
+            writtenAt: "2026-07-03T00:05:00Z",
+            lastSuccessfulRefreshAt: "2026-07-02T00:00:00Z",
+            scanSummary: ScanSummary(totalRepositories: 2, changedRepositories: 0, totalChangedFiles: 0, errorRepositories: 2),
+            repositories: [
+                snapshot(
+                    id: "stale",
+                    name: "stale",
+                    status: .error,
+                    lastScannedAt: "2026-07-03T00:05:00Z",
+                    dataSource: .lastSuccessful,
+                    lastSuccessfulScanAt: "2026-07-02T00:00:00Z",
+                    errorMessage: "读取失败"
+                ),
+                snapshot(
+                    id: "unknown",
+                    name: "unknown",
+                    status: .error,
+                    lastScannedAt: "2026-07-03T00:05:00Z",
+                    dataSource: .unknown,
+                    lastSuccessfulScanAt: nil,
+                    errorMessage: "读取失败"
+                )
+            ]
+        )
+
+        let assessment = RefreshStatusFormatter.snapshotAssessment(snapshot: snapshot, now: now)
+
+        #expect(assessment.state == .failed)
+        #expect(assessment.title == "仓库数据待确认")
+        #expect(assessment.detail.contains("1 个上次成功"))
+        #expect(assessment.detail.contains("1 个未知"))
+    }
+
     @Test func repositoryReadFailureReasonIsConciseAndActionSafe() {
         #expect(RepositoryReadFailureReason.conciseMessage(from: "Git command timeout") == "读取超时")
         #expect(RepositoryReadFailureReason.conciseMessage(from: "仓库暂时不可访问：/private/path") == "暂时无法访问")
@@ -953,16 +1063,17 @@ struct CommitReadinessEngineTests {
         let decision = ScanSchedulerPolicy.widgetReloadDecision(
             previousSnapshot: AppGroupData.empty(),
             nextSnapshot: AppGroupData.empty(),
-            lastReloadRequestedAt: Date(timeIntervalSince1970: 1_718_000_000),
-            reason: "pin toggle",
-            now: Date(timeIntervalSince1970: 1_718_000_100)
+            reason: "pin toggle"
         )
 
         #expect(decision.shouldRequest)
         #expect(decision.detail.contains("pin toggle"))
     }
 
-    @Test func widgetReloadDecisionSkipsUnchangedScanWithinThrottleWindow() {
+    /// 无变化扫描（"scan-nochanges"）仍需写回快照以清除 isRefreshing，
+    /// 但快照内容无实质变化时不应触发 Widget reload（否则空闲扫描每小时
+    /// 产生 6–12 次无意义 reload）。
+    @Test func widgetReloadDecisionSkipsNoChangeScanWriteBack() {
         let now = Date(timeIntervalSince1970: 1_718_000_000)
         let baseline = snapshot(modified: 1)
         let previousSnapshot = AppGroupData(
@@ -977,37 +1088,39 @@ struct CommitReadinessEngineTests {
         let decision = ScanSchedulerPolicy.widgetReloadDecision(
             previousSnapshot: previousSnapshot,
             nextSnapshot: nextSnapshot,
-            lastReloadRequestedAt: now.addingTimeInterval(-60),
-            reason: "scan",
-            now: now
+            reason: "scan-nochanges"
         )
 
         #expect(decision.shouldRequest == false)
         #expect(decision.detail.contains("本次跳过"))
     }
 
-    @Test func widgetReloadDecisionSkipsUnchangedScanAfterThrottleExpires() {
+    /// 无变化扫描但快照内容确实发生变化（例如分支切换）时，仍然必须 reload。
+    @Test func widgetReloadDecisionReloadsNoChangeScanWhenContentChanged() {
         let now = Date(timeIntervalSince1970: 1_718_000_000)
-        let baseline = snapshot(modified: 1)
         let previousSnapshot = AppGroupData(
             schemaVersion: RepositorySnapshotSchema.version,
             generatedAt: "2026-06-18T10:00:00Z",
             writtenAt: "2026-06-18T10:00:05Z",
-            scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 1, totalChangedFiles: 1, errorRepositories: 0),
-            repositories: [baseline]
+            scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 0, totalChangedFiles: 0, errorRepositories: 0),
+            repositories: [snapshot(modified: 1, branch: "main")]
         )
-        let nextSnapshot = previousSnapshot
+        let nextSnapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: "2026-06-18T10:05:00Z",
+            writtenAt: "2026-06-18T10:05:00Z",
+            scanSummary: ScanSummary(totalRepositories: 1, changedRepositories: 0, totalChangedFiles: 0, errorRepositories: 0),
+            repositories: [snapshot(modified: 1, branch: "feature")]
+        )
 
         let decision = ScanSchedulerPolicy.widgetReloadDecision(
             previousSnapshot: previousSnapshot,
             nextSnapshot: nextSnapshot,
-            lastReloadRequestedAt: now.addingTimeInterval(-(ScanSchedulerPolicy.widgetReloadThrottleInterval + 1)),
-            reason: "scan",
-            now: now
+            reason: "scan-nochanges"
         )
 
-        #expect(decision.shouldRequest == false)
-        #expect(decision.detail.contains("本次跳过"))
+        #expect(decision.shouldRequest)
+        #expect(decision.detail.contains("内容发生变化"))
     }
 
     @Test func widgetDataTrustBuilderUsesRefreshWhenResultsExistButSnapshotMissing() {
@@ -3801,9 +3914,7 @@ struct CommitReadinessEngineTests {
             ScanSchedulerPolicy.shouldRequestWidgetReload(
                 previousSnapshot: snapshot,
                 nextSnapshot: snapshot.withWrittenAt("2026-07-03T00:05:00Z"),
-                lastReloadRequestedAt: now.addingTimeInterval(-5 * 60),
-                reason: "scan",
-                now: now
+                reason: "scan"
             ) == false
         )
     }
@@ -3847,9 +3958,7 @@ struct CommitReadinessEngineTests {
             ScanSchedulerPolicy.shouldRequestWidgetReload(
                 previousSnapshot: previous,
                 nextSnapshot: next,
-                lastReloadRequestedAt: now.addingTimeInterval(-5 * 60),
-                reason: "scan",
-                now: now
+                reason: "scan"
             ) == false
         )
     }
@@ -3895,9 +4004,7 @@ struct CommitReadinessEngineTests {
             ScanSchedulerPolicy.shouldRequestWidgetReload(
                 previousSnapshot: previous,
                 nextSnapshot: next,
-                lastReloadRequestedAt: now.addingTimeInterval(-5 * 60),
-                reason: "scan",
-                now: now
+                reason: "scan"
             ) == true
         )
     }
@@ -3979,9 +4086,7 @@ struct CommitReadinessEngineTests {
             ScanSchedulerPolicy.shouldRequestWidgetReload(
                 previousSnapshot: previous,
                 nextSnapshot: next,
-                lastReloadRequestedAt: now.addingTimeInterval(-5 * 60),
-                reason: "scan",
-                now: now
+                reason: "scan"
             ) == true
         )
     }

@@ -12,7 +12,7 @@ import Testing
 //    SharedSnapshotPersistenceState, repository set, and isRefreshing.
 // 3. AppGroupData isRefreshing round-trips through Codable.
 // 4. WidgetEntry.freshnessState (defined in DevPulseWidget.swift)
-//    is tested separately in WidgetLifecycleScenariosTests.
+//    maps every load state and trust state to the 5 canonical cases.
 // 5. Cross-process consistency: isRefreshing does not interfere with
 //    storage-revision-based stale-write detection.
 
@@ -627,6 +627,214 @@ struct DataFreshnessStateTests {
             #expect(observed == 1)
             #expect(actual == 2)
         }
+    }
+
+    // ────────────────────────────────────────────────
+    // MARK: - WidgetEntry.freshnessState mapping
+    // ────────────────────────────────────────────────
+
+    /// Build a committed snapshot whose content drives a specific trust state.
+    private func contentSnapshot(
+        generatedAt: Date?,
+        lastSuccessfulRefreshAt: Date? = nil,
+        errorRepositories: Int = 0,
+        persistenceState: SharedSnapshotPersistenceState = .committed,
+        isRefreshing: Bool? = nil
+    ) -> AppGroupData {
+        let formatter = ISO8601DateFormatter()
+        let repos = [makeRepo(dataSource: .current)]
+        return AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: generatedAt.map(formatter.string(from:)) ?? "",
+            writtenAt: nil,
+            lastSuccessfulRefreshAt: lastSuccessfulRefreshAt.map(formatter.string(from:)),
+            scanSummary: ScanSummary(
+                totalRepositories: repos.count,
+                changedRepositories: 0,
+                totalChangedFiles: 0,
+                errorRepositories: errorRepositories
+            ),
+            repositories: repos,
+            persistenceState: persistenceState,
+            isRefreshing: isRefreshing
+        )
+    }
+
+    private func readyEntry(_ snapshot: AppGroupData) -> WidgetEntry {
+        WidgetEntry.content(
+            snapshot: snapshot,
+            feed: ActivityTimelineFeed(state: .neverScanned, items: [])
+        )
+    }
+
+    @Test("widget placeholder entry maps to refreshing")
+    func widgetFreshnessPlaceholderRefreshing() {
+        #expect(WidgetEntry.placeholder.freshnessState == .refreshing(reason: "等待首次数据"))
+    }
+
+    @Test("widget no-snapshot entry maps to failed")
+    func widgetFreshnessNoSnapshotFailed() {
+        #expect(WidgetEntry.noSnapshot().freshnessState == .failed(reason: "没有共享快照"))
+    }
+
+    @Test("widget load-failed entry maps to failed")
+    func widgetFreshnessLoadFailed() {
+        let entry = WidgetEntry.loadFailed(.snapshotMissing(path: "/tmp/snapshot.json"))
+        guard case .failed = entry.freshnessState else {
+            Issue.record("Expected .failed, got \(entry.freshnessState)")
+            return
+        }
+    }
+
+    @Test("widget refreshing flag takes priority over snapshot content")
+    func widgetFreshnessRefreshingFlagWins() {
+        let now = Date()
+        let snapshot = contentSnapshot(
+            generatedAt: now.addingTimeInterval(-60),
+            lastSuccessfulRefreshAt: now.addingTimeInterval(-60),
+            isRefreshing: true
+        )
+        #expect(readyEntry(snapshot).freshnessState == .refreshing(reason: "正在更新仓库状态"))
+    }
+
+    @Test("widget fresh snapshot maps to normal")
+    func widgetFreshnessFreshNormal() {
+        let now = Date()
+        let snapshot = contentSnapshot(
+            generatedAt: now.addingTimeInterval(-60),
+            lastSuccessfulRefreshAt: now.addingTimeInterval(-60)
+        )
+        guard case .normal = readyEntry(snapshot).freshnessState else {
+            Issue.record("Expected .normal, got \(readyEntry(snapshot).freshnessState)")
+            return
+        }
+    }
+
+    @Test("widget stale snapshot maps to stale")
+    func widgetFreshnessStale() {
+        let now = Date()
+        let snapshot = contentSnapshot(
+            generatedAt: now.addingTimeInterval(-11 * 60),
+            lastSuccessfulRefreshAt: now.addingTimeInterval(-11 * 60)
+        )
+        guard case .stale = readyEntry(snapshot).freshnessState else {
+            Issue.record("Expected .stale, got \(readyEntry(snapshot).freshnessState)")
+            return
+        }
+    }
+
+    @Test("widget expired snapshot maps to stale")
+    func widgetFreshnessExpiredIsStale() {
+        let now = Date()
+        let snapshot = contentSnapshot(
+            generatedAt: now.addingTimeInterval(-31 * 60),
+            lastSuccessfulRefreshAt: now.addingTimeInterval(-31 * 60)
+        )
+        guard case .stale = readyEntry(snapshot).freshnessState else {
+            Issue.record("Expected .stale, got \(readyEntry(snapshot).freshnessState)")
+            return
+        }
+    }
+
+    @Test("widget degraded snapshot maps to degraded even when time looks fresh")
+    func widgetFreshnessDegraded() {
+        let now = Date()
+        // 快照时间在 10 分钟内，但扫描报告有仓库读取错误：降级必须优先于时间判定。
+        let snapshot = contentSnapshot(
+            generatedAt: now.addingTimeInterval(-60),
+            lastSuccessfulRefreshAt: now.addingTimeInterval(-60),
+            errorRepositories: 1
+        )
+        guard case .degraded = readyEntry(snapshot).freshnessState else {
+            Issue.record("Expected .degraded, got \(readyEntry(snapshot).freshnessState)")
+            return
+        }
+    }
+
+    @Test("widget recovered snapshot maps to failed")
+    func widgetFreshnessRecoveredFailed() {
+        let now = Date()
+        let snapshot = contentSnapshot(
+            generatedAt: now.addingTimeInterval(-60),
+            lastSuccessfulRefreshAt: now.addingTimeInterval(-60),
+            persistenceState: .recovered
+        )
+        guard case .failed = readyEntry(snapshot).freshnessState else {
+            Issue.record("Expected .failed, got \(readyEntry(snapshot).freshnessState)")
+            return
+        }
+    }
+
+    @Test("widget snapshot without timestamps maps to failed")
+    func widgetFreshnessUnknownTimestampsFailed() {
+        let snapshot = contentSnapshot(generatedAt: nil)
+        guard case .failed = readyEntry(snapshot).freshnessState else {
+            Issue.record("Expected .failed, got \(readyEntry(snapshot).freshnessState)")
+            return
+        }
+    }
+
+    // ────────────────────────────────────────────────
+    // MARK: - App-side refresh trust assessment
+    // ────────────────────────────────────────────────
+
+    /// 运行时 refreshPhase 被重置为 .idle（取消/自检中断）后，App 端可信度
+    /// 判定必须仍感知快照内容级降级，与 Widget 的 snapshotAssessment 语义一致；
+    /// 否则同一份降级快照 App 显示"数据过期"而 Widget 显示"部分仓库待确认"。
+    @MainActor
+    @Test("app refresh trust assessment surfaces snapshot degradation when phase is idle")
+    func appTrustAssessmentContentDegraded() {
+        let now = Date()
+        let formatter = ISO8601DateFormatter()
+        let degraded = contentSnapshot(
+            generatedAt: now.addingTimeInterval(-25 * 60),
+            lastSuccessfulRefreshAt: now.addingTimeInterval(-25 * 60),
+            errorRepositories: 1
+        )
+
+        let scheduler = ScanScheduler(commandMode: true) { _ in (.empty(), [], []) }
+        scheduler.lastResult = degraded
+        scheduler.refreshPhase = .idle
+
+        #expect(scheduler.refreshTrustAssessment.state == .degraded)
+        #expect(scheduler.refreshStatusText == "读取降级")
+        #expect(scheduler.refreshDetailText?.contains("部分仓库待确认") == true)
+    }
+
+    // ────────────────────────────────────────────────
+    // MARK: - Repository empty state
+    // ────────────────────────────────────────────────
+
+    /// 降级扫描（discoveryWasIncomplete 或 errorRepositories > 0）完成后，
+    /// 若仓库列表为空，空态必须说明"扫描部分完成"，而不是"未发现 Git 仓库"
+    /// ——后者与同屏健康概览的"扫描部分完成"相互矛盾。
+    @Test("empty state shows partial scan for degraded phase instead of no repositories")
+    func emptyStateBuilderDegradedShowsPartialScan() {
+        let state = RepositoryEmptyStateBuilder.build(
+            lastScanAt: Date(timeIntervalSince1970: 1_718_000_000),
+            refreshPhase: .degraded,
+            scanRoots: ["/tmp"],
+            accessWarning: nil,
+            refreshFailureMessage: nil
+        )
+
+        #expect(state.title != "未发现 Git 仓库")
+        #expect(state.systemImage != "tray")
+        #expect(state.title.contains("部分"))
+    }
+
+    @Test("empty state still claims no repositories for healthy empty scan")
+    func emptyStateBuilderHealthyEmptyScan() {
+        let state = RepositoryEmptyStateBuilder.build(
+            lastScanAt: Date(timeIntervalSince1970: 1_718_000_000),
+            refreshPhase: .success,
+            scanRoots: ["/tmp"],
+            accessWarning: nil,
+            refreshFailureMessage: nil
+        )
+
+        #expect(state.title == "未发现 Git 仓库")
+        #expect(state.systemImage == "tray")
     }
 }
 

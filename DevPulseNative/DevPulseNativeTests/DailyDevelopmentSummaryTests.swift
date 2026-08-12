@@ -342,6 +342,165 @@ struct DailyDevelopmentSummaryTests {
         ) == "暂无历史活动")
     }
 
+    // ────────────────────────────────────────────────
+    // MARK: - 展示层可信口径（今日未成功扫描时不展示真实计数/趋势）
+    // ────────────────────────────────────────────────
+
+    /// 今天只有降级扫描（无成功扫描）时，即使 builder 记录了事件，视图也不能
+    /// 把不完整的今日计数与历史比较渲染成真实趋势。
+    @Test func shouldShowTrendRequiresReliableTodayCounts() {
+        #expect(DailyDevelopmentSummaryPresentationBuilder.shouldShowTrend(
+            hasActivity: true,
+            comparisonActivityDayCount: 1,
+            hasReliableTodayCounts: false
+        ) == false)
+        #expect(DailyDevelopmentSummaryPresentationBuilder.shouldShowTrend(
+            hasActivity: false,
+            comparisonActivityDayCount: 1,
+            hasReliableTodayCounts: false
+        ) == false)
+        #expect(DailyDevelopmentSummaryPresentationBuilder.shouldShowTrend(
+            hasActivity: true,
+            comparisonActivityDayCount: 0,
+            hasReliableTodayCounts: false
+        ) == false)
+    }
+
+    @Test func shouldShowTrendWithReliableTodayCounts() {
+        #expect(DailyDevelopmentSummaryPresentationBuilder.shouldShowTrend(
+            hasActivity: true,
+            comparisonActivityDayCount: 1,
+            hasReliableTodayCounts: true
+        ) == true)
+        #expect(DailyDevelopmentSummaryPresentationBuilder.shouldShowTrend(
+            hasActivity: false,
+            comparisonActivityDayCount: 2,
+            hasReliableTodayCounts: true
+        ) == true)
+        #expect(DailyDevelopmentSummaryPresentationBuilder.shouldShowTrend(
+            hasActivity: false,
+            comparisonActivityDayCount: 0,
+            hasReliableTodayCounts: true
+        ) == false)
+    }
+
+    @Test func shouldShowMostActiveProjectRequiresReliableTodayCounts() {
+        #expect(DailyDevelopmentSummaryPresentationBuilder.shouldShowMostActiveProject(
+            hasReliableTodayCounts: true
+        ) == true)
+        #expect(DailyDevelopmentSummaryPresentationBuilder.shouldShowMostActiveProject(
+            hasReliableTodayCounts: false
+        ) == false)
+    }
+
+    @Test func headerDescriptionNeverCountsUnreliableTodayData() {
+        #expect(DailyDevelopmentSummaryPresentationBuilder.headerDescription(
+            activityCount: 5,
+            hasReliableTodayCounts: true
+        ).contains("5 条开发变化"))
+        #expect(DailyDevelopmentSummaryPresentationBuilder.headerDescription(
+            activityCount: 0,
+            hasReliableTodayCounts: true
+        ) == "仅统计扫描发现的开发变化，不会触发额外扫描。")
+        let unreliable = DailyDevelopmentSummaryPresentationBuilder.headerDescription(
+            activityCount: 5,
+            hasReliableTodayCounts: false
+        )
+        #expect(!unreliable.contains("5 条开发变化"))
+        #expect(unreliable.contains("尚未完成成功扫描"))
+    }
+
+    // ────────────────────────────────────────────────
+    // MARK: - Builder 边界
+    // ────────────────────────────────────────────────
+
+    /// 恰好 45 分钟间隔不拆分专注会话（严格大于才拆分）。
+    @Test func exactFocusSessionGapDoesNotSplitSessions() {
+        let calendar = utcCalendar()
+        let now = date("2026-07-20T12:00:00Z")
+        let events = [
+            event(id: "first", repositoryID: "repo-a", name: "Alpha", kind: .workingTreeChanged, at: "2026-07-20T09:00:00Z"),
+            event(id: "second", repositoryID: "repo-a", name: "Alpha", kind: .stagingChanged, at: "2026-07-20T09:45:00Z")
+        ]
+
+        let summary = DailyDevelopmentSummaryBuilder.build(
+            events: events,
+            now: now,
+            calendar: calendar
+        )
+
+        #expect(summary.focusMinutes == 45)
+    }
+
+    /// 略超过 45 分钟拆分会话，两段各按最小 15 分钟计。
+    @Test func focusSessionGapJustOverSplitsSessions() {
+        let calendar = utcCalendar()
+        let now = date("2026-07-20T12:00:00Z")
+        let events = [
+            event(id: "first", repositoryID: "repo-a", name: "Alpha", kind: .workingTreeChanged, at: "2026-07-20T09:00:00Z"),
+            event(id: "second", repositoryID: "repo-a", name: "Alpha", kind: .stagingChanged, at: "2026-07-20T09:46:00Z")
+        ]
+
+        let summary = DailyDevelopmentSummaryBuilder.build(
+            events: events,
+            now: now,
+            calendar: calendar
+        )
+
+        #expect(summary.focusMinutes == 30)
+    }
+
+    /// 跨日边界：昨天的活动不计入今日计数。
+    @Test func midnightBoundaryCountsOnlyToday() {
+        let calendar = utcCalendar()
+        let now = date("2026-07-20T00:30:00Z")
+        let events = [
+            event(id: "yesterday", repositoryID: "repo-a", name: "Alpha", kind: .newCommit, at: "2026-07-19T23:59:00Z"),
+            event(id: "today", repositoryID: "repo-b", name: "Beta", kind: .newCommit, at: "2026-07-20T00:01:00Z")
+        ]
+
+        let summary = DailyDevelopmentSummaryBuilder.build(
+            events: events,
+            now: now,
+            calendar: calendar
+        )
+
+        #expect(summary.commitCount == 1)
+        #expect(summary.activityCount == 1)
+        #expect(summary.activeProjectCount == 1)
+        #expect(summary.mostActiveProject?.id == "repo-b")
+    }
+
+    /// 最活跃项目并列时按最近活动时间决胜，其次按项目名升序。
+    @Test func mostActiveProjectTieBreaksByLatestActivityThenName() {
+        let calendar = utcCalendar()
+        let now = date("2026-07-20T12:00:00Z")
+        let events = [
+            event(id: "a1", repositoryID: "repo-a", name: "Alpha", kind: .workingTreeChanged, at: "2026-07-20T09:00:00Z"),
+            event(id: "b1", repositoryID: "repo-b", name: "Beta", kind: .workingTreeChanged, at: "2026-07-20T10:00:00Z")
+        ]
+
+        let summary = DailyDevelopmentSummaryBuilder.build(
+            events: events,
+            now: now,
+            calendar: calendar
+        )
+
+        #expect(summary.mostActiveProject?.id == "repo-b")
+
+        let tied = [
+            event(id: "a1", repositoryID: "repo-a", name: "Alpha", kind: .workingTreeChanged, at: "2026-07-20T09:00:00Z"),
+            event(id: "b1", repositoryID: "repo-b", name: "Beta", kind: .workingTreeChanged, at: "2026-07-20T09:00:00Z")
+        ]
+        let tiedSummary = DailyDevelopmentSummaryBuilder.build(
+            events: tied,
+            now: now,
+            calendar: calendar
+        )
+
+        #expect(tiedSummary.mostActiveProject?.id == "repo-a")
+    }
+
     private func utcCalendar() -> Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!

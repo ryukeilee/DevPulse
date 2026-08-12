@@ -318,7 +318,8 @@ enum DailyDevelopmentSummaryBuilder {
 /// 为 "—"/等待扫描，而不是把未扫描伪装成 0 统计或"今天大幅下降"的趋势。
 enum DailyDevelopmentSummaryPresentationBuilder {
     /// 今天是否已有一次成功扫描。返回 false 时，今日计数与今日相对历史的
-    /// 趋势都不应作为真实观察展示（首次运行、跨日未扫描都属于这种情况）。
+    /// 趋势都不应作为真实观察展示（首次运行、跨日未扫描、今日只有降级扫描
+    /// 都属于这种情况——降级扫描会记录事件但冻结 lastSuccessfulRefreshAt）。
     static func hasReliableTodayCounts(
         lastSuccessfulScanAt: Date?,
         now: Date,
@@ -326,6 +327,35 @@ enum DailyDevelopmentSummaryPresentationBuilder {
     ) -> Bool {
         guard let lastSuccessfulScanAt else { return false }
         return calendar.isDate(lastSuccessfulScanAt, inSameDayAs: now)
+    }
+
+    /// 是否展示趋势块：只有今天已有成功扫描时，才把今天的活动与历史比较
+    /// 作为真实趋势呈现；否则即使 builder 记录了不完整事件也不能对比。
+    static func shouldShowTrend(
+        hasActivity: Bool,
+        comparisonActivityDayCount: Int,
+        hasReliableTodayCounts: Bool
+    ) -> Bool {
+        hasReliableTodayCounts && (hasActivity || comparisonActivityDayCount > 0)
+    }
+
+    /// 是否展示「今日最活跃项目」：同样要求今天的观察可信。
+    static func shouldShowMostActiveProject(hasReliableTodayCounts: Bool) -> Bool {
+        hasReliableTodayCounts
+    }
+
+    /// 头部描述文案：今天的计数只在观察可信时作为真实数据叙述。
+    static func headerDescription(
+        activityCount: Int,
+        hasReliableTodayCounts: Bool
+    ) -> String {
+        guard hasReliableTodayCounts else {
+            return "今日尚未完成成功扫描，计数待确认。"
+        }
+        guard activityCount > 0 else {
+            return "仅统计扫描发现的开发变化，不会触发额外扫描。"
+        }
+        return "今天检测到 \(activityCount) 条开发变化；读取异常不计入统计。"
     }
 
     enum TrendUnit: Equatable {

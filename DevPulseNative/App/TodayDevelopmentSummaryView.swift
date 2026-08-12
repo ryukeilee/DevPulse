@@ -76,10 +76,10 @@ struct TodayDevelopmentSummaryView: View {
     }
 
     private func headerDescription(_ summary: DailyDevelopmentSummary) -> String {
-        guard summary.activityCount > 0 else {
-            return "仅统计扫描发现的开发变化，不会触发额外扫描。"
-        }
-        return "今天检测到 \(summary.activityCount) 条开发变化；读取异常不计入统计。"
+        DailyDevelopmentSummaryPresentationBuilder.headerDescription(
+            activityCount: summary.activityCount,
+            hasReliableTodayCounts: hasReliableTodayCounts
+        )
     }
 
     private func metrics(summary: DailyDevelopmentSummary) -> some View {
@@ -124,8 +124,11 @@ struct TodayDevelopmentSummaryView: View {
 
     @ViewBuilder
     private func trendContent(summary: DailyDevelopmentSummary) -> some View {
-        if summary.hasActivity
-            || (hasReliableTodayCounts && summary.comparisonActivityDayCount > 0) {
+        if DailyDevelopmentSummaryPresentationBuilder.shouldShowTrend(
+            hasActivity: summary.hasActivity,
+            comparisonActivityDayCount: summary.comparisonActivityDayCount,
+            hasReliableTodayCounts: hasReliableTodayCounts
+        ) {
             trendBlock(summary: summary)
         } else if summary.comparisonActivityDayCount > 0 {
             // 有历史可比较，但今天尚未成功扫描：不能把"今日 0 活动"当作
@@ -246,7 +249,9 @@ struct TodayDevelopmentSummaryView: View {
 
     @ViewBuilder
     private func mostActiveProject(summary: DailyDevelopmentSummary) -> some View {
-        if let project = summary.mostActiveProject {
+        if DailyDevelopmentSummaryPresentationBuilder.shouldShowMostActiveProject(
+            hasReliableTodayCounts: hasReliableTodayCounts
+        ), let project = summary.mostActiveProject {
             HStack(spacing: 10) {
                 Image(systemName: "flame.fill")
                     .foregroundStyle(.orange)

@@ -393,3 +393,79 @@
   - 共享快照：`generatedAt/writtenAt/lastSuccessfulRefreshAt` 为启动后新值；`DevPulse status=changed changed=11` 与工作区 11 个未提交文件一致。
   - 提交前：`scripts/secret-scan.sh staged`、`git diff --cached --check` 通过；push 到 `origin/main`。
 - **剩余风险**：无签名自动安装能力（需 Xcode 登录 Apple 账号）——手动签名路径已验证可用但每次需人工执行；Widget 在桌面上的实际渲染与交互仍需人工确认。
+
+---
+
+## Loop 17 — 2026-08-12（「最近变化」注意力计数稳定性修复：仅统计未解除的冲突/读取异常）
+
+- **问题**：「最近变化」提示条的注意力计数把已解除/已恢复的事件永久计入——`ActivityTimelineAttention.count(in:)` 无条件统计所有 `.conflictStarted` / `.readFailed`（`Core/ActivityEvent.swift` 修复前 ~237-241），导致冲突已解决、读取已恢复后，Overview 提示条仍持续显示「建议优先确认 N 项」，直到事件过期（7 天）或用户展开查看。折叠态下视图用 `max(0, count(ordered) - count(displayed))` 分算，显示区按子集计算家族状态会漏计「更早记录」中的未解除事件（如 repo-B 的读取失败在折叠区外、其恢复在折叠区外，而显示区内 repo-C 的读取失败已在全列表中恢复——additional 被 clamp 成 0，漏报）。
+- **证据**：
+  - 既有测试 `attentionCountCoversConflictsAndReadFailuresOnly`（`DevPulseNativeTests/ActivityEventTests.swift`）注释自述「冲突解除、读取恢复与普通改动不计入…已解除/已恢复的注意力事件同样不计入：它们不再需要优先确认」，但其断言 `count(in: all) == 2`（all 含 resolved/recovered 事件）与注释意图直接矛盾——测试把注释写成意图、断言写成旧行为。
+  - 视图文案为「建议优先确认」（`App/ActivityTimelineView.swift` `attentionNotice`），已解除状态不再需要确认。
+  - `pre-fix.log`：未修复代码上定向测试 5 处断言失败（`(ActivityTimelineAttention.count(in: all) → 2) == 0`、`count([conflictStarted, conflictResolved]) → 1 == 0`、`count([readFailed, readRecovered]) → 1 == 0`、跨仓库 `→ 2 == 1` 等），与缺陷语义一致。
+  - Loop 13/15 记录声明的「时间线提示条与计数共用此定义」是共享口径的要求，并非「已解除事件必须计数」；本次修复保留共享口径并使其感知解除状态。
+- **原因**：`count(in:)` 只按事件类型过滤、不感知同仓库同类型的后续解除/恢复事件，导致可见状态与提示不一致（已确认的注意力事件仍被提示）；折叠态分算公式在不同子集上重复计算家族状态，产生漏报。修复全部落在纯逻辑层与视图消费点，不触碰扫描管线、快照格式、Widget 或项目配置。
+- **修改**：
+  - `Core/ActivityEvent.swift`：`ActivityTimelineAttention` 重写为「未解除状态感知」——`attentionFamily(for:)`（conflict/read 两族）、`openAttentionEvents(in:)`（按 (repositoryID, family) 取最新事件，最新为冲突开始/读取失败才计入，保持入参顺序）、`count(in:)`（委托 openAttentionEvents）、`split(events:displayedPrefix:)`（折叠态下 displayed=显示区内未解除数、additional=更早记录中未解除数，两数之和恒等于总数，恒非负）。`newestFirst` 排序复用 `DateFormatting` 与 id 决胜，与 `ActivityEventOrdering` 同构。
+  - `App/ActivityTimelineView.swift`：提示条计数由 `max(0, count(ordered) - count(displayed))` 改为 `split(events:displayedPrefix:displayedEvents.count)`，`attentionNotice(displayedCount:additionalCount:)` 签名不变。
+  - `DevPulseNativeTests/ActivityEventTests.swift`：`attentionCountCoversConflictsAndReadFailuresOnly` 断言 `== 2` → `== 0`（与注释意图一致）；新增 `attentionCountReflectsUnresolvedStateOnly`（未解除计入 / 解除不计入 / 再次开始恢复计入 / 跨仓库独立）与 `attentionSplitSeparatesDisplayedAndEarlierRecords`（12 条事件折叠 8 / 展开 12 / prefix 0 / prefix 3 / prefix 1 的 displayed/additional 拆分）。
+  - 实施中第一版修复漏校验「家族最新事件自身是注意力类型」，导致解除/恢复事件被计入（`count([conflictResolved, readRecovered, changed]) → 2`）；定向测试立即暴露，补上类型校验后全绿——TDD 按证据迭代，未扩大范围。
+- **验证**：
+  - `bash scripts/verify.sh build` → Build succeeded（多次）。
+  - `bash scripts/verify.sh test DevPulseTests/ActivityEventTests`（pre-fix）→ 5 处断言失败，捕获 `{SCRATCH}/pre-fix.log`；修复后 → 18/18 通过，捕获 `{SCRATCH}/post-fix.log`。
+  - `bash scripts/verify-activity-timeline.sh` → Activity timeline verification passed。
+  - `bash scripts/verify.sh final` → full test suite passed，Final acceptance passed — all checks green。
+  - `git diff --check` → 通过；`git status` 仅 3 个目标文件（Core/App 源文件 + 测试文件），无生成物、无扫描/快照/签名/project.yml 改动。
+  - 独立交叉 Review：委派给同工作区空闲的 codex（w4:p2，非主要修改者），只读审查本次 diff。
+- **剩余风险**：CLI 无法无头验证 macOS 窗口内提示条的实际布局/文案渲染（折叠/展开切换、更早记录计数展示），需签名安装后在应用窗口中人工确认；`displayedPrefix` 与视图实际展示条数由 `showsAllEvents` 状态决定，其联动逻辑未被单独测试覆盖（视图体内部状态），但计数口径本身已由纯层测试覆盖。
+
+---
+
+## Loop 18 — 2026-08-12（「最近变化总览」「今日摘要」「Project Health」显示链路可靠性修复：App/Widget 语义统一、无状态回退、无多余 reload）
+
+- **问题**：显示链路存在 6 项经一手证据确认的缺陷（A-E 修复，F 为低危观察不修）：
+  - A（HIGH）：`ScanScheduler.refreshTrustAssessment`（原 1395-1399）只在 `phase == .failure` 时传 failureMessage，不感知内容级降级；降级扫描冻结 `lastSuccessfulRefreshAt` 且 phase 会被重置 `.idle`（cancel 1909-1913、self-check 2469-2471、shutdown 3830-3832）→ App 显示「数据过期」而 Widget 显示「部分仓库待确认」，同源快照两种口径。`SettingsView.swift:717-719` 直接显示该 title，同一修复覆盖。
+  - B（HIGH）：`RepositoryEmptyStateBuilder`（`Models.swift` 1436-1470）缺 `.degraded` 分支 → degraded + 空仓库 + `lastScanAt != nil` 落到「未发现 Git 仓库」，与同屏健康概览「扫描部分完成」（`RepositoryHealthOverviewView.swift` 160-170）矛盾。
+  - C（HIGH）：`TodayDevelopmentSummaryView` 内部矛盾：`headerDescription`（「今天检测到 N 条开发变化」）、`trendContent`（`summary.hasActivity ||` 绕过可靠性闸）、`mostActiveProject` 不遵守 `hasReliableTodayCounts`，而 `metricNumber` 遵守；`ContentView.swift:184` 实传 `lastSuccessfulRefreshAt` → 仅降级扫描时三处仍展示不完整数据。
+  - D（MEDIUM-HIGH）：`widgetReloadDecision`（原 425-450）guard `reason == "scan"`，`scan-nochanges` 写回路径绕过 guard 无条件 reload；死参数 `lastReloadRequestedAt`/`now`；死常量 `widgetReloadThrottleInterval`。cancel 路径 reason="cancel" 保持无条件 reload 为有意设计（widget 60s 自愈兜底）。
+  - E（LOW）：`restorePersistedSnapshot` 两处 `AppGroupStore.write`（原 3000、3043）无 `observedStorageRevision`，绕过跨进程 CAS。
+  - F（低危观察，不修）：scan-start isRefreshing 直写与 watchdog 直写不入写链，可能被 revision guard 静默拒绝（功能降级非数据错误）。
+- **证据**：上述每条均含代码路径与复现方式；A/B/C/D 均有「修复前失败」的定向测试或内容级断言；E 的 store 级正/负路径已有 `DataFreshnessStateTests.refreshingSnapshotDoesNotCorruptRevision` 与 `staleRefreshingWriteRejected` 覆盖。
+- **原因**：修复全部收敛于既有纯派生层与单一消费点，未复制口径；App 端 `refreshTrustAssessment` 改为与 Widget 同源（`RefreshStatusFormatter.snapshotAssessment`），消除双口径。
+- **修改**：
+  - A：`ScanScheduler.refreshTrustAssessment`：phase==.failure 保留原 `refreshAssessment(failureMessage:)`，否则返回 `snapshotAssessment(snapshot: lastResult)`（与 Widget 完全同源），注释说明取消/自检中断窗口。
+  - B：`RepositoryEmptyStateBuilder` 在 .failure 分支后加 `.degraded` 分支（title「扫描部分完成」、icon「exclamationmark.triangle」、detail 说明部分仓库未能确认，`accessWarning ??` 兜底）。
+  - C：`DailyDevelopmentSummaryPresentationBuilder` 新增 `shouldShowTrend(hasActivity:comparisonActivityDayCount:hasReliableTodayCounts:)`、`shouldShowMostActiveProject(hasReliableTodayCounts:)`、`headerDescription(activityCount:hasReliableTodayCounts:)`；`TodayDevelopmentSummaryView` 三处改为调用（trendContent 首条件、mostActiveProject 前置条件、headerDescription 委托），不可靠时文案「今日尚未完成成功扫描，计数待确认。」
+  - D：`widgetReloadDecision`/`shouldRequestWidgetReload` 移除死参数，guard 改为 `reason == "scan" || reason == "scan-nochanges"`，删除 `widgetReloadThrottleInterval`；调用点同步去参。
+  - E：`restorePersistedSnapshot` 维护 `observedStorageRevision`，两处 write 均传 observed。
+  - 测试：DataFreshnessStateTests（WidgetEntry.freshnessState 10 分支映射、`appTrustAssessmentContentDegraded`、`emptyStateBuilderDegradedShowsPartialScan`、`widgetFreshnessDegraded` 增强、头部注释修正）；CommitReadinessEngineTests（`widgetReloadDecisionSkipsNoChangeScanWriteBack`、`widgetReloadDecisionReloadsNoChangeScanWhenContentChanged`、`refreshStatusExactlyThirtyMinutesIsStaleNotExpired`、snapshotTrustAssessment 4 个新测试）；DailyDevelopmentSummaryTests（shouldShowTrend/shouldShowMostActiveProject/headerDescription 可靠性闸 4 个 + 时序 3 个 + 决胜 1 个）；ActivityEventTests（timelineBuilder 空态、widgetSummary 3 条上限/未来 +60s 容忍/7 天窗口/非法日期过滤 4 个，叠加在用户 Loop 17 修改之上）；RefreshCompletionTests（`staleRevisionRejected` 零断言空壳改为真实断言）；WidgetDegradedRenderingTests（误导注释修正）；WidgetLifecycleScenariosTests（`timelineReloadThrottling` 零断言改为真实断言，观察 UserDefaults 键 `DevPulseWidgetLastForcedReloadAt`）。
+- **验证**：
+  - `bash scripts/verify.sh build` → Build succeeded（多轮）。
+  - 11 个受影响测试类全过（ActivityEventTests、DailyDevelopmentSummaryTests、CommitReadinessEngineTests、DataFreshnessStateTests、RefreshCompletionTests、WidgetDegradedRenderingTests、WidgetLifecycleScenariosTests、SharedSnapshotStoreTests、SnapshotStoreRecoveryTests、RepositoryHealthOverviewTests、RefreshEngineIntegrationTests），捕获 `{SCRATCH}/targeted-tests.log`。
+  - `bash scripts/verify.sh final` → Build succeeded + full test suite passed + Final acceptance passed，捕获 `{SCRATCH}/final-tests.log`。
+  - `bash scripts/verify.sh widgetkit` → 15 PASS, 0 FAIL，捕获 `{SCRATCH}/widgetkit.log`。
+  - `git diff --check` 通过；`git status` 14 个文件（用户 4 个脏文件保留 + 本 Loop 10 个），无生成物/调试残留；ActivityEvent/ActivityEventTests 为用户 Loop 17 文件，本次仅叠加。
+  - 证据链核对：问题清单 → diff hunk → 测试一一对应；「App/Widget 语义统一」由 `appTrustAssessmentContentDegraded` + `widgetFreshnessDegraded`（同源 snapshotAssessment）证明；「无状态回退」由 write 链 revision guard 未改动 + `SnapshotStoreRecoveryTests.crossProcessWriteDetection` + `RefreshCompletionTests.staleRevisionRejected` 证明；「无多余 reload」由 `widgetReloadDecisionSkipsNoChangeScanWriteBack` 证明。
+- **剩余风险**：本环境无 GUI，`TodayDevelopmentSummaryView` 头部文案与降级空态的实际渲染需签名安装后人工确认；F 观察项（isRefreshing/watchdog 直写可能被 revision guard 静默拒绝）未修改，属功能降级非数据错误；cancel 路径保留无条件 reload 为有意设计。
+
+---
+
+## Loop 19 — 2026-08-12（签名安装运行新 app，合并提交推送 Loop 17+18 改动）
+
+- **问题**：无新的高价值代码问题（Observe/Evidence 阶段未发现新 Bug 证据，Decide 判定本轮无变更）。工作区有 Loop 17（注意力计数）与 Loop 18（显示链路可靠性）已完成并验证的改动共 14 个文件，用户要求执行 loop 后签名安装运行新 app，并把改动合并提交推送（明确授权 commit/push）。
+- **证据**：
+  - `git status --porcelain=v2 --branch` → main 与 origin/main 同步（HEAD `713de83`，ab +0 -0），14 个未提交文件（Loop 17 的 4 个 + Loop 18 的 10 个），无 untracked 生成物。
+  - `grep -rn -e TODO -e FIXME DevPulseNative/` → 无匹配；`git diff --check` → 通过。
+  - Loop 18 已全量验证：`verify.sh final`（Build succeeded + full test suite passed + Final acceptance passed）、`verify.sh widgetkit`（15 PASS, 0 FAIL）、11 个受影响测试类全过。
+  - 签名环境：keychain 有 `Apple Development: ryukei_li@hotmail.com (5BJ9GM7VZR)`；已安装 app 内含 host/widget 的 embedded.provisionprofile（可复用，Loop 14/16 已验证匹配 bundle）；Xcode 无登录账号。
+- **原因**：无新证据支持业务修改；最高价值动作是把已验证改动落地：签名安装运行（用户要求）并提交推送（用户授权）。
+- **修改**：无业务代码修改；追加 Loop 19 记录。
+- **验证**：
+  - 标准 `install-and-self-check.sh` 被环境阻塞（`No Xcode Apple account is configured on this Mac`，与 Loop 14/16 相同）。
+  - 手动签名路径（沿用 Loop 16 成功方案 + AGENTS.md re-sign 注意事项）：用 `/tmp/devpulse-build` 的 build-for-testing 产物复制、移除 `DevPulseTests.xctest`、放入 embedded.provisionprofile（host + widget 从已安装 app 复制）、`codesign --force --sign` host（`--entitlements App/DevPulse.entitlements`）与 widget（`--entitlements Widget/DevPulseWidgetExtension.entitlements`）。
+  - `codesign --verify --deep --strict` → valid on disk，satisfies Designated Requirement；host/widget entitlements 均含 `com.apple.security.application-groups`；无测试 bundle。
+  - 安装到 `/Applications/DevPulse.app`（旧版备份到 `/tmp/devpulse-install-loop19/DevPulse.app.bak`），`open -n` 启动，进程运行（PID 75431）。
+  - `--self-check`（签名后）→ `self_check.result=pass`、`refresh_phase=success`、`repository_count=3`、`validation=pass`、`lifecycle.widget_registration=active`、`lifecycle.self_heal=^pass`、exit=0。
+  - 共享快照（`~/Library/Group Containers/group.local.devpulse/repositories.json`）：`generatedAt=2026-08-12T11:13:05Z`、`writtenAt=11:13:07Z`、`lastSuccessfulRefreshAt=11:13:05Z` 为启动后新值；`storageRevision=6755`；`DevPulse status=changed` 与工作区 14 个未提交文件一致。
+  - 提交前：`scripts/secret-scan.sh staged`、`git diff --cached --check` 通过；push 到 `origin/main`。
+- **剩余风险**：无签名自动安装能力（需 Xcode 登录 Apple 账号）——手动签名路径已验证可用但每次需人工执行；Widget 在桌面上的实际渲染与交互、今日摘要降级文案与空态渲染仍需人工确认。

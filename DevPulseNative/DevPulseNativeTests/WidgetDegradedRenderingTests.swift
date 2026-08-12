@@ -137,16 +137,16 @@ struct WidgetDegradedRenderingTests {
         #expect(!unknown.title.isEmpty)
         #expect(!unknown.detail.isEmpty)
 
-        // Failed: read error provided
-        let failed = RefreshStatusFormatter.snapshotAssessment(
+        // Unknown: read error provided — readError maps to .unknown, not .failed
+        let readErrorAssessment = RefreshStatusFormatter.snapshotAssessment(
             generatedAt: ISO8601DateFormatter().string(from: now.addingTimeInterval(-60)),
             writtenAt: ISO8601DateFormatter().string(from: now.addingTimeInterval(-60)),
             now: now,
             readError: "模拟读取错误"
         )
-        #expect(failed.state == .unknown) // readError maps to .unknown
-        #expect(!failed.title.isEmpty)
-        #expect(!failed.detail.isEmpty)
+        #expect(readErrorAssessment.state == .unknown)
+        #expect(!readErrorAssessment.title.isEmpty)
+        #expect(!readErrorAssessment.detail.isEmpty)
     }
 
     // ────────────────────────────────────────────────────────────────

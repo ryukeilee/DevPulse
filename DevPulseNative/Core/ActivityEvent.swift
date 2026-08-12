@@ -233,12 +233,59 @@ enum ActivityEventOrdering {
 }
 
 /// 「最近变化」中需要优先确认的注意力事件口径：冲突开始与读取失败。
-/// 时间线的提示条与计数共用此定义，避免视图内各自解释事件类型。
+/// 只有「未解除」的注意力事件才计入：同仓库同类型的后续解除/恢复事件
+/// 会关闭该状态。时间线的提示条与计数共用此定义，避免视图内各自解释。
 enum ActivityTimelineAttention {
+    /// 未解除的注意力事件：按 (repositoryID, family) 取最新一条，最新状态
+    /// 为冲突开始/读取失败才算未解除。返回保持入参顺序。
+    static func openAttentionEvents(in events: [ActivityEvent]) -> [ActivityEvent] {
+        var latestByFamily: [String: ActivityEvent] = [:]
+        for event in events.sorted(by: newestFirst) {
+            guard let family = attentionFamily(for: event.kind) else { continue }
+            let key = "\(event.repositoryID)\u{1F}\(family)"
+            if latestByFamily[key] == nil {
+                latestByFamily[key] = event
+            }
+        }
+        return events.filter { event in
+            guard let family = attentionFamily(for: event.kind) else { return false }
+            let key = "\(event.repositoryID)\u{1F}\(family)"
+            return (event.kind == .conflictStarted || event.kind == .readFailed)
+                && latestByFamily[key]?.id == event.id
+        }
+    }
+
     static func count(in events: [ActivityEvent]) -> Int {
-        events.lazy.filter {
-            $0.kind == .conflictStarted || $0.kind == .readFailed
-        }.count
+        openAttentionEvents(in: events).count
+    }
+
+    /// 折叠态提示条口径：displayed 为前 displayedPrefix 条内的未解除注意力
+    /// 事件数，additional 为更早记录中的未解除注意力事件数。两数相加恒等于
+    /// 全部未解除注意力事件数。
+    static func split(
+        events: [ActivityEvent],
+        displayedPrefix: Int
+    ) -> (displayed: Int, additional: Int) {
+        let open = openAttentionEvents(in: events)
+        let displayedIDs = Set(events.prefix(max(0, displayedPrefix)).map(\.id))
+        let displayed = open.filter { displayedIDs.contains($0.id) }.count
+        return (displayed, open.count - displayed)
+    }
+
+    private static func attentionFamily(for kind: ActivityEventKind) -> String? {
+        switch kind {
+        case .conflictStarted, .conflictResolved: return "conflict"
+        case .readFailed, .readRecovered: return "read"
+        default: return nil
+        }
+    }
+
+    private static func newestFirst(_ lhs: ActivityEvent, _ rhs: ActivityEvent) -> Bool {
+        let lhsDate = DateFormatting.date(from: lhs.occurredAt)
+        let rhsDate = DateFormatting.date(from: rhs.occurredAt)
+        if let lhsDate, let rhsDate, lhsDate != rhsDate { return lhsDate > rhsDate }
+        if lhs.occurredAt != rhs.occurredAt { return lhs.occurredAt > rhs.occurredAt }
+        return lhs.id > rhs.id
     }
 }
 
