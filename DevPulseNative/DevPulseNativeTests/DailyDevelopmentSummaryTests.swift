@@ -197,6 +197,39 @@ struct DailyDevelopmentSummaryTests {
         #expect(summary.hasDataWarning)
     }
 
+    @Test func readFailureOlderThanComparisonWindowStillCountsUntilRecovery() {
+        // 仓库连续失败超过 7 天比较窗口（窗口外只有一条 readFailed，无新事件），
+        // 今日统计确实缺该仓库数据，完整性警告不应漏报。
+        let calendar = utcCalendar()
+        let summary = DailyDevelopmentSummaryBuilder.build(
+            events: [
+                event(id: "failed-old", repositoryID: "repo-a", name: "Alpha", kind: .readFailed, at: "2026-07-10T09:00:00Z")
+            ],
+            now: date("2026-07-20T12:00:00Z"),
+            calendar: calendar
+        )
+
+        #expect(summary.activityCount == 0)
+        #expect(summary.unavailableProjectCount == 1)
+        #expect(summary.hasDataWarning)
+    }
+
+    @Test func readFailureOlderThanWindowClearedByLaterRecovery() {
+        // 窗口外失败、稍后已恢复：最新读取状态为 readRecovered，不再计入警告。
+        let calendar = utcCalendar()
+        let summary = DailyDevelopmentSummaryBuilder.build(
+            events: [
+                event(id: "failed-old", repositoryID: "repo-a", name: "Alpha", kind: .readFailed, at: "2026-07-08T09:00:00Z"),
+                event(id: "recovered-old", repositoryID: "repo-a", name: "Alpha", kind: .readRecovered, at: "2026-07-12T09:00:00Z")
+            ],
+            now: date("2026-07-20T12:00:00Z"),
+            calendar: calendar
+        )
+
+        #expect(summary.unavailableProjectCount == 0)
+        #expect(!summary.hasDataWarning)
+    }
+
     @Test func noActivityHistoryProducesUnavailableTrends() {
         let calendar = utcCalendar()
         let summary = DailyDevelopmentSummaryBuilder.build(
@@ -211,6 +244,102 @@ struct DailyDevelopmentSummaryTests {
         #expect(summary.commitTrend.direction == .unavailable)
         #expect(summary.activeProjectTrend.direction == .unavailable)
         #expect(summary.focusTimeTrend.direction == .unavailable)
+    }
+
+    // MARK: 展示层可信口径：未成功扫描当日不得伪装成 0 统计
+
+    @Test func noSuccessfulScanTodayMeansTodayCountsAreUnknown() {
+        let calendar = utcCalendar()
+        let now = date("2026-07-20T12:00:00Z")
+
+        // 首次运行（从未成功扫描）：今天没有观察，计数必须视为未知。
+        #expect(!DailyDevelopmentSummaryPresentationBuilder.hasReliableTodayCounts(
+            lastSuccessfulScanAt: nil,
+            now: now,
+            calendar: calendar
+        ))
+        // 上次成功扫描在昨天：今天尚未观察，不能把 0 当作真实统计。
+        #expect(!DailyDevelopmentSummaryPresentationBuilder.hasReliableTodayCounts(
+            lastSuccessfulScanAt: date("2026-07-19T12:00:00Z"),
+            now: now,
+            calendar: calendar
+        ))
+        // 今天任意时刻成功扫描过：今天计数可信（覆盖当日跨日边界两端）。
+        #expect(DailyDevelopmentSummaryPresentationBuilder.hasReliableTodayCounts(
+            lastSuccessfulScanAt: date("2026-07-20T00:00:01Z"),
+            now: now,
+            calendar: calendar
+        ))
+        #expect(DailyDevelopmentSummaryPresentationBuilder.hasReliableTodayCounts(
+            lastSuccessfulScanAt: date("2026-07-20T23:59:59Z"),
+            now: now,
+            calendar: calendar
+        ))
+    }
+
+    // MARK: 趋势文案：下降方向取绝对值，不出现 "↓ -N" 双重负号
+
+    @Test func trendLabelUsesAbsoluteValueForDecreasedDirection() {
+        let decreased = DailyDevelopmentSummary.Trend(
+            direction: .decreased,
+            delta: -5,
+            recentDailyAverage: 8,
+            comparisonDayCount: 3
+        )
+        #expect(DailyDevelopmentSummaryPresentationBuilder.trendValueLabel(
+            for: decreased, unit: .count
+        ) == "↓ 5")
+        #expect(DailyDevelopmentSummaryPresentationBuilder.trendValueLabel(
+            for: decreased, unit: .minutes
+        ) == "↓ 5 分钟")
+
+        let increased = DailyDevelopmentSummary.Trend(
+            direction: .increased,
+            delta: 3,
+            recentDailyAverage: 1,
+            comparisonDayCount: 3
+        )
+        #expect(DailyDevelopmentSummaryPresentationBuilder.trendValueLabel(
+            for: increased, unit: .count
+        ) == "↑ +3")
+        #expect(DailyDevelopmentSummaryPresentationBuilder.trendValueLabel(
+            for: increased, unit: .minutes
+        ) == "↑ +3 分钟")
+
+        let unchanged = DailyDevelopmentSummary.Trend(
+            direction: .unchanged,
+            delta: 0,
+            recentDailyAverage: 2,
+            comparisonDayCount: 3
+        )
+        #expect(DailyDevelopmentSummaryPresentationBuilder.trendValueLabel(
+            for: unchanged, unit: .count
+        ) == "→ 持平")
+
+        let unavailable = DailyDevelopmentSummary.Trend.unavailable(comparisonDayCount: 0)
+        #expect(DailyDevelopmentSummaryPresentationBuilder.trendValueLabel(
+            for: unavailable, unit: .count
+        ) == "— 暂无可比")
+    }
+
+    @Test func trendDeltaFormattingHandlesNilAndFractionalValues() {
+        #expect(DailyDevelopmentSummaryPresentationBuilder.formattedDelta(nil, unit: .count) == "—")
+        #expect(DailyDevelopmentSummaryPresentationBuilder.formattedDelta(2.5, unit: .count) == "2.5")
+        #expect(DailyDevelopmentSummaryPresentationBuilder.formattedDelta(2.0, unit: .count) == "2")
+        #expect(DailyDevelopmentSummaryPresentationBuilder.formattedDelta(-2.5, unit: .minutes) == "-2.5 分钟")
+    }
+
+    @Test func trendComparisonLabelUsesActivityDayCount() {
+        let trend = DailyDevelopmentSummary.Trend(
+            direction: .increased,
+            delta: 2,
+            recentDailyAverage: 1,
+            comparisonDayCount: 3
+        )
+        #expect(DailyDevelopmentSummaryPresentationBuilder.trendComparisonLabel(for: trend) == "较 3 个有活动日")
+        #expect(DailyDevelopmentSummaryPresentationBuilder.trendComparisonLabel(
+            for: .unavailable(comparisonDayCount: 0)
+        ) == "暂无历史活动")
     }
 
     private func utcCalendar() -> Calendar {

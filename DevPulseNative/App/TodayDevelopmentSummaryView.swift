@@ -2,11 +2,6 @@ import Foundation
 import SwiftUI
 
 struct TodayDevelopmentSummaryView: View {
-    private enum TrendUnit: Equatable {
-        case count
-        case minutes
-    }
-
     let events: [ActivityEvent]
     let lastScanAt: Date?
     let isScanning: Bool
@@ -26,6 +21,15 @@ struct TodayDevelopmentSummaryView: View {
 
     private var summary: DailyDevelopmentSummary {
         DailyDevelopmentSummaryBuilder.build(events: events, now: now)
+    }
+
+    /// 今天是否已有一次成功扫描：只有今天观察过，今天的计数与趋势
+    /// 才作为真实数据展示；否则显示未知态（"—"/等待扫描）。
+    private var hasReliableTodayCounts: Bool {
+        DailyDevelopmentSummaryPresentationBuilder.hasReliableTodayCounts(
+            lastSuccessfulScanAt: lastScanAt,
+            now: now
+        )
     }
 
     var body: some View {
@@ -90,61 +94,48 @@ struct TodayDevelopmentSummaryView: View {
         ) {
             metric(
                 title: "发现新提交",
-                value: "\(summary.commitCount)",
+                value: metricNumber(summary.commitCount),
                 systemImage: "checkmark.circle",
                 detail: "扫描变化"
             )
             metric(
                 title: "活跃项目",
-                value: "\(summary.activeProjectCount)",
+                value: metricNumber(summary.activeProjectCount),
                 systemImage: "folder",
                 detail: "有开发变化"
             )
             metric(
                 title: "专注时间（估算）",
-                value: focusTimeLabel(summary.focusMinutes),
+                value: metricFocus(summary.focusMinutes),
                 systemImage: "timer",
                 detail: "活动间隔估算"
             )
         }
     }
 
+    /// 今日计数在未成功扫描当日显示 "—"（未知），而不是把未扫描伪装成 0。
+    private func metricNumber(_ count: Int) -> String {
+        hasReliableTodayCounts ? "\(count)" : "—"
+    }
+
+    private func metricFocus(_ minutes: Int) -> String {
+        hasReliableTodayCounts ? focusTimeLabel(minutes) : "—"
+    }
+
     @ViewBuilder
     private func trendContent(summary: DailyDevelopmentSummary) -> some View {
-        if summary.hasActivity || summary.comparisonActivityDayCount > 0 {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("开发趋势")
-                        .font(.subheadline.weight(.semibold))
-                    Text("今日相对近 7 天有活动日均")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    Spacer(minLength: 0)
-                }
-
-                HStack(spacing: 8) {
-                    trendMetric(
-                        title: "提交",
-                        trend: summary.commitTrend,
-                        unit: .count
-                    )
-                    trendMetric(
-                        title: "项目",
-                        trend: summary.activeProjectTrend,
-                        unit: .count
-                    )
-                    trendMetric(
-                        title: "专注",
-                        trend: summary.focusTimeTrend,
-                        unit: .minutes
-                    )
-                }
-            }
-            .padding(11)
-            .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(DevPulseVisualStyle.strongerSurface)
+        if summary.hasActivity
+            || (hasReliableTodayCounts && summary.comparisonActivityDayCount > 0) {
+            trendBlock(summary: summary)
+        } else if summary.comparisonActivityDayCount > 0 {
+            // 有历史可比较，但今天尚未成功扫描：不能把"今日 0 活动"当作
+            // 真实下降呈现，显示等待扫描的占位说明。
+            Label(
+                "今日尚未完成成功扫描，暂不对比历史趋势",
+                systemImage: "clock.badge.questionmark"
             )
+            .font(.caption)
+            .foregroundStyle(.tertiary)
         } else {
             Label(
                 "暂无历史变化，趋势会在扫描记录积累后显示",
@@ -153,6 +144,42 @@ struct TodayDevelopmentSummaryView: View {
             .font(.caption)
             .foregroundStyle(.tertiary)
         }
+    }
+
+    private func trendBlock(summary: DailyDevelopmentSummary) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("开发趋势")
+                    .font(.subheadline.weight(.semibold))
+                Text("今日相对近 7 天有活动日均")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 8) {
+                trendMetric(
+                    title: "提交",
+                    trend: summary.commitTrend,
+                    unit: .count
+                )
+                trendMetric(
+                    title: "项目",
+                    trend: summary.activeProjectTrend,
+                    unit: .count
+                )
+                trendMetric(
+                    title: "专注",
+                    trend: summary.focusTimeTrend,
+                    unit: .minutes
+                )
+            }
+        }
+        .padding(11)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(DevPulseVisualStyle.strongerSurface)
+        )
     }
 
     @ViewBuilder
@@ -240,7 +267,10 @@ struct TodayDevelopmentSummaryView: View {
                 VStack(alignment: .trailing, spacing: 2) {
                     Text("\(project.activityCount) 次变化")
                         .font(.subheadline.weight(.semibold))
-                    Text(trendValueLabel(project.trend, unit: .count))
+                    Text(DailyDevelopmentSummaryPresentationBuilder.trendValueLabel(
+                        for: project.trend,
+                        unit: .count
+                    ))
                         .font(.caption2)
                         .foregroundStyle(trendColor(project.trend))
                 }
@@ -282,18 +312,18 @@ struct TodayDevelopmentSummaryView: View {
     private func trendMetric(
         title: String,
         trend: DailyDevelopmentSummary.Trend,
-        unit: TrendUnit
+        unit: DailyDevelopmentSummaryPresentationBuilder.TrendUnit
     ) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
                 .font(.caption2.weight(.medium))
                 .foregroundStyle(.secondary)
-            Text(trendValueLabel(trend, unit: unit))
+            Text(DailyDevelopmentSummaryPresentationBuilder.trendValueLabel(for: trend, unit: unit))
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(trendColor(trend))
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
-            Text(trendComparisonLabel(trend))
+            Text(DailyDevelopmentSummaryPresentationBuilder.trendComparisonLabel(for: trend))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
@@ -308,38 +338,6 @@ struct TodayDevelopmentSummaryView: View {
         if hours == 0 { return "\(remainingMinutes) 分钟" }
         if remainingMinutes == 0 { return "\(hours) 小时" }
         return "\(hours) 小时 \(remainingMinutes) 分钟"
-    }
-
-    private func trendValueLabel(
-        _ trend: DailyDevelopmentSummary.Trend,
-        unit: TrendUnit
-    ) -> String {
-        switch trend.direction {
-        case .increased:
-            return "↑ +\(formattedDelta(trend.delta, unit: unit))"
-        case .decreased:
-            return "↓ \(formattedDelta(trend.delta, unit: unit))"
-        case .unchanged:
-            return "→ 持平"
-        case .unavailable:
-            return "— 暂无可比"
-        }
-    }
-
-    private func trendComparisonLabel(_ trend: DailyDevelopmentSummary.Trend) -> String {
-        guard trend.comparisonDayCount > 0 else { return "暂无历史活动" }
-        return "较 \(trend.comparisonDayCount) 个有活动日"
-    }
-
-    private func formattedDelta(_ delta: Double?, unit: TrendUnit) -> String {
-        guard let delta else { return "—" }
-        let value: String
-        if abs(delta.rounded() - delta) < 0.01 {
-            value = String(Int(delta.rounded()))
-        } else {
-            value = String(format: "%.1f", delta)
-        }
-        return unit == .minutes ? "\(value) 分钟" : value
     }
 
     private func trendColor(_ trend: DailyDevelopmentSummary.Trend) -> Color {

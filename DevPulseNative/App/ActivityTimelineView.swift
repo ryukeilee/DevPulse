@@ -21,23 +21,31 @@ struct ActivityTimelineView: View {
         ActivityEventOrdering.sorted(events)
     }
 
-    private var displayedEvents: [ActivityEvent] {
-        let limit = showsAllEvents ? Self.maxDisplayedEvents : Self.initialDisplayedEventCount
-        return Array(orderedEvents.prefix(limit))
-    }
-
     var body: some View {
         // 一次 body 求值只构建一次排序/展示列表与决策上下文，避免
         // 计算属性在 header / 计数 / 每行渲染处被重复执行。
-        let displayedEvents = self.displayedEvents
+        let orderedEvents = self.orderedEvents
+        let displayedEvents = Array(
+            orderedEvents.prefix(showsAllEvents ? Self.maxDisplayedEvents : Self.initialDisplayedEventCount)
+        )
         let decisions = decisionsByRepositoryID
+        // 提示口径覆盖全部冲突/读取异常：折叠态下较早记录中的注意力事件
+        // 同样计入，避免"列表有冲突"因超出前 8 条而漏报。
+        let attentionCount = ActivityTimelineAttention.count(in: displayedEvents)
+        let additionalAttentionCount = max(
+            0,
+            ActivityTimelineAttention.count(in: orderedEvents) - attentionCount
+        )
         return VStack(alignment: .leading, spacing: 12) {
             header(displayedEvents: displayedEvents)
 
             if events.isEmpty {
                 emptyState
             } else {
-                attentionNotice(displayedEvents: displayedEvents)
+                attentionNotice(
+                    displayedCount: attentionCount,
+                    additionalCount: additionalAttentionCount
+                )
 
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(displayedEvents) { event in
@@ -96,14 +104,24 @@ struct ActivityTimelineView: View {
     }
 
     @ViewBuilder
-    private func attentionNotice(displayedEvents: [ActivityEvent]) -> some View {
-        let attentionCount = displayedEvents.filter {
-            $0.kind == .conflictStarted || $0.kind == .readFailed
-        }.count
-
-        if attentionCount > 0 {
+    private func attentionNotice(displayedCount: Int, additionalCount: Int) -> some View {
+        if displayedCount > 0 && additionalCount > 0 {
             Label(
-                "列表中有 \(attentionCount) 条冲突或读取异常，建议优先确认",
+                "列表中有 \(displayedCount) 条冲突或读取异常（另有 \(additionalCount) 条在较早记录中），建议优先确认",
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.orange)
+        } else if displayedCount > 0 {
+            Label(
+                "列表中有 \(displayedCount) 条冲突或读取异常，建议优先确认",
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.orange)
+        } else if additionalCount > 0 {
+            Label(
+                "较早记录中有 \(additionalCount) 条冲突或读取异常，展开后建议优先确认",
                 systemImage: "exclamationmark.triangle.fill"
             )
             .font(.caption.weight(.medium))

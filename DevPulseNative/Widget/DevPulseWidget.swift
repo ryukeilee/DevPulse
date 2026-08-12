@@ -524,11 +524,13 @@ private struct WidgetSummaryStrip: View {
 
     var body: some View {
         HStack(spacing: compact ? 4 : 6) {
-            WidgetMetricCell(label: "仓库", value: "\(summary.totalRepositories)", compact: compact)
-            WidgetMetricCell(label: "有改动", value: "\(summary.changedRepositories)", compact: compact)
-            WidgetMetricCell(label: "文件", value: "\(summary.totalChangedFiles)", compact: compact)
-            if summary.errorRepositories > 0 {
-                WidgetMetricCell(label: "待确认", value: "\(summary.errorRepositories)", tone: .warning, compact: compact)
+            ForEach(WidgetScanSummaryStripBuilder.build(from: summary), id: \.label) { cell in
+                WidgetMetricCell(
+                    label: cell.label,
+                    value: cell.value,
+                    tone: cell.tone == .warning ? .warning : .normal,
+                    compact: compact
+                )
             }
         }
     }

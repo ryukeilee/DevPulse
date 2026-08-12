@@ -92,18 +92,16 @@ enum DailyDevelopmentSummaryBuilder {
         ) ?? todayStart
 
         var buckets: [Date: DayBucket] = [:]
-        // 仓库窗口内的最新读取状态（readFailed / readRecovered），用于判断
-        // 仓库当前是否仍处于不可读状态。与"今日新增失败"不同，跨日未恢复
-        // 的失败也会被计入完整性警告，避免"统计可能不完整"漏报。
+        // 仓库读取状态按完整事件归档跟踪（不受 7 天比较窗口限制）：
+        // 可读 → 不可读只产生一次 readFailed 事件，若仓库连续失败超过窗口，
+        // 仅靠窗口内事件会漏掉"统计可能不完整"警告；readRecovered 为最新时
+        // 说明已恢复，不计入警告。
         var latestReadStateByRepository: [String: (kind: ActivityEventKind, date: Date)] = [:]
         for event in events {
             guard let date = DateFormatting.date(from: event.occurredAt),
-                  date >= historyStart,
                   date <= now else {
                 continue
             }
-
-            let day = calendar.startOfDay(for: date)
 
             if event.kind == .readFailed || event.kind == .readRecovered {
                 if let existing = latestReadStateByRepository[event.repositoryID] {
@@ -115,8 +113,9 @@ enum DailyDevelopmentSummaryBuilder {
                 }
                 continue
             }
-            guard isDevelopmentActivity(event.kind) else { continue }
+            guard isDevelopmentActivity(event.kind), date >= historyStart else { continue }
 
+            let day = calendar.startOfDay(for: date)
             buckets[day, default: DayBucket()].add(
                 event: event,
                 date: date
@@ -307,5 +306,64 @@ enum DailyDevelopmentSummaryBuilder {
             recentDailyAverage: average,
             comparisonDayCount: comparisonDayCount
         )
+    }
+}
+
+// MARK: - 展示层可信口径与趋势文案（纯派生，无 I/O）
+
+/// 「今日摘要」与「开发趋势」展示层共用的可信口径与文案。
+///
+/// 关键规则：只有当今天发生过一次成功扫描时，今天的事件计数才代表对今天
+/// 的完整观察；否则这些数字是"未扫描"而非"0 活动"。视图据此把未知态显示
+/// 为 "—"/等待扫描，而不是把未扫描伪装成 0 统计或"今天大幅下降"的趋势。
+enum DailyDevelopmentSummaryPresentationBuilder {
+    /// 今天是否已有一次成功扫描。返回 false 时，今日计数与今日相对历史的
+    /// 趋势都不应作为真实观察展示（首次运行、跨日未扫描都属于这种情况）。
+    static func hasReliableTodayCounts(
+        lastSuccessfulScanAt: Date?,
+        now: Date,
+        calendar: Calendar = .current
+    ) -> Bool {
+        guard let lastSuccessfulScanAt else { return false }
+        return calendar.isDate(lastSuccessfulScanAt, inSameDayAs: now)
+    }
+
+    enum TrendUnit: Equatable {
+        case count
+        case minutes
+    }
+
+    /// 趋势主标签：上升 / 下降 / 持平 / 不可比。
+    /// 下降方向取绝对值，避免 delta 为负时显示 "↓ -N" 双重负号。
+    static func trendValueLabel(
+        for trend: DailyDevelopmentSummary.Trend,
+        unit: TrendUnit
+    ) -> String {
+        switch trend.direction {
+        case .increased:
+            return "↑ +\(formattedDelta(trend.delta, unit: unit))"
+        case .decreased:
+            return "↓ \(formattedDelta(trend.delta.map { -$0 }, unit: unit))"
+        case .unchanged:
+            return "→ 持平"
+        case .unavailable:
+            return "— 暂无可比"
+        }
+    }
+
+    static func trendComparisonLabel(for trend: DailyDevelopmentSummary.Trend) -> String {
+        guard trend.comparisonDayCount > 0 else { return "暂无历史活动" }
+        return "较 \(trend.comparisonDayCount) 个有活动日"
+    }
+
+    static func formattedDelta(_ delta: Double?, unit: TrendUnit) -> String {
+        guard let delta else { return "—" }
+        let value: String
+        if abs(delta.rounded() - delta) < 0.01 {
+            value = String(Int(delta.rounded()))
+        } else {
+            value = String(format: "%.1f", delta)
+        }
+        return unit == .minutes ? "\(value) 分钟" : value
     }
 }

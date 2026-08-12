@@ -125,6 +125,54 @@ struct ActivityEventTests {
         ).map(\.kind) == [.readRecovered])
     }
 
+    @Test func attentionCountCoversConflictsAndReadFailuresOnly() {
+        // 「最近变化」提示条只统计需要优先确认的事件（冲突开始 / 读取失败），
+        // 冲突解除、读取恢复与普通改动不计入，避免计数与提示口径漂移。
+        let readable = snapshot(modified: 2, conflicted: 1)
+        let failed = readable.retainingLastSuccessfulData(
+            attemptedAt: "2026-07-16T11:00:00Z",
+            errorMessage: "读取失败"
+        )
+
+        let conflictStarted = try? #require(event(
+            previous: snapshot(modified: 2, conflicted: 0),
+            current: snapshot(modified: 2, conflicted: 1),
+            at: "2026-07-16T10:00:00Z",
+            kind: .conflictStarted
+        ))
+        let conflictResolved = try? #require(event(
+            previous: snapshot(modified: 2, conflicted: 1),
+            current: snapshot(modified: 2, conflicted: 0),
+            at: "2026-07-16T10:30:00Z",
+            kind: .conflictResolved
+        ))
+        let readFailed = try? #require(event(
+            previous: readable,
+            current: failed,
+            at: "2026-07-16T11:00:00Z",
+            kind: .readFailed
+        ))
+        let readRecovered = try? #require(event(
+            previous: failed,
+            current: readable,
+            at: "2026-07-16T11:30:00Z",
+            kind: .readRecovered
+        ))
+        let changed = try? #require(makeWorkingTreeEvent(from: 1, to: 2, at: "2026-07-16T12:00:00Z"))
+
+        let all = [conflictStarted, conflictResolved, readFailed, readRecovered, changed].compactMap { $0 }
+        #expect(all.count == 5)
+        #expect(ActivityTimelineAttention.count(in: all) == 2)
+
+        #expect(ActivityTimelineAttention.count(
+            in: [conflictStarted, readFailed].compactMap { $0 }
+        ) == 2)
+        #expect(ActivityTimelineAttention.count(
+            in: [conflictResolved, readRecovered, changed].compactMap { $0 }
+        ) == 0)
+        #expect(ActivityTimelineAttention.count(in: []) == 0)
+    }
+
     @Test func persistedTransitionPreventsReplayAfterSnapshotWriteFailureButAllowsCycles() throws {
         let first = try #require(makeWorkingTreeEvent(
             from: 0,

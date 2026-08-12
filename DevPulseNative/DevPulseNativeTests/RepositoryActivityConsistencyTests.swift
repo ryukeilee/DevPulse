@@ -171,4 +171,61 @@ struct RepositoryActivityConsistencyTests {
                 == iso(-7_200)
         )
     }
+
+    // MARK: 变更计数单位跨模块一致（列表 / 健康概览 / 详情 / Widget）
+
+    @Test func changedCountUnitIsConsistentAcrossModules() {
+        // 同一份快照：列表行、健康概览、详情、Widget 优先摘要都应以"处改动"
+        // 为单位，避免同一仓库在不同模块显示"2 个文件"与"2 处改动"两种口径。
+        let repo = snapshot(lastChangedAt: iso(-3_600), lastActivityAt: nil)
+        let item = ActivityTimelineItem(from: repo)
+
+        let list = RepositoryListItemPresentationBuilder.build(snapshot: repo, now: now)
+        let health = RepositoryHealthOverviewBuilder.build(snapshots: [repo], now: now).first!
+        let detail = RepositoryDetailPresentationBuilder.build(snapshot: repo)
+        let widget = WidgetPrioritySummaryBuilder.build(
+            feed: ActivityTimelineFeed(state: .active, items: [item]),
+            trustAssessment: SnapshotTrustAssessment(
+                state: .fresh,
+                title: "刚刚更新",
+                detail: "数据仍在可信时间窗内",
+                basis: "test"
+            )
+        )
+
+        #expect(list.localChanges == "2 处改动")
+        #expect(health.repositoryState == .changed(count: 2))
+        #expect(health.repositoryState.label == "2 处改动")
+        #expect(detail.localSummary.contains("2 处改动"))
+        #expect(widget.auxiliary == "2 处改动")
+    }
+
+    // MARK: Widget 摘要条与 App 内变更计数单位一致
+
+    @Test func widgetSummaryStripUsesSameChangeUnitAsAppModules() {
+        // 中/大号 Widget 顶部摘要条的 totalChangedFiles 与行内 "N 处改动"
+        // 都来自同一快照字段（Σ changedFileCount），单位必须一致，
+        // 避免相邻 UI 显示 "文件 12" 与 "12 处改动" 两种口径。
+        let summary = ScanSummary(
+            totalRepositories: 4,
+            changedRepositories: 2,
+            totalChangedFiles: 12,
+            errorRepositories: 1
+        )
+        let cells = WidgetScanSummaryStripBuilder.build(from: summary)
+
+        #expect(cells.map(\.label) == ["仓库", "有改动", "处改动", "待确认"])
+        #expect(cells[2].label == "处改动")
+        #expect(cells[2].value == "12")
+        #expect(cells[3].tone == .warning)
+        #expect(cells.first?.tone == .normal)
+
+        let cleanSummary = ScanSummary(
+            totalRepositories: 4,
+            changedRepositories: 0,
+            totalChangedFiles: 0,
+            errorRepositories: 0
+        )
+        #expect(WidgetScanSummaryStripBuilder.build(from: cleanSummary).map(\.label) == ["仓库", "有改动", "处改动"])
+    }
 }

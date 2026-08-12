@@ -1207,7 +1207,7 @@ struct CommitReadinessEngineTests {
         #expect(presentation.action.kind == .synchronizeDivergedBranch)
         #expect(presentation.action.title == "同步分叉分支")
         #expect(presentation.latestCommit == "2 小时前 · Refine repository dashboard")
-        #expect(presentation.localChanges == "0 个文件")
+        #expect(presentation.localChanges == "0 处改动")
         #expect(presentation.synchronization == "领先 2 · 落后 1")
         #expect(presentation.recentActivity == "30 分钟前")
     }

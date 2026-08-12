@@ -1020,10 +1020,10 @@ enum RepositoryListItemPresentationBuilder {
         case .unknown:
             return "本地改动未知"
         case .lastSuccessful:
-            return "上次成功 · \(snapshot.changedFileCount) 个文件"
+            return "上次成功 · \(snapshot.changedFileCount) 处改动"
         case .current:
             guard snapshot.status != .error else { return "本地改动未知" }
-            return "\(snapshot.changedFileCount) 个文件"
+            return "\(snapshot.changedFileCount) 处改动"
         }
     }
 
@@ -1498,6 +1498,39 @@ struct ScanSummary: Codable, Equatable {
                 $0.resolvedDataSource != .current || $0.status == .error
             }.count
         )
+    }
+}
+
+// MARK: - Widget 摘要条（与 App 内变更计数单位一致）
+
+struct WidgetScanSummaryCell: Equatable {
+    enum Tone: Equatable {
+        case normal
+        case warning
+    }
+
+    let label: String
+    let value: String
+    let tone: Tone
+}
+
+/// 中/大号 Widget 顶部摘要条的派生。变更计数沿用 App 内各模块统一的
+/// "处改动" 单位（`totalChangedFiles` 与列表/详情/健康/优先摘要同源于
+/// `changedFileCount`），避免同一快照字段在相邻 UI 显示 "文件 N" 与
+/// "N 处改动" 两种口径。
+enum WidgetScanSummaryStripBuilder {
+    static func build(from summary: ScanSummary) -> [WidgetScanSummaryCell] {
+        var cells = [
+            WidgetScanSummaryCell(label: "仓库", value: "\(summary.totalRepositories)", tone: .normal),
+            WidgetScanSummaryCell(label: "有改动", value: "\(summary.changedRepositories)", tone: .normal),
+            WidgetScanSummaryCell(label: "处改动", value: "\(summary.totalChangedFiles)", tone: .normal)
+        ]
+        if summary.errorRepositories > 0 {
+            cells.append(
+                WidgetScanSummaryCell(label: "待确认", value: "\(summary.errorRepositories)", tone: .warning)
+            )
+        }
+        return cells
     }
 }
 

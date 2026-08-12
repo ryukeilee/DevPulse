@@ -232,6 +232,16 @@ enum ActivityEventOrdering {
     }
 }
 
+/// 「最近变化」中需要优先确认的注意力事件口径：冲突开始与读取失败。
+/// 时间线的提示条与计数共用此定义，避免视图内各自解释事件类型。
+enum ActivityTimelineAttention {
+    static func count(in events: [ActivityEvent]) -> Int {
+        events.lazy.filter {
+            $0.kind == .conflictStarted || $0.kind == .readFailed
+        }.count
+    }
+}
+
 enum ActivityEventDiffer {
     static func events(
         previous: AppGroupData,
