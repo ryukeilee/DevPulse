@@ -2,6 +2,7 @@ import Foundation
 
 enum RepositoryListFilter: String, CaseIterable, Codable, Identifiable {
     case all
+    case favorites
     case needsAttention = "needs_attention"
     case localChanges = "local_changes"
     case unsynchronized
@@ -13,6 +14,8 @@ enum RepositoryListFilter: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .all:
             return "全部"
+        case .favorites:
+            return "已收藏"
         case .needsAttention:
             return "需处理"
         case .localChanges:
@@ -28,6 +31,8 @@ enum RepositoryListFilter: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .all:
             return true
+        case .favorites:
+            return repository.isPinned
         case .needsAttention:
             return repository.actionState.kind != .noActionNeeded
         case .localChanges:
@@ -55,6 +60,25 @@ enum RepositoryListFilter: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+enum RepositoryListSortOrder: String, CaseIterable, Codable, Identifiable {
+    case smart
+    case recentActivity = "recent_activity"
+    case name
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .smart:
+            return "智能排序"
+        case .recentActivity:
+            return "最近活跃"
+        case .name:
+            return "名称"
+        }
+    }
+}
+
 struct RepositoryListPreferences: Codable, Equatable {
     static let currentVersion = 1
     static let defaultValue = RepositoryListPreferences()
@@ -62,15 +86,29 @@ struct RepositoryListPreferences: Codable, Equatable {
     let version: Int
     var searchText: String
     var filter: RepositoryListFilter
+    var sortOrder: RepositoryListSortOrder
 
     init(
         version: Int = currentVersion,
         searchText: String = "",
-        filter: RepositoryListFilter = .all
+        filter: RepositoryListFilter = .all,
+        sortOrder: RepositoryListSortOrder = .smart
     ) {
         self.version = version
         self.searchText = searchText
         self.filter = filter
+        self.sortOrder = sortOrder
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        searchText = try container.decode(String.self, forKey: .searchText)
+        filter = try container.decode(RepositoryListFilter.self, forKey: .filter)
+        sortOrder = try container.decodeIfPresent(
+            RepositoryListSortOrder.self,
+            forKey: .sortOrder
+        ) ?? .smart
     }
 }
 
@@ -109,7 +147,8 @@ enum RepositoryListQuery {
     static func apply(
         to repositories: [RepositorySnapshot],
         searchText: String,
-        filter: RepositoryListFilter
+        filter: RepositoryListFilter,
+        sortOrder: RepositoryListSortOrder = .smart
     ) -> [RepositorySnapshot] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         let filtered = repositories.filter { repository in
@@ -118,7 +157,58 @@ enum RepositoryListQuery {
                     || matches(repository.name, query: query)
                     || matches(repository.path, query: query))
         }
-        return RepositorySorter.sort(filtered)
+        return sort(filtered, by: sortOrder)
+    }
+
+    private static func sort(
+        _ repositories: [RepositorySnapshot],
+        by sortOrder: RepositoryListSortOrder
+    ) -> [RepositorySnapshot] {
+        switch sortOrder {
+        case .smart:
+            return RepositorySorter.sort(repositories)
+        case .recentActivity:
+            return stableSort(repositories) { lhs, rhs in
+                if lhs.isPinned != rhs.isPinned { return lhs.isPinned }
+                let lhsDate = activityDate(lhs)
+                let rhsDate = activityDate(rhs)
+                if let lhsDate, let rhsDate, lhsDate != rhsDate { return lhsDate > rhsDate }
+                if lhsDate != nil && rhsDate == nil { return true }
+                if rhsDate != nil && lhsDate == nil { return false }
+                return namePrecedes(lhs, rhs)
+            }
+        case .name:
+            return stableSort(repositories) { lhs, rhs in
+                if lhs.isPinned != rhs.isPinned { return lhs.isPinned }
+                return namePrecedes(lhs, rhs)
+            }
+        }
+    }
+
+    private static func stableSort(
+        _ repositories: [RepositorySnapshot],
+        precedes: (RepositorySnapshot, RepositorySnapshot) -> Bool
+    ) -> [RepositorySnapshot] {
+        repositories.enumerated().sorted { lhs, rhs in
+            if precedes(lhs.element, rhs.element) { return true }
+            if precedes(rhs.element, lhs.element) { return false }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+    }
+
+    private static func activityDate(_ repository: RepositorySnapshot) -> Date? {
+        guard let timestamp = RepositorySnapshot.mostRecentActivityTimestamp(
+            lastActivityAt: repository.lastActivityAt,
+            lastChangedAt: repository.lastChangedAt
+        ) else { return nil }
+        return DateFormatting.date(from: timestamp)
+    }
+
+    private static func namePrecedes(
+        _ lhs: RepositorySnapshot,
+        _ rhs: RepositorySnapshot
+    ) -> Bool {
+        lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
     }
 
     private static func matches(_ candidate: String, query: String) -> Bool {

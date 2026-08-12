@@ -21,40 +21,6 @@
 
 ---
 
-## Loop 4 — 2026-08-10
-
-- **问题**：无（本轮判定无高价值问题，记录「无变更」）。
-- **证据**：
-  - 工作区：`git status --porcelain=v2 --branch` → `branch.ab +0 -0`，无未提交改动，与 origin/main 同步
-  - 最近提交：`git log --oneline -15` → HEAD `1372ec7 feat: add today development summary to Overview`（即 Loop 3 的改动，本轮无新提交）
-  - `grep -rn -e TODO -e FIXME DevPulseNative/` → 无匹配（exit 1）
-  - 上次验证：history Loop 3 在同一 commit 上 `verify.sh final` 全量通过；本轮 `bash ./scripts/verify.sh build` → `[verify] Build succeeded`（20.3s，exit 0）
-  - 历史遗留：Loop 3 剩余风险仅为「视觉布局需手动确认」「首次基线数据不足」等已注明的手动确认项，非 CLI 可验证 Bug
-  - 本轮无用户反馈的具体问题（任务为「运行一次 loop」）
-- **原因**：不满足 `loop.md` Evidence 阶段的任何有效依据（可复现 Bug / 测试失败 / 行为异常 / 用户反馈 / 稳定性风险 / 性能问题 / 测试缺口）。按规则「没有足够证据 → 不修改」「无高价值问题 → 记录无变更，不要强行修改」。
-- **修改**：无（零代码变更，未强行修改）。
-- **验证**：`bash ./scripts/verify.sh build` → `[verify] Build succeeded`（确认今日编译基线）。
-- **剩余风险**：本轮未运行完整测试套件（无具体问题指向时不强制，见 `loop.md`）；Loop 3 的「需手动确认」项（摘要视觉布局、首次基线数据不足）仍未做人工确认。
-
----
-
-## Loop 5 — 2026-08-10
-
-- **问题**：无（本轮判定无高价值问题，记录「无变更」）。
-- **证据**：
-  - 工作区：`git status --porcelain=v2 --branch` → `branch.ab +0 -0`，无未提交改动，与 origin/main 同步
-  - 最近提交：`git log --oneline -15` → HEAD `60683d3 docs(agent): record maintenance loop 4`（即 Loop 4 的记录提交，本轮无新提交）
-  - `grep -rn -e TODO -e FIXME DevPulseNative/` → 无匹配（exit 1）
-  - 上次验证：Loop 4 在同一 commit 上 `verify.sh build` 通过；本轮 `bash ./scripts/verify.sh build` → `[verify] Build succeeded`
-  - 历史遗留：Loop 3 剩余风险仅为「摘要视觉布局需手动确认」「首次基线数据不足」等已注明的手动确认项，非 CLI 可验证 Bug
-  - 本轮无用户反馈的具体问题（任务为「运行一次 loop」）
-- **原因**：不满足 `loop.md` Evidence 阶段的任何有效依据（可复现 Bug / 测试失败 / 行为异常 / 用户反馈 / 稳定性风险 / 性能问题 / 测试缺口）。按规则「没有足够证据 → 不修改」「无高价值问题 → 记录无变更，不要强行修改」。
-- **修改**：无（零代码变更，未强行修改）。
-- **验证**：`bash ./scripts/verify.sh build` → `[verify] Build succeeded`（确认今日编译基线）。
-- **剩余风险**：本轮未运行完整测试套件（无具体问题指向时不强制，见 `loop.md`）；Loop 3 与 Loop 4 已注明的「需手动确认」项（摘要视觉布局、首次基线数据不足）仍未做人工确认。
-
----
-
 ## Loop 6 — 2026-08-10
 
 - **问题**：今日开发摘要把扫描事件直接呈现为“今日提交”，活动记录只显示布尔状态；稀疏历史会因空天数按 0 参与平均而放大趋势；读取失败和首次/跨日未扫描状态没有在摘要中显式区分。
@@ -434,3 +400,41 @@
   - `/Applications/DevPulse.app` 已运行（PID 7796，进程路径匹配）；安装后二进制与临时签名产物 SHA-256 一致；旧 App 保存在 `/tmp/devpulse-install-loop22.fA0V2w/DevPulse.app.previous`，可恢复。
   - `pluginkit` 确认 Widget 注册到新安装路径；`--self-check` → `self_check.result=pass`、`refresh_phase=success`、`validation=pass`、`lifecycle.widget_registration=active`、`lifecycle.self_heal=^pass`。
 - **剩余风险**：Xcode 仍未登录 Apple 账号，标准自动签名安装流程不可用；本次本机开发签名安装、真实进程运行、自检和 Widget 注册均已验证。项目健康评分在窗口中的最终视觉布局仍需人工目视确认。
+
+---
+
+## Loop 24 — 2026-08-12（项目收藏与排序）
+
+- **问题**：项目列表已有内部置顶持久化能力，但收藏入口只存在于右键菜单，用户无法直观看到或快速切换收藏；列表也只有固定的行动优先级排序，无法按最近活跃或名称浏览。
+- **证据**：用户明确要求新增「项目收藏与排序」；`RepositoryListView` 修改前仅调用 `RepositorySorter.sort`，没有排序控件；`isPinned` 与 `togglePin` 已提供稳定的 App Group 持久化和跨刷新保留能力。
+- **原因**：复用既有置顶链路即可实现收藏，不需要新增共享快照字段或存储系统；排序限定在列表查询层，不改变扫描、刷新队列或 Widget 行为。
+- **修改**：
+  - `Core/RepositorySorter.swift`：新增「已收藏」筛选和「智能排序 / 最近活跃 / 名称」排序枚举；名称与最近活跃排序均保持收藏优先和稳定决胜；列表偏好持久化新增排序字段，并兼容缺少该字段的旧数据。
+  - `App/RepositoryListView.swift`：每行增加可点击星标收藏按钮，右键文案统一为收藏；增加排序菜单并持久化选择。
+  - `DevPulseNativeTests/CommitReadinessEngineTests.swift`：覆盖收藏筛选、三种排序的收藏优先行为、偏好往返和旧偏好迁移。
+  - 按 20 条保留规则将 Loop 4 剪切归档到 `.agent/archive/history-2026-08-10-loop4-4.md`。
+- **验证**：
+  - 首次 `rtk bash ./scripts/verify.sh build` 根据编译错误确认最近活跃派生应调用静态函数，最小修正后重新构建通过。
+  - `rtk bash ./scripts/verify.sh build` → Build succeeded。
+  - `rtk bash ./scripts/verify.sh test DevPulseTests/CommitReadinessEngineTests` → tests passed。
+  - `rtk bash ./scripts/verify.sh final` → Build succeeded、full test suite passed、Final acceptance passed — all checks green。
+  - `git diff --check` → 通过；未改项目配置、扫描路径、共享快照格式、Widget、签名或网络边界。
+- **剩余风险**：CLI 无法证明最小窗口宽度下六项分段筛选与排序菜单的最终布局，需在 macOS App 中人工目视确认；本轮未执行签名安装。
+
+---
+
+## Loop 25 — 2026-08-12（签名安装运行并提交推送项目收藏与排序）
+
+- **问题**：无新增业务问题；Loop 24 的项目收藏与排序已通过完整验收，用户明确要求在本机签名安装运行新 App，并合并提交推送。
+- **证据**：工作区仅包含 Loop 24 的功能、测试、维护记录和归档文件；`main` 与 `origin/main` 同步；同一源码状态已通过定向测试与 `verify.sh final`。
+- **原因**：不扩大功能范围，只完成用户授权的本机签名安装、运行验证和 Git 发布终态。
+- **修改**：无新增业务代码；追加本记录，并按 20 条保留规则将 Loop 5 剪切归档到 `.agent/archive/history-2026-08-10-loop5-5.md`。
+- **验证**：
+  - 标准 `scripts/install-and-self-check.sh` 被既有环境问题阻塞：`No Xcode Apple account is configured on this Mac`。
+  - 本机存在有效 Apple Development 身份；现有 host/widget profiles 分别匹配 `local.devpulse.app` / `local.devpulse.app.widget`。
+  - 在 `/tmp/devpulse-install-loop25.v1eEPl` 普通构建，复用匹配 profiles，并使用项目 entitlements 分别重签 widget 与 host；安装包不含 `DevPulseTests.xctest`。
+  - `codesign --verify --deep --strict` 通过；host/widget 均保留 `group.local.devpulse`，widget 保留 App Sandbox。
+  - 新 App 已安装到 `/Applications/DevPulse.app` 并运行（PID 13401，进程路径匹配）；安装后二进制与临时签名产物 SHA-256 一致；旧 App 保存在 `/tmp/devpulse-install-loop25.v1eEPl/DevPulse.app.previous`，可恢复。
+  - `pluginkit` 确认 Widget 注册到新安装路径；`--self-check` → `self_check.result=pass`、`refresh_phase=success`、`validation=pass`、`lifecycle.widget_registration=active`、`lifecycle.self_heal=^pass`。
+  - 提交前执行 staged secret scan 与 diff check，随后提交到 `main` 并推送 `origin/main`。
+- **剩余风险**：Xcode 仍未登录 Apple 账号，标准自动签名安装流程不可用；本次本机开发签名安装、真实进程运行、自检和 Widget 注册均已验证。收藏与排序控件的最小窗口视觉布局仍需人工目视确认。

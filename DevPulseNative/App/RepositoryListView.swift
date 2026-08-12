@@ -45,6 +45,7 @@ struct RepositoryListView: View {
     private let preferencesStore: RepositoryListPreferencesStore
     @State private var searchText: String
     @State private var selectedFilter: RepositoryListFilter
+    @State private var sortOrder: RepositoryListSortOrder
     @State private var selectedRepository: RepositoryDetailSelection?
     @State private var pendingIgnoreRepository: RepositorySnapshot?
 
@@ -53,6 +54,7 @@ struct RepositoryListView: View {
         let preferences = preferencesStore.load()
         _searchText = State(initialValue: preferences.searchText)
         _selectedFilter = State(initialValue: preferences.filter)
+        _sortOrder = State(initialValue: preferences.sortOrder)
     }
 
     var body: some View {
@@ -60,7 +62,8 @@ struct RepositoryListView: View {
         let repositories = RepositoryListQuery.apply(
             to: allRepositories,
             searchText: searchText,
-            filter: selectedFilter
+            filter: selectedFilter,
+            sortOrder: sortOrder
         )
 
         VStack(spacing: 0) {
@@ -85,6 +88,8 @@ struct RepositoryListView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .accessibilityHint("打开只读仓库详情")
 
+                                favoriteButton(for: repo)
+
                                 if repo.needsReadRetry {
                                     repositoryRetryButton(for: repo)
                                 }
@@ -102,7 +107,7 @@ struct RepositoryListView: View {
                                     Divider()
                                 }
 
-                                Button(repo.isPinned ? "取消置顶" : "置顶") {
+                                Button(repo.isPinned ? "取消收藏" : "收藏") {
                                     scheduler.togglePin(repoID: repo.id)
                                 }
 
@@ -148,6 +153,9 @@ struct RepositoryListView: View {
         .onChange(of: selectedFilter) { _, _ in
             persistListPreferences()
         }
+        .onChange(of: sortOrder) { _, _ in
+            persistListPreferences()
+        }
         .onChange(of: scheduler.lastResult.repositories) { _, repositories in
             guard let selectedRepository else { return }
             self.selectedRepository = RepositoryDetailSnapshotResolver.currentSelection(
@@ -188,10 +196,38 @@ struct RepositoryListView: View {
             .labelsHidden()
             .controlSize(.small)
             .accessibilityLabel("项目筛选")
+
+            HStack {
+                Spacer()
+                Picker("排序", selection: $sortOrder) {
+                    ForEach(RepositoryListSortOrder.allCases) { order in
+                        Text(order.title).tag(order)
+                    }
+                }
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                .fixedSize()
+                .accessibilityLabel("项目排序")
+            }
         }
         .padding(.horizontal, RepositoryListMetrics.pageInset)
         .padding(.top, 9)
         .padding(.bottom, 1)
+    }
+
+    private func favoriteButton(for repository: RepositorySnapshot) -> some View {
+        Button {
+            scheduler.togglePin(repoID: repository.id)
+        } label: {
+            Image(systemName: repository.isPinned ? "star.fill" : "star")
+                .foregroundStyle(repository.isPinned ? Color.accentColor : .secondary)
+                .frame(width: 18, height: 18)
+        }
+        .buttonStyle(.borderless)
+        .padding(.top, 12)
+        .padding(.trailing, repository.needsReadRetry ? 6 : RepositoryListMetrics.rowPadding)
+        .help(repository.isPinned ? "取消收藏 \(repository.name)" : "收藏 \(repository.name)")
+        .accessibilityLabel(repository.isPinned ? "取消收藏 \(repository.name)" : "收藏 \(repository.name)")
     }
 
     private func repositoryRetryButton(for repository: RepositorySnapshot) -> some View {
@@ -351,7 +387,8 @@ struct RepositoryListView: View {
         preferencesStore.save(
             RepositoryListPreferences(
                 searchText: searchText,
-                filter: selectedFilter
+                filter: selectedFilter,
+                sortOrder: sortOrder
             )
         )
     }
@@ -408,13 +445,6 @@ struct RepositoryRow: View {
                             )
                             .fixedSize()
                             .accessibilityLabel("工作区类型：\(workspaceKind.displayName)")
-                    }
-
-                    if repo.isPinned {
-                        Image(systemName: "pin.fill")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(Color.accentColor)
-                            .accessibilityLabel("Pinned")
                     }
 
                     RepositoryDataSourceBadge(

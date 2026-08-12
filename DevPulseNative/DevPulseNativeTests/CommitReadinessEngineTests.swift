@@ -1764,6 +1764,55 @@ struct CommitReadinessEngineTests {
         #expect(noMatches.isEmpty)
     }
 
+    @Test func repositoryListQueryFiltersFavoritesAndSupportsUserSorting() {
+        let repositories = [
+            snapshot(
+                id: "zeta",
+                name: "Zeta",
+                modified: 0,
+                status: .clean,
+                lastActivityAt: "2026-08-10T12:00:00Z"
+            ),
+            snapshot(
+                id: "favorite",
+                name: "Favorite",
+                modified: 0,
+                status: .clean,
+                lastActivityAt: "2026-08-01T12:00:00Z",
+                isPinned: true
+            ),
+            snapshot(
+                id: "alpha",
+                name: "Alpha",
+                modified: 0,
+                status: .clean,
+                lastActivityAt: "2026-08-11T12:00:00Z"
+            )
+        ]
+
+        let favorites = RepositoryListQuery.apply(
+            to: repositories,
+            searchText: "",
+            filter: .favorites
+        )
+        let byName = RepositoryListQuery.apply(
+            to: repositories,
+            searchText: "",
+            filter: .all,
+            sortOrder: .name
+        )
+        let byRecentActivity = RepositoryListQuery.apply(
+            to: repositories,
+            searchText: "",
+            filter: .all,
+            sortOrder: .recentActivity
+        )
+
+        #expect(favorites.map(\.id) == ["favorite"])
+        #expect(byName.map(\.id) == ["favorite", "alpha", "zeta"])
+        #expect(byRecentActivity.map(\.id) == ["favorite", "alpha", "zeta"])
+    }
+
     @Test func repositoryListFiltersUseCanonicalSnapshotSemantics() {
         let clean = snapshot(
             id: "clean",
@@ -1836,12 +1885,21 @@ struct CommitReadinessEngineTests {
 
         let expected = RepositoryListPreferences(
             searchText: "client/repository",
-            filter: .unsynchronized
+            filter: .unsynchronized,
+            sortOrder: .recentActivity
         )
         store.save(expected)
 
         let rebuiltStore = RepositoryListPreferencesStore(defaults: defaults)
         #expect(rebuiltStore.load() == expected)
+
+        let legacyData = try JSONSerialization.data(withJSONObject: [
+            "version": RepositoryListPreferences.currentVersion,
+            "searchText": "legacy",
+            "filter": RepositoryListFilter.all.rawValue
+        ])
+        defaults.set(legacyData, forKey: RepositoryListPreferencesStore.storageKey)
+        #expect(rebuiltStore.load().sortOrder == .smart)
 
         defaults.set(
             Data("not-json".utf8),
