@@ -21,78 +21,6 @@
 
 ---
 
-## Loop 2 — 2026-08-09
-
-- **问题**：审计并完善 `.agent/` Evidence-driven Maintenance Loop 基础设施，
-  使未来任何智能体仅凭 `.agent/loop.md` 即可独立完成一轮维护闭环。
-- **证据**：
-  - 工作区：`git status --porcelain=v2 --branch` → `branch.ab +0 -0`，
-    仅 `.agent/history.md` 有未提交改动（Loop 1 记录，进入会话前已存在）
-  - 最近提交：`git log --oneline -15` → 最新 `23e15a1 docs: add
-    evidence-driven maintenance loop (.agent/)`（基础设施已由此 commit 建立）
-  - `grep -rn "TODO\|FIXME" DevPulseNative/` → 无匹配
-  - 上次验证状态：history Loop 1 记录 `bash scripts/verify.sh build` →
-    `[verify] Build succeeded`
-  - 本轮无用户反馈（任务为 OBJECTIVE 定义的基础设施目标，非具体问题）
-- **原因**：OBJECTIVE 明确本任务只建立/完善 Loop 基础设施、禁止修改业务
-  代码；逐条审计五个文件是识别缺口的唯一方式。审计本身即本轮最高价值工作。
-- **修改**（最小 additive 补差，未覆盖任何有效内容）：
-  - `.agent/loop.md` Verify 节：补「禁止伪造测试结果」（原仅「未验证宣布
-    完成 / 隐藏失败」；rules.md 已有该禁止，补入 loop.md 使单文件自包含）
-  - `.agent/loop.md` Decide 节：补「允许连续维护同一个模块（须出现新证据、
-    且非重复处理 history.md 已标记完成的问题）」正面表述（对齐 OBJECTIVE）
-  - `rules.md` / `memory.md` / `history.md` / `archive/README.md`：
-    审计无缺口，未改动
-- **验证**：`bash scripts/verify.sh build` → `[verify] Build succeeded`
-  （完整输出已捕获至 scratch build.log）；`git status --porcelain=v2 --branch`
-  确认 `DevPulseNative/`（App/Core/Utilities/Widget/测试）零改动、无平行
-  维护体系（根目录无 `.ai/`、`.github/` 等重复目录）。
-- **剩余风险**：本轮为文档级 additive 修改，build 通过已证明不影响项目
-  运行；未运行完整测试套件（无业务代码改动，不必要）。README.md 未单独
-  提及 Maintenance Loop，属可选适配，未做。
-
-### 本轮报告（最终报告四要素）
-
-- **创建/修改文件**：修改 `.agent/loop.md`（2 处 additive 补丁）；其余
-  四个 `.agent/` 文件仅审计未改动。无新建文件。
-- **各文件职责**：`loop.md` 定义六阶段闭环（Observe→Evidence→Decide→
-  Execute→Verify→Record）与执行前置必读；`rules.md` 定义 Loop 专属强制
-  边界（Must/Must Not/高风险项）；`memory.md` 保存长期稳定项目知识；
-  `history.md` 追加每轮 Loop 记录（保留最近 20 条）；`archive/README.md`
-  定义旧记录归档命名与剪切规则。
-- **如何执行一次 Maintenance Loop**：读取 `loop.md` 的「0. 执行前（必读）」
-  三项 → 按 1~6 阶段依次执行（Observe 只收集证据不修改 → Evidence 判断
-  是否有效 → Decide 选一个最高价值问题 → Execute 最小修改 → Verify 用
-  `./scripts/verify.sh` 验证 → Record 追加 history.md）；无证据或无高价值
-  问题时记录「无变更」结束。
-- **是否需要额外适配**：否。基础设施已完整（commit `23e15a1` 建立，
-  Loop 0/1 留痕），本轮仅两处补差；未来智能体可直接按 `loop.md` 执行。
-  可选适配：README.md 增加指向 `.agent/loop.md` 的章节（非必需，未做）。
-
----
-
-## Loop 3 — 2026-08-09
-
-- **问题**：App 缺少基于既有扫描活动记录的「今日开发摘要」，无法在一个入口查看今日提交、活跃项目、专注时间、最活跃项目及近期趋势。
-- **证据**：用户目标明确要求新增该 App 功能；现有 `ScanScheduler.activityEvents` 已保存扫描发现的增量活动，且不需要新增扫描链路即可计算日摘要。
-- **原因**：直接面向用户的功能缺口；可复用现有活动记录，避免扩大刷新和 Widget 边界。
-- **修改**：
-  - 新增 `DailyDevelopmentSummary.swift`：纯内存摘要计算，排除读取失败事件，统计今日提交/项目/活动会话，按连续活动间隔估算专注时间，并与前 7 天日均比较。
-  - 新增 `TodayDevelopmentSummaryView.swift`：在 Overview 内展示摘要卡片、最活跃项目和趋势；明确标注专注时间为估算且不触发额外扫描。
-  - `ContentView.swift`：将摘要接入现有 Overview，数据仅来自 `scheduler.activityEvents`。
-  - 新增 `DailyDevelopmentSummaryTests.swift`：覆盖今日统计、读取事件过滤、专注会话、日均趋势、未来事件和无历史状态。
-  - `DevPulseNative.xcodeproj/project.pbxproj`：由 XcodeGen 纳入新增 App/测试源文件；未加入 Widget target。
-- **验证**：
-  - `bash scripts/verify.sh build` → Build succeeded。
-  - `bash scripts/verify.sh test DevPulseTests/DailyDevelopmentSummaryTests` → tests passed。
-  - `bash scripts/verify.sh widgetkit` → 15 PASS, 0 FAIL。
-  - `bash scripts/verify.sh final` → full test suite passed，Final acceptance passed。
-  - `git diff --check` → 通过；最终状态仅含本轮业务、生成项目和 Loop 记录改动，无生成物。
-  - 首次 `./scripts/verify.sh build` 因脚本无执行权限返回 126，随后使用等价 `bash` 命令完成验证；中间编译错误已根据日志修复并重新通过。
-- **剩余风险**：摘要依赖扫描发现的本地活动事件；首次建立基线或活动存储不可用时只能显示 0/近期数据不足。专注时间是基于事件间隔的估算，需在 macOS App 中手动确认视觉布局。
-
----
-
 ## Loop 4 — 2026-08-10
 
 - **问题**：无（本轮判定无高价值问题，记录「无变更」）。
@@ -470,3 +398,39 @@
   - 共享快照中 DevPulse 为 `status=changed`、`changedFileCount=8`，与提交前工作区一致。
   - 提交前执行 staged secret scan 与 diff check，随后直接提交到 `main` 并推送 `origin/main`。
 - **剩余风险**：Xcode 仍未登录 Apple 账号，标准自动签名安装流程不可用；本次本机开发签名安装、运行、自检和 Widget 注册均已验证。导航与筛选栏的最小窗口视觉布局仍需人工目视确认。
+
+---
+
+## Loop 22 — 2026-08-12（项目健康评分现有终态核对与回归复验）
+
+- **问题**：用户要求新增“项目健康评分”；当前 `main` 已包含同一功能，需要确认现有实现是否完整满足要求，避免重复建设评分、扫描或 UI 链路。
+- **证据**：
+  - `Core/RepositoryHealthOverview.swift` 已从现有 `RepositorySnapshot` 纯派生 0–100 分，不触发新 Git、文件或后台读取；输入包含工作区状态、变更数、冲突、ahead/behind、最近活动、扫描数据源与风险。
+  - `App/RepositoryHealthOverviewView.swift` 已在 Overview 的项目列表中显示分数、工作区状态、活动程度、当前/上次成功/异常数据状态，并对非健康项目展示原因。
+  - 异常、不可用或来源未知的快照不生成伪分数；当前产品没有逐项目测试执行结果数据源，因此只展示真实存在的扫描验证状态，不虚构测试通过/失败。
+  - `main` 与 `origin/main` 同步，核对前工作区干净；相关实现来自现有 `44c254c`、`4217561`、`19f0c89` 等已提交变更。
+- **原因**：当前源码已经达到用户要求的唯一终态；新增第二套实现会破坏“复用现有链路、简单稳定、最小修改”的约束。最高价值动作是验证现有实现及回归，而非重复改动业务代码。
+- **修改**：无业务代码修改；仅追加本轮维护记录，并按 20 条保留规则将 Loop 2 剪切归档到 `.agent/archive/history-2026-08-09-loop2-2.md`。
+- **验证**：
+  - `rtk bash ./scripts/verify.sh build` → Build succeeded。
+  - `rtk bash ./scripts/verify.sh test DevPulseTests/RepositoryHealthOverviewTests` → tests passed。
+  - `rtk bash ./scripts/verify.sh test DevPulseTests/RepositoryActivityConsistencyTests` → tests passed。
+  - `rtk bash ./scripts/verify.sh final` → Build succeeded、full test suite passed、Final acceptance passed — all checks green。
+  - `git diff --check` → 通过；无业务源码、项目配置、快照契约、Widget 或签名改动。
+- **剩余风险**：CLI 无法证明 macOS 窗口中的最终视觉换行与颜色对比，需在已安装 App 中人工目视确认；逐项目测试结果当前不是产品已有数据，健康评分明确不将其作为输入。
+
+---
+
+## Loop 23 — 2026-08-12（签名安装运行并提交推送项目健康评分复验记录）
+
+- **问题**：无新增业务问题；Loop 22 已确认当前 `main` 的项目健康评分满足用户目标并通过完整验收，用户明确要求直接签名安装运行新版 App，然后合并提交推送。
+- **证据**：工作区仅有 Loop 22 的维护记录和历史归档；`main` 与 `origin/main` 同步；同一源码状态已通过项目健康定向测试与 `verify.sh final`。
+- **原因**：不扩大功能范围，只完成用户授权的本机签名安装、运行验证和 Git 发布终态。
+- **修改**：无业务代码修改；追加本记录，并按 20 条保留规则将 Loop 3 剪切归档到 `.agent/archive/history-2026-08-09-loop3-3.md`。
+- **验证**：
+  - 标准 `scripts/install-and-self-check.sh` 被既有环境问题阻塞：`No Xcode Apple account is configured on this Mac`。
+  - 钥匙串存在有效 `Apple Development: ryukei_li@hotmail.com (5BJ9GM7VZR)` 身份；复用当前已安装 host/widget 的匹配 provisioning profiles（bundle IDs 为 `local.devpulse.app` / `local.devpulse.app.widget`）。
+  - 在独立目录 `/tmp/devpulse-install-loop22.fA0V2w` 普通构建并分别重签 widget 与 host；`codesign --verify --deep --strict` 通过，二者 Team 均为 `JYL9G28DP3`，保留 `group.local.devpulse`，Widget 额外保留 App Sandbox，安装包不含 `DevPulseTests.xctest`。
+  - `/Applications/DevPulse.app` 已运行（PID 7796，进程路径匹配）；安装后二进制与临时签名产物 SHA-256 一致；旧 App 保存在 `/tmp/devpulse-install-loop22.fA0V2w/DevPulse.app.previous`，可恢复。
+  - `pluginkit` 确认 Widget 注册到新安装路径；`--self-check` → `self_check.result=pass`、`refresh_phase=success`、`validation=pass`、`lifecycle.widget_registration=active`、`lifecycle.self_heal=^pass`。
+- **剩余风险**：Xcode 仍未登录 Apple 账号，标准自动签名安装流程不可用；本次本机开发签名安装、真实进程运行、自检和 Widget 注册均已验证。项目健康评分在窗口中的最终视觉布局仍需人工目视确认。
