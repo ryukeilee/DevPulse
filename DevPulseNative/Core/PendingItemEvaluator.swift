@@ -700,7 +700,9 @@ enum PendingItemEvaluator {
             repositoryID: repo.id,
             repositoryName: repo.name,
             title: "工作区存在长期改动",
-            explanation: "仓库 \(repo.name) 已有 \(formatDuration(duration)) 未清理的改动（\(repo.changedFileCount) 个文件）。",
+            explanation: duration > 0
+                ? "仓库 \(repo.name) 有 \(repo.changedFileCount) 个文件尚未提交，已持续 \(formatDuration(duration))。"
+                : "仓库 \(repo.name) 有 \(repo.changedFileCount) 个文件尚未提交。",
             evidence: evidence + ["当前改动文件数：\(repo.changedFileCount)"],
             duration: duration
         )
@@ -738,7 +740,9 @@ enum PendingItemEvaluator {
             repositoryID: repo.id,
             repositoryName: repo.name,
             title: "本地提交未推送",
-            explanation: "仓库 \(repo.name) 有 \(ahead) 个本地提交未推送到远端，持续 \(formatDuration(duration))。",
+            explanation: duration > 0
+                ? "仓库 \(repo.name) 有 \(ahead) 个本地提交未推送到远端，已持续 \(formatDuration(duration))。"
+                : "仓库 \(repo.name) 有 \(ahead) 个本地提交未推送到远端。",
             evidence: evidence + ["未推送提交数：\(ahead)"],
             duration: duration
         )

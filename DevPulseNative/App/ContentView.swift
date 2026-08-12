@@ -43,6 +43,9 @@ struct ContentView: View {
                 RepositoryListView()
                     .tabContentVisibility(selectedTab == .repositories)
 
+                PendingCenterView()
+                    .tabContentVisibility(selectedTab == .pending)
+
                 ImpactOverviewView()
                     .tabContentVisibility(selectedTab == .impact)
 
@@ -104,6 +107,11 @@ private struct AppSectionBar: View {
                     tab: .repositories,
                     title: "Repositories",
                     systemImage: "list.bullet.rectangle"
+                )
+                sectionButton(
+                    tab: .pending,
+                    title: "待收尾",
+                    systemImage: "tray.full"
                 )
                 sectionButton(
                     tab: .impact,

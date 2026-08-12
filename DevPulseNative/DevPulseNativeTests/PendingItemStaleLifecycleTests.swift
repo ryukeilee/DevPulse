@@ -7,6 +7,54 @@ import Testing
 @Suite("Stale Repository Lifecycle")
 struct PendingItemStaleLifecycleTests {
 
+    @Test func evaluatorCreatesImmediateFinishingItemsFromCurrentGitState() throws {
+        let dirty = repositorySnapshot(
+            id: "repo-dirty",
+            name: "dirty-repo",
+            status: .changed,
+            changedFileCount: 3
+        )
+        let unpushed = repositorySnapshot(
+            id: "repo-unpushed",
+            name: "unpushed-repo",
+            status: .clean,
+            aheadCount: 2,
+            hasUpstream: true
+        )
+
+        let result = PendingItemEvaluator.evaluate(
+            context: PendingItemEvaluationContext(repositories: [dirty, unpushed])
+        )
+
+        let dirtyItem = try #require(result.items.first { $0.source == .dirtyWorkspace })
+        #expect(dirtyItem.repositoryID == dirty.id)
+        #expect(dirtyItem.evidence.contains("当前改动文件数：3"))
+        #expect(dirtyItem.explanation == "仓库 dirty-repo 有 3 个文件尚未提交。")
+
+        let unpushedItem = try #require(result.items.first { $0.source == .unpushedCommits })
+        #expect(unpushedItem.repositoryID == unpushed.id)
+        #expect(unpushedItem.evidence.contains("未推送提交数：2"))
+        #expect(unpushedItem.explanation == "仓库 unpushed-repo 有 2 个本地提交未推送到远端。")
+    }
+
+    @Test func evaluatorIncludesUnfinishedConflictState() throws {
+        let conflicted = repositorySnapshot(
+            id: "repo-conflict",
+            name: "conflicted-repo",
+            status: .changed,
+            changedFileCount: 2,
+            conflictedFileCount: 1
+        )
+
+        let result = PendingItemEvaluator.evaluate(
+            context: PendingItemEvaluationContext(repositories: [conflicted])
+        )
+
+        let item = try #require(result.items.first { $0.source == .mergeConflict })
+        #expect(item.repositoryID == conflicted.id)
+        #expect(item.severity == .high)
+    }
+
     // MARK: - PendingItemSource
 
     @Test func staleRepositorySourceHasCorrectIdentity() throws {
@@ -466,5 +514,48 @@ struct PendingItemStaleLifecycleTests {
         #expect(summary.criticalCount == 1)
         #expect(summary.topItemTitle == "仓库已长期无法访问")
         #expect(summary.topItemSeverity == .critical)
+    }
+
+    private func repositorySnapshot(
+        id: String,
+        name: String,
+        status: RepositoryStatus,
+        changedFileCount: Int = 0,
+        aheadCount: Int? = 0,
+        hasUpstream: Bool? = true,
+        conflictedFileCount: Int? = 0
+    ) -> RepositorySnapshot {
+        RepositorySnapshot(
+            id: id,
+            name: name,
+            path: "/tmp/\(name)",
+            workspaceKind: nil,
+            branch: "main",
+            status: status,
+            modifiedFileCount: changedFileCount,
+            addedFileCount: 0,
+            deletedFileCount: 0,
+            untrackedFileCount: 0,
+            stagedFileCount: 0,
+            unstagedFileCount: changedFileCount,
+            conflictedFileCount: conflictedFileCount,
+            aheadCount: aheadCount,
+            behindCount: 0,
+            hasUpstream: hasUpstream,
+            changedFileCount: changedFileCount,
+            changedFilesPreview: [],
+            risk: .low,
+            lastScannedAt: DateFormatting.nowISO(),
+            dataSource: .current,
+            lastSuccessfulScanAt: DateFormatting.nowISO(),
+            lastChangedAt: nil,
+            lastCommitID: "abc123",
+            lastCommitSummary: "test",
+            lastCommitMetadataAvailable: true,
+            lastActivityAt: nil,
+            unavailableSince: nil,
+            errorMessage: nil,
+            isPinned: false
+        )
     }
 }

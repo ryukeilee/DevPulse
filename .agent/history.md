@@ -21,45 +21,6 @@
 
 ---
 
-## Loop 0 — 2026-08-09
-
-- **问题**：项目缺少可供任何智能体直接执行的、基于证据的现有功能维护闭环。
-- **证据**：仓库无 `.agent/`、`.github/` 目录；根 `AGENTS.md` / `CLAUDE.md`
-  已定义边界与验证命令，但未把「观察 → 证据 → 决策 → 执行 → 验证 → 记录」
-  固化为可执行流程。
-- **原因**：基础设施任务，用户明确要求建立 Loop（唯一目标，非功能问题）。
-- **修改**：
-  - 新增 `.agent/loop.md`（循环定义与六阶段）
-  - 新增 `.agent/rules.md`（Agent 边界）
-  - 新增 `.agent/memory.md`（长期项目知识）
-  - 新增 `.agent/history.md`（本文件）
-  - 新增 `.agent/archive/README.md`（归档规则）
-  - 根 `AGENTS.md`：Repository Layout 增加 `.agent/` 条目，新增
-    「Maintenance Loop」一节指向 `.agent/loop.md`
-- **验证**：`git status --porcelain=v2 --branch` 确认仅新增 `.agent/` 与
-  `AGENTS.md` 改动，`DevPulseNative/`（业务代码）零变更。
-- **剩余风险**：无功能风险；后续 Loop 从 1 开始编号。
-
----
-
-## Loop 1 — 2026-08-09
-
-- **问题**：无（本轮判定无高价值问题，记录「无变更」）。
-- **证据**：工作区干净（`git status --porcelain=v2 --branch` 为 `+0 -0`，
-  无 diff）；`grep -rn "TODO\|FIXME" DevPulseNative/` 无匹配；`git log --oneline -15`
-  近 15 条均为已修复问题且有对应测试；`history.md` Loop 0 无遗留待办；
-  本轮无用户反馈。
-- **原因**：不满足 `loop.md` Evidence 阶段的任何有效依据（可复现 Bug /
-  测试失败 / 行为异常 / 用户反馈 / 稳定性风险 / 性能问题 / 测试缺口）。
-  按规则「没有足够证据 → 不修改」。
-- **修改**：无（零代码变更，未强行修改）。
-- **验证**：`bash scripts/verify.sh build` → `[verify] Build succeeded`；
-  `git status` / `git log` / `grep` 结果均无异常。
-- **剩余风险**：本轮未运行完整测试套件（无具体问题指向时不强制，
-  见 `loop.md`）；完整套件状态待有证据指向时确认。
-
----
-
 ## Loop 2 — 2026-08-09
 
 - **问题**：审计并完善 `.agent/` Evidence-driven Maintenance Loop 基础设施，
@@ -469,3 +430,43 @@
   - 共享快照（`~/Library/Group Containers/group.local.devpulse/repositories.json`）：`generatedAt=2026-08-12T11:13:05Z`、`writtenAt=11:13:07Z`、`lastSuccessfulRefreshAt=11:13:05Z` 为启动后新值；`storageRevision=6755`；`DevPulse status=changed` 与工作区 14 个未提交文件一致。
   - 提交前：`scripts/secret-scan.sh staged`、`git diff --cached --check` 通过；push 到 `origin/main`。
 - **剩余风险**：无签名自动安装能力（需 Xcode 登录 Apple 账号）——手动签名路径已验证可用但每次需人工执行；Widget 在桌面上的实际渲染与交互、今日摘要降级文案与空态渲染仍需人工确认。
+
+---
+
+## Loop 20 — 2026-08-12（新增可达的「待收尾事项」集中入口）
+
+- **问题**：项目已有 `PendingItem` 自动评估、持久化和页面文件，但 `PendingCenterView` 没有接入 `ContentView` 的任何导航入口，用户无法集中查看扫描识别出的未提交改动、未推送提交和其他未完成状态；页面默认还混合显示已恢复/永久忽略记录，已有排序状态没有可操作控件。
+- **证据**：用户明确要求新增「待收尾事项」功能；`rg "PendingCenterView" DevPulseNative/App` 只命中视图定义、不命中消费点；`AppTab` 与 `AppSectionBar` 均无 pending case/按钮；`PendingItemEvaluator` 已有 `.dirtyWorkspace`、`.unpushedCommits`、`.mergeConflict` 等规则并在每次扫描完成后由 `ScanScheduler.refreshPendingItems` 调用。
+- **原因**：自动识别链路已经存在，最高价值且最小的修改是接通可见入口并把现有数据整理成可操作的当前/历史视图，而不是复制扫描或评估逻辑。
+- **修改**：
+  - `Core/Models.swift`、`App/ContentView.swift`：新增 `.pending` App tab 与「待收尾」入口，接入 `PendingCenterView`。
+  - `App/PendingCenterView.swift`：页面改名「待收尾事项」；默认只展示当前事项，新增当前/已完成/全部范围、搜索与排序控件、项目/来源/状态元信息和按场景说明的空态。
+  - `App/PendingItemDetailView.swift`：详情标题、时间、状态和处理动作统一为中文。
+  - `Core/PendingItemEvaluator.swift`：新发现的未提交/未推送事项不再显示误导性的「持续 0 分钟」，有历史持续时间时才展示时长。
+  - `DevPulseNativeTests/PendingItemStaleLifecycleTests.swift`：新增当前 Git 状态立即生成未提交、未推送事项以及合并冲突状态的覆盖。
+  - 按 20 条保留规则，将 Loop 0 剪切归档到 `.agent/archive/history-2026-08-09-loop0-0.md`。
+- **验证**：
+  - `rtk bash ./scripts/verify.sh build` → Build succeeded。
+  - `rtk bash ./scripts/verify.sh test DevPulseTests/PendingItemStaleLifecycleTests` → 15 个测试通过；首次运行暴露新增断言把既有 merge conflict 严重级别误写为 `.critical`，按现有规则修正为 `.high` 后通过。
+  - `rtk bash ./scripts/verify.sh final` → Build succeeded、full test suite passed、Final acceptance passed — all checks green。
+  - `git diff --check` → 通过。
+- **剩余风险**：CLI 构建与测试无法证明 600px 最小窗口下新增导航项、筛选栏和详情弹窗的最终视觉布局；未执行签名安装或运行时 GUI 人工确认。未改变 Git 只读扫描、共享 snapshot、Widget、App Group、签名或项目配置。
+
+---
+
+## Loop 21 — 2026-08-12（签名安装运行并提交推送「待收尾事项」）
+
+- **问题**：无新增业务问题；Loop 20 功能已通过完整验收，用户明确要求将新版 App 在本机签名安装运行，并直接合并提交推送。
+- **证据**：工作区仅包含 Loop 20 的 6 个业务/测试文件、Maintenance Loop 记录和归档文件；`main` 与 `origin/main` 同步；`verify.sh final` 已在同一源码状态通过。
+- **原因**：本轮不扩大功能范围，只完成用户授权的本机落地和 Git 发布终态。
+- **修改**：无新增业务代码；按 20 条保留规则将 Loop 1 剪切归档到 `.agent/archive/history-2026-08-09-loop1-1.md`，追加本记录。
+- **验证**：
+  - 标准 `scripts/install-and-self-check.sh` 被既有环境问题阻塞：`No Xcode Apple account is configured on this Mac`。
+  - 钥匙串存在有效 `Apple Development: ryukei_li@hotmail.com (5BJ9GM7VZR)` 身份；复用当前已安装 host/widget 的匹配 provisioning profiles。
+  - 使用独立 DerivedData 执行普通 `xcodebuild ... build`，避免 `build-for-testing` 产物中的 XCTest frameworks；分别使用项目 entitlements 重签 widget 和 host。
+  - `codesign --verify --deep --strict` 通过；host/widget 均为 Team `JYL9G28DP3` 且保留 `group.local.devpulse`，widget 额外保留 App Sandbox；安装包不含 `DevPulseTests.xctest`。
+  - `/Applications/DevPulse.app` 已运行（PID 11120，进程路径匹配）；安装后主二进制与临时已签名产物 SHA-256 一致；旧 App 保存在 `/tmp/devpulse-install-loop21.b8ivbt/DevPulse.app.previous`，可恢复。
+  - `--self-check` → `self_check.result=pass`、`refresh_phase=success`、`validation=pass`、`lifecycle.widget_registration=active`、`lifecycle.self_heal=^pass`；`pluginkit` 确认 widget 注册到新安装路径。
+  - 共享快照中 DevPulse 为 `status=changed`、`changedFileCount=8`，与提交前工作区一致。
+  - 提交前执行 staged secret scan 与 diff check，随后直接提交到 `main` 并推送 `origin/main`。
+- **剩余风险**：Xcode 仍未登录 Apple 账号，标准自动签名安装流程不可用；本次本机开发签名安装、运行、自检和 Widget 注册均已验证。导航与筛选栏的最小窗口视觉布局仍需人工目视确认。

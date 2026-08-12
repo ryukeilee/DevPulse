@@ -2626,6 +2626,7 @@ enum AppTab: Int, Equatable {
     case impact = 3
     case backup = 4
     case settings = 5
+    case pending = 6
 }
 
 enum SettingsScrollTarget: Hashable {

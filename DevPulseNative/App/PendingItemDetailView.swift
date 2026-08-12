@@ -44,19 +44,19 @@ struct PendingItemDetailView: View {
     }
 
     private var severitySection: some View {
-        card(title: "Severity") {
+        card(title: "严重程度") {
             HStack(spacing: 8) {
                 Image(systemName: item.severity.systemImage).foregroundStyle(severityColor)
                 Text(item.severity.displayName).font(.headline)
                 if item.duration > 0 {
-                    Text("duration " + formatDuration(item.duration)).font(.caption).foregroundStyle(.secondary)
+                    Text("已持续 " + formatDuration(item.duration)).font(.caption).foregroundStyle(.secondary)
                 }
             }
         }
     }
 
     private var overviewSection: some View {
-        card(title: "Description") {
+        card(title: "事项说明") {
             Text(item.explanation).font(.callout).fixedSize(horizontal: false, vertical: true)
             if let repoName = item.repositoryName {
                 Label(repoName, systemImage: "shippingbox").font(.caption).foregroundStyle(.tertiary)
@@ -66,16 +66,16 @@ struct PendingItemDetailView: View {
             }
             HStack(spacing: 4) {
                 Image(systemName: "clock").font(.caption2)
-                Text("First: " + relativeTime(item.firstDetectedAt)).font(.caption)
-                Text("Last: " + relativeTime(item.lastConfirmedAt)).font(.caption)
+                Text("首次发现：" + relativeTime(item.firstDetectedAt)).font(.caption)
+                Text("最近确认：" + relativeTime(item.lastConfirmedAt)).font(.caption)
             }.foregroundStyle(.tertiary)
         }
     }
 
     private var evidenceSection: some View {
-        card(title: "Evidence") {
+        card(title: "识别依据") {
             if item.evidence.isEmpty {
-                Text("No evidence available").font(.callout).foregroundStyle(.secondary)
+                Text("暂无额外依据").font(.callout).foregroundStyle(.secondary)
             } else {
                 ForEach(item.evidence, id: \.self) { ev in
                     Label(ev, systemImage: "doc.text").font(.caption).lineLimit(3)
@@ -85,7 +85,7 @@ struct PendingItemDetailView: View {
     }
 
     private var statusSection: some View {
-        card(title: "Status") {
+        card(title: "当前状态") {
             HStack(spacing: 8) {
                 Image(systemName: statusIcon).foregroundStyle(statusColor)
                 Text(item.status.displayName).font(.headline)
@@ -97,16 +97,16 @@ struct PendingItemDetailView: View {
     }
 
     private var actionsSection: some View {
-        card(title: "Actions") {
+        card(title: "处理") {
             HStack(spacing: 8) {
                 if item.status == .active || item.status == .restored {
-                    Button("Acknowledge") { scheduler.applyUserAction(to: item.id, action: .acknowledge); dismiss() }.buttonStyle(.bordered)
+                    Button("标记已知") { scheduler.applyUserAction(to: item.id, action: .acknowledge); dismiss() }.buttonStyle(.bordered)
                 }
                 if item.status != .permanentlyIgnored {
-                    Button("Ignore", role: .destructive) { scheduler.applyUserAction(to: item.id, action: .permanentlyIgnore); dismiss() }.buttonStyle(.bordered)
+                    Button("永久忽略", role: .destructive) { scheduler.applyUserAction(to: item.id, action: .permanentlyIgnore); dismiss() }.buttonStyle(.bordered)
                 }
                 if item.status == .snoozed || item.status == .acknowledged || item.status == .muted {
-                    Button("Restore") { scheduler.applyUserAction(to: item.id, action: .unmute); dismiss() }.buttonStyle(.bordered)
+                    Button("恢复提醒") { scheduler.applyUserAction(to: item.id, action: .unmute); dismiss() }.buttonStyle(.bordered)
                 }
                 if item.source == .staleRepository && item.status != .resolved {
                     Button("清理并移除跟踪", role: .destructive) {
@@ -177,11 +177,11 @@ struct PendingItemDetailView: View {
     }
 
     private func relativeTime(_ ts: String) -> String {
-        guard let date = DateFormatting.date(from: ts) else { return "unknown" }
+        guard let date = DateFormatting.date(from: ts) else { return "未知" }
         let i = -date.timeIntervalSinceNow
-        if i < 60 { return "now" }
-        if i < 3600 { return "\(Int(i/60))m" }
-        if i < 86400 { return "\(Int(i/3600))h" }
-        return "\(Int(i/86400))d"
+        if i < 60 { return "刚刚" }
+        if i < 3600 { return "\(Int(i/60)) 分钟前" }
+        if i < 86400 { return "\(Int(i/3600)) 小时前" }
+        return "\(Int(i/86400)) 天前"
     }
 }
