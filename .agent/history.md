@@ -21,29 +21,6 @@
 
 ---
 
-## Loop 6 — 2026-08-10
-
-- **问题**：今日开发摘要把扫描事件直接呈现为“今日提交”，活动记录只显示布尔状态；稀疏历史会因空天数按 0 参与平均而放大趋势；读取失败和首次/跨日未扫描状态没有在摘要中显式区分。
-- **证据**：
-  - `DailyDevelopmentSummaryBuilder` 原实现对前 7 天所有日桶求平均，仅用 `hasPreviousActivity` 判断是否可用；今天 1 次提交、前 7 天仅 1 天 1 次提交时平均值为 `1/7`，会误报增长。
-  - `TodayDevelopmentSummaryView` 原实现将第四张卡片渲染为“有活动/暂无活动”，且仅接收 `activityEvents`，无法区分首次扫描、跨日未扫描和今天确实无变化。
-  - 原逻辑过滤 `.readFailed` 后不保留异常提示，读取异常会与“暂无活动”混淆。
-- **原因**：属于用户可见的数据正确性和空/异常状态问题，且可在摘要层复用已有扫描事件和刷新状态解决，不触碰扫描管线或 Widget 契约。
-- **修改**：
-  - `DailyDevelopmentSummary.swift`：明确提交统计为“扫描检测到的提交变化”；新增真实活动记录数、读取异常项目数和有效历史活动日数；趋势平均仅使用近 7 天内有开发变化的日期，并保留读取失败告警信息。
-  - `TodayDevelopmentSummaryView.swift`：提交卡片改为“发现新提交”，活动卡片显示数量；补充有读取异常、首次成功扫描、跨日未扫描、今日无变化和扫描进行中的状态展示；趋势和底部说明明确“有活动日均”语义。
-  - `ContentView.swift`：向摘要传入 `lastSuccessfulRefreshAt` 与 `isScanning`，沿用现有刷新状态来源。
-  - `DailyDevelopmentSummaryTests.swift`：更新稀疏历史趋势预期，新增活动数、稀疏平均和读取失败告警覆盖。
-- **验证**：
-  - `bash ./scripts/verify.sh build` → Build succeeded。
-  - `bash ./scripts/verify.sh test DevPulseTests/DailyDevelopmentSummaryTests` → tests passed。
-  - `bash ./scripts/verify.sh widgetkit` → 15 PASS, 0 FAIL。
-  - `bash ./scripts/verify.sh final` → full test suite passed，Final acceptance passed。
-  - `git diff --check` → 通过；无生成物或 Widget/扫描管线改动。
-- **剩余风险**：摘要仍基于有界的本地扫描变化事件，无法推断未运行 DevPulse 期间的真实提交总数；专注时间仍是事件间隔估算，视觉效果需在 macOS App 中手动确认。
-
----
-
 ## Loop 7 — 2026-08-10
 
 - **问题**：无（本轮判定无高价值问题，记录「无变更」）。
@@ -438,3 +415,21 @@
   - `pluginkit` 确认 Widget 注册到新安装路径；`--self-check` → `self_check.result=pass`、`refresh_phase=success`、`validation=pass`、`lifecycle.widget_registration=active`、`lifecycle.self_heal=^pass`。
   - 提交前执行 staged secret scan 与 diff check，随后提交到 `main` 并推送 `origin/main`。
 - **剩余风险**：Xcode 仍未登录 Apple 账号，标准自动签名安装流程不可用；本次本机开发签名安装、真实进程运行、自检和 Widget 注册均已验证。收藏与排序控件的最小窗口视觉布局仍需人工目视确认。
+
+---
+
+## Loop 26 — 2026-08-13
+
+- **问题**：无（本轮判定无高价值问题，记录「无变更」）。
+- **证据**：
+  - 工作区：`git status --porcelain=v2 --branch` → `branch.ab +0 -0`，无未提交改动，HEAD `1164eed`（feat: add repository favorites and sorting），与 origin/main 同步。
+  - 最近提交：`git log --oneline -15` → `1164eed`（Loop 24 收藏排序）为最新，Loop 25 已签名安装运行并推送。
+  - `grep -rn -e TODO -e FIXME DevPulseNative/` → 无匹配（exit 1）。
+  - 上次验证：Loop 25 在同一代码上已通过定向测试与 `verify.sh final` 全量验收，并完成签名安装、运行自检与推送。
+  - 本轮 `rtk bash ./scripts/verify.sh build` → `[verify] Build succeeded`（编译基线正常）。
+  - 历史遗留剩余风险均为「需人工目视确认」类（收藏/排序控件最小窗口布局、健康评分视觉布局），非 CLI 可验证 Bug；Xcode 未登录 Apple 账号为标准自动签名安装的环境阻塞（已有多轮手动签名路径验证）。
+  - 本轮无用户反馈的具体问题（任务为「执行一次 loop」）。
+- **原因**：不满足 `loop.md` Evidence 阶段的任何有效依据（可复现 Bug / 测试失败 / 行为异常 / 用户反馈 / 稳定性风险 / 性能问题 / 测试缺口）。按规则「没有足够证据 → 不修改」「无高价值问题 → 记录无变更，不要强行修改」。
+- **修改**：无（零代码变更，未强行修改）；按 20 条保留规则将 Loop 6 剪切归档到 `.agent/archive/history-2026-08-10-loop6-6.md`。
+- **验证**：`rtk bash ./scripts/verify.sh build` → `[verify] Build succeeded`（确认编译基线）；`git status` / `git log` / `grep` 结果均无异常。
+- **剩余风险**：本轮未运行完整测试套件（无具体问题指向时不强制，见 `loop.md`）；Loop 24/25 已注明的收藏排序控件最小窗口视觉布局与 Loop 22 健康评分视觉布局仍需人工目视确认；Xcode 未登录 Apple 账号，标准自动签名安装仍不可用。

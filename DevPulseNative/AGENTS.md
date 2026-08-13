@@ -16,7 +16,7 @@ The scanner currently derives state from `git status --porcelain=v2 --branch` an
 
 ## Repository Layout
 
-- `App/`: SwiftUI app entry point, repository screens, repository health overview (RepositoryHealthOverviewView), today development summary (TodayDevelopmentSummaryView), activity timeline, pending center (PendingCenterView, PendingItemDetailView), settings, and diagnostics UI
+- `App/`: SwiftUI app entry point, repository screens (including favorites and sorting in RepositoryListView), repository health overview (RepositoryHealthOverviewView), today development summary (TodayDevelopmentSummaryView), activity timeline, pending center (PendingCenterView, PendingItemDetailView), settings, and diagnostics UI
 - `Core/`: repository discovery and scanning, scheduling, readiness/risk logic, repository health overview and daily summary derivation, models, activity events, pending items (PendingItem, PendingItemStore, PendingItemEvaluator, PendingItemNotificationStore), launch-at-login, and shared snapshot persistence
 - `Utilities/`: process execution and date formatting helpers
 - `Widget/`: WidgetKit extension and its property list/entitlements
@@ -123,13 +123,14 @@ bundle — no recompilation, re-linking, or re-indexing.
 | `Core/CommitReadiness*.swift`    | `DevPulseTests/CommitReadinessEngineTests`       |
 | `Core/DailyDevelopmentSummary.swift` | `DevPulseTests/DailyDevelopmentSummaryTests`  |
 | `Core/LaunchAtLoginController.swift` | `DevPulseTests/LaunchAtLoginControllerTests`  |
-| `Core/Models.swift`              | `DevPulseTests/SharedSnapshotStoreTests`, `DevPulseTests/ActivityEventTests` |
+| `Core/Models.swift`              | `DevPulseTests/SharedSnapshotStoreTests`, `DevPulseTests/ActivityEventTests`, `DevPulseTests/RepositoryActivityConsistencyTests` |
 | `Core/PendingItem*.swift`        | `DevPulseTests/PendingItemStaleLifecycleTests`   |
 | `Core/SharedSnapshotStore.swift` | `DevPulseTests/SharedSnapshotStoreTests`         |
 | `Core/RefreshEngine.swift`       | `DevPulseTests/RefreshEngineIntegrationTests`    |
-| `Core/RepositoryHealthOverview.swift` | `DevPulseTests/RepositoryHealthOverviewTests` |
+| `Core/RepositoryHealthOverview.swift` | `DevPulseTests/RepositoryHealthOverviewTests`, `DevPulseTests/RepositoryActivityConsistencyTests` |
 | `Core/RepositoryHistoryStore.swift` | `DevPulseTests/RepositoryHistoryStoreTests`   |
-| `Core/ScanScheduler.swift`       | `DevPulseTests/CommitReadinessEngineTests`       |
+| `Core/RepositorySorter.swift`     | `DevPulseTests/CommitReadinessEngineTests`   |
+| `Core/ScanScheduler.swift`       | `DevPulseTests/CommitReadinessEngineTests`, `DevPulseTests/DataFreshnessStateTests` |
 | repository discovery             | `DevPulseTests/RepositoryDiscoveryExperienceTests` |
 | scanning / performance           | `DevPulseTests/ScanPerformanceTests`, `DevPulseTests/ScanConfigSanitizationTests`, `DevPulseTests/ScannerTimeoutErrorTests` |
 | data consistency                 | `DevPulseTests/ScanDataConsistencyTests`         |

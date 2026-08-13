@@ -40,7 +40,7 @@ git config core.hooksPath .githooks
 │   │   └── Backup/           # backup/restore engine, migration, privacy filter, retention
 │   ├── Utilities/            # ProcessRunner, DateFormatting
 │   ├── Widget/               # WidgetKit extension (DevPulseWidget.swift, entitlements, plist)
-│   ├── DevPulseNativeTests/  # Swift Testing coverage (36 test files)
+│   ├── DevPulseNativeTests/  # Swift Testing coverage (37 test files)
 │   ├── Assets.xcassets/      # app icon
 │   ├── project.yml           # XcodeGen declarative project spec
 │   └── AGENTS.md             # detailed native-app agent guidelines
@@ -214,6 +214,7 @@ Boundary rules in this file and `DevPulseNative/AGENTS.md` take precedence.
 | `RefreshEngineIntegrationTests.swift` | refresh engine integration |
 | `ReleaseReadinessEngineTests.swift` | release readiness rules |
 | `ReliabilityLabTests.swift` | reliability stress tests |
+| `RepositoryActivityConsistencyTests.swift` | repository activity timestamp consistency across health/list/widget derivation |
 | `RepositoryDiscoveryExperienceTests.swift` | discovery flow |
 | `RepositoryHistoryStoreTests.swift` | repository history persistence |
 | `RepositoryHealthOverviewTests.swift` | repository health overview scoring |
@@ -329,13 +330,14 @@ in seconds.
 | `Core/FileCategoryClassifier.swift` | `DevPulseTests/FileCategoryClassifierTests` |
 | `Core/ImpactPropagationEngine.swift` | `DevPulseTests/ImpactPropagationEngineTests` |
 | `Core/LaunchAtLoginController.swift` | `DevPulseTests/LaunchAtLoginControllerTests` |
-| `Core/Models.swift` | `DevPulseTests/SharedSnapshotStoreTests`, `DevPulseTests/ActivityEventTests` |
+| `Core/Models.swift` | `DevPulseTests/SharedSnapshotStoreTests`, `DevPulseTests/ActivityEventTests`, `DevPulseTests/RepositoryActivityConsistencyTests` |
 | `Core/PendingItem*.swift` | `DevPulseTests/PendingItemStaleLifecycleTests` |
 | `Core/RefreshEngine.swift` | `DevPulseTests/RefreshEngineIntegrationTests`, `DevPulseTests/RefreshCompletionTests` |
 | `Core/ReleaseReadinessEngine.swift` | `DevPulseTests/ReleaseReadinessEngineTests` |
 | `Core/RepositoryHistoryStore.swift` | `DevPulseTests/RepositoryHistoryStoreTests` |
-| `Core/RepositoryHealthOverview.swift` | `DevPulseTests/RepositoryHealthOverviewTests` |
-| `Core/ScanScheduler.swift` | `DevPulseTests/CommitReadinessEngineTests` |
+| `Core/RepositoryHealthOverview.swift` | `DevPulseTests/RepositoryHealthOverviewTests`, `DevPulseTests/RepositoryActivityConsistencyTests` |
+| `Core/RepositorySorter.swift` | `DevPulseTests/CommitReadinessEngineTests` (favorites/sorting) |
+| `Core/ScanScheduler.swift` | `DevPulseTests/CommitReadinessEngineTests`, `DevPulseTests/DataFreshnessStateTests` |
 | `Core/SharedSnapshotStore.swift` | `DevPulseTests/SharedSnapshotStoreTests`, `DevPulseTests/SnapshotStoreRecoveryTests` |
 | `Core/UnifiedLifecycleSystem.swift` | `DevPulseTests/LifecycleIntegrationTests`, `DevPulseTests/LifecycleSystemTests`, `DevPulseTests/LifecycleSleepWakeTests` |
 | `Core/Workspace*.swift` | `DevPulseTests/WorkspaceModelTests` |
