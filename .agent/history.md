@@ -21,23 +21,6 @@
 
 ---
 
-## Loop 7 — 2026-08-10
-
-- **问题**：无（本轮判定无高价值问题，记录「无变更」）。
-- **证据**：
-  - 工作区存在用户未提交改动，范围为 `DailyDevelopmentSummary` 及其视图/测试与本记录；本轮未覆盖或回退这些改动。
-  - 最近提交：`git log --oneline -15` → HEAD `60683d3 docs(agent): record maintenance loop 4`。
-  - `grep -rn -e TODO -e FIXME DevPulseNative/` → 无匹配。
-  - 本轮 `bash ./scripts/verify.sh build` → `[verify] Build succeeded`。
-  - 受影响定向测试 `bash ./scripts/verify.sh test DevPulseTests/DailyDevelopmentSummaryTests` → `tests passed`。
-  - `git diff --check` → 通过；本轮无新增业务行为或用户反馈。
-- **原因**：没有新的可复现 Bug、失败测试、明确行为异常、稳定性/性能风险或测试缺口；按规则「没有足够证据 → 不修改」。
-- **修改**：无业务代码修改；仅追加本轮 Loop 记录。
-- **验证**：上述 build、定向测试和 `git diff --check` 均通过。
-- **剩余风险**：工作区原有未提交改动仍需其作者审阅；Loop 6 已注明的摘要视觉布局与首次/跨日数据状态仍需 macOS App 手动确认；本轮未运行完整测试套件。
-
----
-
 ## Loop 8 — 2026-08-10（项目健康状态概览：复用并验证现有未提交实现）
 
 - **问题**：目标「为 DevPulse 增加项目健康状态概览」；工作区已存在未提交实现（`RepositoryHealthOverview.swift` / `RepositoryHealthOverviewView.swift` / `RepositoryHealthOverviewTests.swift` + `ContentView.swift` 接入 + pbxproj 成员），按计划复用并验证，而非重写。
@@ -433,3 +416,24 @@
 - **修改**：无（零代码变更，未强行修改）；按 20 条保留规则将 Loop 6 剪切归档到 `.agent/archive/history-2026-08-10-loop6-6.md`。
 - **验证**：`rtk bash ./scripts/verify.sh build` → `[verify] Build succeeded`（确认编译基线）；`git status` / `git log` / `grep` 结果均无异常。
 - **剩余风险**：本轮未运行完整测试套件（无具体问题指向时不强制，见 `loop.md`）；Loop 24/25 已注明的收藏排序控件最小窗口视觉布局与 Loop 22 健康评分视觉布局仍需人工目视确认；Xcode 未登录 Apple 账号，标准自动签名安装仍不可用。
+
+---
+
+## Loop 27 — 2026-08-13（修复 verify.sh 缺失执行位，恢复文档契约的直接执行入口）
+
+- **问题**：维护循环的验证入口 `./scripts/verify.sh` 直接执行报 `Permission denied`（exit 126），与根 `AGENTS.md`、`CLAUDE.md`、`loop.md` 中「从仓库根目录运行 `./scripts/verify.sh build/test/final/widgetkit`」的文档契约不符。
+- **证据**：
+  - `./scripts/verify.sh build` → `bash: 行 1: ./scripts/verify.sh: Permission denied`（exit 126，可复现）。
+  - `ls -la scripts/verify.sh` → `-rw-r--r--`；`git ls-files -s scripts/` → `scripts/verify.sh` mode 为 `100644`，而同目录其余验证脚本（`verify-widgetkit.sh`、`verify-install-upgrade.sh`、`verify-upgrade.sh`、`verify-activity-timeline.sh`、`install-and-self-check.sh`、`secret-scan.sh`）均为 `100755` —— 执行位遗漏。
+  - 工作区 HEAD `0a2a49d` 与 origin/main 同步（ab +0 -0），无其他未提交改动；`grep -rn -e TODO -e FIXME DevPulseNative/` 无匹配。
+  - 脚本内容本身无问题：`bash scripts/verify.sh build` → `[verify] Build succeeded`（显式 bash 前缀可运行）。
+- **原因**：这是可复现的明确行为异常（有预期对比：文档指示直接执行、同类脚本均为 755），且直接阻塞每轮维护循环的验证入口与 CI 按文档运行；修复为最小 mode 变更，不涉及任何高风险项。
+- **修改**：
+  - `chmod +x scripts/verify.sh`：git mode `100644` → `100755`，blob 未变（`git status --porcelain=v2` 显示 `1 .M N... 100644 100644 100755`），纯执行位变更，内容零改动。
+  - 按 20 条保留规则将 Loop 7 剪切归档到 `.agent/archive/history-2026-08-10-loop7-7.md`。
+- **验证**：
+  - `./scripts/verify.sh build` → exit 0，`[verify] Build succeeded`（修复后直接执行成功）。
+  - `./scripts/verify.sh test DevPulseTests/RepositoryHealthOverviewTests` → exit 0，`[verify] tests passed`（文档 test 用法恢复）。
+  - `bash scripts/verify.sh build`（修复前对照组）→ `[verify] Build succeeded`，证明脚本内容无问题、缺失的仅是执行位。
+  - `git diff --check` → 通过；`git status --porcelain=v2 --branch` 仅 `scripts/verify.sh` 一处 mode 变更，无生成物。
+- **剩余风险**：mode 变更尚未提交（本流程不 commit/push，需用户授权后提交）；历史遗留的收藏/排序与健康评分视觉布局仍需人工目视确认；Xcode 未登录 Apple 账号，标准自动签名安装仍不可用。
