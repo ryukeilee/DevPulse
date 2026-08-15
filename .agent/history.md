@@ -21,23 +21,6 @@
 
 ---
 
-## Loop 8 — 2026-08-10（项目健康状态概览：复用并验证现有未提交实现）
-
-- **问题**：目标「为 DevPulse 增加项目健康状态概览」；工作区已存在未提交实现（`RepositoryHealthOverview.swift` / `RepositoryHealthOverviewView.swift` / `RepositoryHealthOverviewTests.swift` + `ContentView.swift` 接入 + pbxproj 成员），按计划复用并验证，而非重写。
-- **证据**：
-  - 四维覆盖复核：最近活动时间（`lastActivityAt` → `lastChangedAt` 兜底）、仓库状态（clean / changed 计数 / error）、扫描状态（current / lastSuccessful / unknown / unavailable / error，优先级 unavailable > current > lastSuccessful > unknown/error）、活跃程度（≤24h 活跃、≤7d 一般、>7d 沉寂、无记录无活动）。
-  - 纯派生约束：`RepositoryHealthOverview.swift` 与视图文件 grep 无 `ProcessRunner` / git / URLSession / FileManager / Timer / Task / async / await；数据源只读 `scheduler.lastResult.repositories`（`AppGroupData`）。
-  - 范围：`git status` / `git diff --stat` 改动仅限三个概览新文件 + `ContentView.swift` 接入 + pbxproj 新文件成员；扫描链路（GitRepositoryScanner / RefreshEngine / ScanScheduler / SharedSnapshotStore / AppGroupStore / Models / project.yml）零改动；`git diff --check` 通过。
-- **原因**：实现已符合计划验收标准，验证路径为「编译链接 + 纯派生单元测试 + 源码结构审查」。
-- **修改**：无代码改动（复用既有未提交实现并验证）。
-- **验证**：
-  - `bash ./scripts/verify.sh build` → Build succeeded；直跑 `build-for-testing` → `** TEST BUILD SUCCEEDED **`，概览三文件均编译进 app / 测试 target。
-  - `bash ./scripts/verify.sh test DevPulseTests/RepositoryHealthOverviewTests` → tests passed；直跑 test-without-building → 21 个用例全部通过、0 失败。
-  - `bash ./scripts/verify.sh final` → Final acceptance passed；直跑全量 test-without-building → `Test run with 832 tests passed`、`** TEST EXECUTE SUCCEEDED **`、0 失败。
-- **剩余风险**：概览为 macOS 原生 GUI，CLI 无法无头启动窗口做端到端视觉验证；四维行的最终视觉布局需签名安装后在 App 中人工确认（计划已列入剩余风险）。
-
----
-
 ## Loop 9 — 2026-08-10（执行维护循环后合并提交推送前）
 
 - **问题**：无（本轮判定无高价值问题，记录「无变更」后进入合并提交推送流程）。
@@ -437,3 +420,25 @@
   - `bash scripts/verify.sh build`（修复前对照组）→ `[verify] Build succeeded`，证明脚本内容无问题、缺失的仅是执行位。
   - `git diff --check` → 通过；`git status --porcelain=v2 --branch` 仅 `scripts/verify.sh` 一处 mode 变更，无生成物。
 - **剩余风险**：mode 变更尚未提交（本流程不 commit/push，需用户授权后提交）；历史遗留的收藏/排序与健康评分视觉布局仍需人工目视确认；Xcode 未登录 Apple 账号，标准自动签名安装仍不可用。
+
+---
+
+## Loop 28 — 2026-08-15（签名安装运行并提交推送 Loop 27 改动）
+
+- **问题**：无新增业务问题；Loop 27 修复 `scripts/verify.sh` 执行位后，用户明确要求直接本机签名安装运行新 App，并合并提交推送。
+- **证据**：
+  - 工作区仅有 Loop 27 的 3 个改动（`.agent/history.md` Loop 27 记录、`scripts/verify.sh` mode 100644→100755、`.agent/archive/history-2026-08-10-loop7-7.md` 归档）；HEAD `0a2a49d` 与 origin/main 同步。
+  - 签名身份：keychain 有效 `Apple Development: ryukei_li@hotmail.com (5BJ9GM7VZR)`（C6B16796CD59EF90EDF3005A05276634FC8F27EA），Team `JYL9G28DP3`。
+  - 本机 Xcode 未登录 Apple 账号（`defaults read com.apple.dt.Xcode` 无账号键），标准 `install-and-self-check.sh` 的自动签名路径不可用。
+  - 已安装 app（Loop 25，08-12）内嵌 host/widget profiles 的 `ExpirationDate` 为 2026-08-13，**已过期**；本地 Provisioning Profiles 目录仅有两个 TinyBuddy profile（`com.ryukeili.TinyBuddy*`），不匹配 DevPulse。
+  - 直接证据：过期 profile 签名的已安装 app 仍正常运行（PID 13401 在跑、`--self-check` pass）——macOS 本地开发 app 的运行不因 profile 过期被拒。
+- **原因**：不扩大功能范围，只完成用户授权的本机签名安装、运行验证与 Git 发布终态；唯一可用 profiles 已过期，但运行不受影响（有直接证据），沿用历史已验证的手动签名路径。
+- **修改**：无业务代码修改；追加本记录，并按 20 条保留规则将 Loop 8 剪切归档到 `.agent/archive/history-2026-08-10-loop8-8.md`。
+- **验证**：
+  - 独立 DerivedData（`/tmp/devpulse-install-loop27/DerivedData`）普通 `xcodebuild build`（Debug，CODE_SIGNING_ALLOWED=NO）→ `** BUILD SUCCEEDED **`；产物不含 `DevPulseTests.xctest`，widget appex 存在。
+  - 复用已安装 app 的 host/widget profiles，分别嵌入产物后用项目 entitlements 重签（先 widget 后 host）：`codesign --verify --deep --strict` PASS；host `local.devpulse.app` 含 `com.apple.security.application-groups`，widget `local.devpulse.app.widget` 含 App Sandbox + App Group；二者均为 Apple Development 证书、Team `JYL9G28DP3`。
+  - 旧 app 备份到 `/tmp/devpulse-install-loop27/DevPulse.app.previous`；安装后主二进制与临时签名产物 SHA-256 一致；无测试 bundle；安装后签名复验 PASS。
+  - `open -n` 启动 → 进程 PID 59526，路径 `/Applications/DevPulse.app/Contents/MacOS/DevPulse` 匹配；`--self-check` → `self_check.result=pass`、`refresh_phase=success`、`repository_count=4`、`validation=pass`、`lifecycle.widget_registration=active`、`lifecycle.self_heal=^pass`（恢复 1 项）；`pluginkit` → `local.devpulse.app.widget(0.2.0)` 注册。
+  - 共享快照：`generatedAt=2026-08-15T03:02:18Z`、`writtenAt=03:02:22Z`、`lastSuccessfulRefreshAt=03:02:18Z` 为启动后新值；4 仓库，DevPulse status=changed（与提交前工作区一致）。
+  - 提交前 `scripts/secret-scan.sh staged` PASS、`git diff --cached --check` PASS；提交 `4c5c6b7`（3 files, 37 insertions, 17 deletions）并 push `origin/main` 成功（exit 0），本地 HEAD = origin/main。
+- **剩余风险**：嵌入 profiles 已过期（2026-08-13），本机运行与 widget 注册已验证不受影响，但未来若系统收紧 profile 校验或需要 Xcode 重签名/新设备，需重新生成 profiles（需登录 Xcode Apple 账号）；收藏/排序与健康评分的最终视觉布局仍需人工目视确认。
