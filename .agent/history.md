@@ -21,25 +21,6 @@
 
 ---
 
-## Loop 10 — 2026-08-11（项目健康概览评分与异常状态）
-
-- **问题**：项目健康概览只呈现四个原始维度，未提供综合评分或原因；其中 `risk` 仅表示变更文件风险，不能代表项目维护健康度；旧活动时间可能遮住新提交，未来时间戳会被误判为活跃。
-- **证据**：`RepositoryHealthOverviewBuilder` 原实现只有维度映射/排序，没有评分；`activityTimestamp` 使用 `lastActivityAt ?? lastChangedAt`；`classifyActivityLevel` 对未来时间的负间隔直接判为 `.active`。用户目标明确要求重新校准评分、指标权重、解释和异常处理。
-- **原因**：这是当前健康状态入口的直接数据价值问题；可在现有 `RepositorySnapshot` 纯派生层修正，不新增扫描流程，不改变 Widget 或刷新链路。
-- **修改**：
-  - `Core/RepositoryHealthOverview.swift`：新增 0–100 综合健康分（活跃度 35、维护状态 35、数据可信度 20、变更风险 10）、健康/需关注/风险较高/数据不足/无法评估状态与原因说明；综合两个已有活动时间戳并过滤无效/未来值；对上次成功、未知、读取错误和不可用数据进行降级或不评分。
-  - `App/RepositoryHealthOverviewView.swift`：展示评分、状态颜色和最多两项主要原因，标题说明评分构成。
-  - `DevPulseNativeTests/RepositoryHealthOverviewTests.swift`：补充评分权重、活跃/沉寂、维护问题、陈旧数据、未知/不可用数据、旧新时间戳和未来时间边界测试。
-- **验证**：
-  - `bash ./scripts/verify.sh build` → Build succeeded。
-  - `bash ./scripts/verify.sh test DevPulseTests/RepositoryHealthOverviewTests` → tests passed（26 个用例）。
-  - `bash ./scripts/verify.sh widgetkit` → 15 PASS, 0 FAIL。
-  - `bash ./scripts/verify.sh final` → full test suite passed，Final acceptance passed。
-  - `git diff --check` → 通过；最终业务 diff 仅限上述 3 个文件，无生成物、Widget/刷新/共享快照改动。
-- **剩余风险**：CLI 无法证明签名 macOS 窗口的最终横向布局，评分行在窄窗口下的视觉效果仍需手动确认；评分是基于最近一次已有快照的可解释估计，不代表未运行 DevPulse 期间的完整活动历史。
-
----
-
 ## Loop 11 — 2026-08-11（合并提交推送前复验）
 
 - **问题**：无（本轮判定无高价值问题，记录「无变更」后进入签名安装与合并提交推送流程）。
@@ -446,3 +427,28 @@
   - `codesign --verify --deep --strict` → `valid on disk`、`satisfies its Designated Requirement`；host Identifier `local.devpulse.app`、Apple Development 证书、Team `JYL9G28DP3`。
   - 新进程运行：PID 60655，路径 `/Applications/DevPulse.app/Contents/MacOS/DevPulse`；`pluginkit` → `local.devpulse.app.widget(0.2.0)` 注册。
 - **剩余风险**：免费 Apple ID 的 macOS provisioning profile 有效期为 **7 天**（本次至 2026-08-22），过期后 app 本机运行不受影响，但重新签名安装需再跑一次标准脚本自动续期（Xcode 已登录，随时可执行）；收藏/排序与健康评分的最终视觉布局仍需人工目视确认。
+
+## Loop 30 — 2026-08-16（verify.sh 硬依赖 GNU timeout，最小 PATH 环境构建入口失败）
+
+- **问题**：文档契约的验证入口 `./scripts/verify.sh build` 在本环境可复现失败：`./scripts/verify.sh: line 61: timeout: command not found`（exit 1）——脚本无条件调用 GNU coreutils 的 `timeout` 命令，而本机 macOS 14.8.7 无 `/usr/bin/timeout`，且本会话 bash 环境 PATH 仅为 `/usr/bin:/bin:/usr/sbin:/sbin`（不含 `/opt/homebrew/bin`）。
+- **证据**：
+  - 后台运行 `./scripts/verify.sh build`（会话默认 PATH）→ exit 1，错误 `./scripts/verify.sh: line 61: timeout: command not found`，完整日志保留于 `{TMPDIR}/devpulse-build.MkJmMJ`。
+  - `command -v timeout` → 无输出；`ls /usr/bin/timeout` → No such file；`ls /opt/homebrew/bin/timeout` → `coreutils/9.11/bin/timeout` 符号链接（Homebrew，不在会话 PATH）。
+  - `sw_vers` → macOS 14.8.7（`timeout` 从 macOS 15 起才随系统提供）。
+  - `scripts/verify.sh` 第 61 行（build）与第 93 行（test）无条件使用 `timeout "$BUILD_TIMEOUT" ...` / `timeout "$TEST_TIMEOUT" ...`。
+  - 预期对比：根 `AGENTS.md` / `CLAUDE.md` / `.agent/loop.md` 均承诺「从仓库根目录运行 `./scripts/verify.sh build/test/final/widgetkit`」；Loop 27 记录显示该入口曾实测成功（当时环境 PATH 含 `/opt/homebrew/bin`）。
+  - `grep -n timeout scripts/*.sh` → 仅 `verify.sh` 自身使用该命令，其他脚本无同类依赖。
+- **原因**：这是文档化验证入口的可复现行为异常（有预期对比），直接阻塞维护循环自身的构建/测试验证入口；修复为最小可移植改动，不触碰产品代码或任何高风险项。
+- **修改**：
+  - `scripts/verify.sh`：新增 `run_with_timeout()` 可移植包装——`command -v timeout` 检测存在则 `timeout "$seconds" "$@"`（保持超时强制），缺失则提示「timeout not found in PATH; running without timeout enforcement」后直接运行（退出码原样传播）；第 61、93 行两处调用替换为 `run_with_timeout "$BUILD_TIMEOUT" xcodebuild` / `run_with_timeout "$TEST_TIMEOUT" xcodebuild`。单文件 +15/-2 行。
+  - 追加本 Loop 30 记录，并按 20 条保留规则将 Loop 10 剪切归档到 `.agent/archive/history-2026-08-11-loop10-10.md`。
+- **验证**：
+  - `bash -n scripts/verify.sh` → SYNTAX_OK。
+  - 最小 PATH（`env PATH=/usr/bin:/bin:/usr/sbin:/sbin`）下 `./scripts/verify.sh build` → `[verify] Build succeeded`（exit 0；修复前同环境 exit 1）。
+  - 最小 PATH 下 `./scripts/verify.sh test DevPulseTests/RepositoryHealthOverviewTests` → `[verify] tests passed`（exit 0）。
+  - 降级分支单测：`run_with_timeout 5 true` → 0；`run_with_timeout 5 sh -c "exit 7"` → 7 原样传播；提示信息输出正常。
+  - 有 timeout 分支（PATH 含 `/opt/homebrew/bin`）：`run_with_timeout 5 true` → 0。
+  - `git diff --check` → 通过；最终 `git status` = `scripts/verify.sh` 与 `.agent/history.md` 修改 + 归档新文件，无生成物。
+- **剩余风险**：降级分支下无超时强制（仅当环境缺 GNU coreutils 时，正常 PATH 环境行为不变）；本机免费 Apple ID profile 至 2026-08-22 过期（app 运行不受影响，重签需再跑标准脚本）；收藏/排序与健康评分的最终视觉布局仍需人工目视确认；本轮未运行全量测试套件（无产品代码改动，编译基线 + 定向测试已覆盖修复点）。
+
+---

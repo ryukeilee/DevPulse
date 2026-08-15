@@ -51,6 +51,19 @@ info()  { printf '\033[36m[verify]\033[0m %s\n' "$*" >&2; }
 ok()    { printf '\033[32m[verify]\033[0m %s\n' "$*" >&2; }
 fail()  { printf '\033[31m[verify] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Portable timeout wrapper: GNU coreutils `timeout` is not present on stock
+# macOS < 15 (or in minimal PATH environments); fall back to running directly
+# when it is unavailable so the documented entrypoint keeps working.
+run_with_timeout() {
+    local seconds="$1"; shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$seconds" "$@"
+    else
+        info "timeout not found in PATH; running without timeout enforcement"
+        "$@"
+    fi
+}
+
 # ── build-for-testing ────────────────────────────────────────────────
 
 build_for_testing() {
@@ -58,7 +71,7 @@ build_for_testing() {
     local log_file
     log_file="$(mktemp "${TMPDIR:-/tmp}/devpulse-build.XXXXXX")"
 
-    if timeout "$BUILD_TIMEOUT" xcodebuild \
+    if run_with_timeout "$BUILD_TIMEOUT" xcodebuild \
         "${COMMON_ARGS[@]}" \
         build-for-testing \
         >"$log_file" 2>&1; then
@@ -90,7 +103,7 @@ run_tests() {
     local log_file
     log_file="$(mktemp "${TMPDIR:-/tmp}/devpulse-test.XXXXXX")"
 
-    if timeout "$TEST_TIMEOUT" xcodebuild \
+    if run_with_timeout "$TEST_TIMEOUT" xcodebuild \
         "${test_args[@]}" \
         test-without-building \
         >"$log_file" 2>&1; then
