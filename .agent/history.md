@@ -21,22 +21,6 @@
 
 ---
 
-## Loop 9 — 2026-08-10（执行维护循环后合并提交推送前）
-
-- **问题**：无（本轮判定无高价值问题，记录「无变更」后进入合并提交推送流程）。
-- **证据**：
-  - 工作区未提交改动 = 用户既有 WIP（`DailyDevelopmentSummary` 系列，Loop 6/7）+ 项目健康状态概览（`RepositoryHealthOverview` 系列 + `ContentView` 接入 + pbxproj 成员，Loop 8）+ `.agent/history.md` 记录；`git status --porcelain=v2 --branch` → `branch.ab +0 -0`，HEAD `60683d3`，与 origin/main 同步。
-  - `grep -rn -e TODO -e FIXME DevPulseNative/` → 无匹配。
-  - 本轮 `bash ./scripts/verify.sh build` → `[verify] Build succeeded`（编译基线正常）。
-  - `git diff --check` → 通过。
-  - Loop 8 已对该工作树跑全量测试：`Test run with 832 tests passed`、`** TEST EXECUTE SUCCEEDED **`、0 失败。
-- **原因**：无新增可复现 Bug / 测试失败 / 行为异常 / 用户反馈；按规则「没有足够证据 → 不修改」。用户授权将既有未提交改动合并提交并推送。
-- **修改**：无代码改动；追加本轮 Loop 记录。
-- **验证**：build 通过、diff --check 通过（全量测试证据沿用 Loop 8 同一工作树结果）。
-- **剩余风险**：概览与摘要的最终视觉布局仍需签名安装后在 macOS App 中人工确认。
-
----
-
 ## Loop 10 — 2026-08-11（项目健康概览评分与异常状态）
 
 - **问题**：项目健康概览只呈现四个原始维度，未提供综合评分或原因；其中 `risk` 仅表示变更文件风险，不能代表项目维护健康度；旧活动时间可能遮住新提交，未来时间戳会被误判为活跃。
@@ -442,3 +426,23 @@
   - 共享快照：`generatedAt=2026-08-15T03:02:18Z`、`writtenAt=03:02:22Z`、`lastSuccessfulRefreshAt=03:02:18Z` 为启动后新值；4 仓库，DevPulse status=changed（与提交前工作区一致）。
   - 提交前 `scripts/secret-scan.sh staged` PASS、`git diff --cached --check` PASS；提交 `4c5c6b7`（3 files, 37 insertions, 17 deletions）并 push `origin/main` 成功（exit 0），本地 HEAD = origin/main。
 - **剩余风险**：嵌入 profiles 已过期（2026-08-13），本机运行与 widget 注册已验证不受影响，但未来若系统收紧 profile 校验或需要 Xcode 重签名/新设备，需重新生成 profiles（需登录 Xcode Apple 账号）；收藏/排序与健康评分的最终视觉布局仍需人工目视确认。
+
+---
+
+## Loop 29 — 2026-08-15（Xcode 登录免费 Apple ID 后，标准自动签名路径重新生成未过期 profiles）
+
+- **问题**：Loop 28 记录的唯一剩余风险是嵌入 profiles 已于 2026-08-13 过期、需登录 Xcode Apple 账号重新生成；用户反馈本机 Xcode 已登录（免费 Apple ID，非付费开发者），目标仅要求「能本机运行即可」，希望解决 profiles 过期问题。
+- **证据**：
+  - Xcode 登录状态：`defaults read com.apple.dt.Xcode DVTDeveloperAccountManagerAppleIDLists` → `IDE.Identifiers.Prod` 有 identifier 条目（账号已配置）；`DVTDeveloperAccountManagerAppleIDs` 键不存在（Xcode 16 使用新键）。
+  - 签名身份不变：`Apple Development: ryukei_li@hotmail.com (5BJ9GM7VZR)`（C6B16796...），Team `JYL9G28DP3`。
+  - 项目 `CODE_SIGN_STYLE=Automatic`、`DEVELOPMENT_TEAM` 为空（`_DEVELOPMENT_TEAM_IS_EMPTY=YES`）；标准脚本 `resolve_development_team` 从证书解析 team 为 `JYL9G28DP3`。
+- **原因**：用户已解决登录前置条件，标准 `install-and-self-check.sh` 的自动签名路径（`-allowProvisioningUpdates`）此前因「No Xcode Apple account」被阻塞，现在可完整走通并让 Xcode 重新生成未过期 profiles——这是消除 Loop 28 剩余风险的标准方案，也符合用户「能本机运行即可」的目标。
+- **修改**：无业务代码修改；追加本记录，并按 20 条保留规则将 Loop 9 剪切归档到 `.agent/archive/history-2026-08-10-loop9-9.md`。
+- **验证**：
+  - `DERIVED_DATA_PATH=/tmp/devpulse-install-loop29/DerivedData bash scripts/install-and-self-check.sh` → `install_and_self_check=pass`；自动签名构建成功（Xcode 用免费账号重新生成 profiles）、`snapshot.repoStatus=clean`、`changedFileCount=0`、`lifecycle.widget_registration=active`、`lifecycle.self_heal=^pass`。
+  - 新 host profile：`Mac Team Provisioning Profile: local.devpulse.app`，`ExpirationDate=2026-08-22T03:06:10Z`（**未过期**，7 天有效），Team `JYL9G28DP3`，UUID 68d795cd...。
+  - 新 widget profile：`Mac Team Provisioning Profile: local.devpulse.app.widget`，`ExpirationDate=2026-08-22T03:06:12Z`（**未过期**），Team `JYL9G28DP3`，UUID a4fd5fc6...。
+  - 本地 Provisioning Profiles 目录已更新为上述两个新 profile（Xcode 自动签名产物），未来重签可复用。
+  - `codesign --verify --deep --strict` → `valid on disk`、`satisfies its Designated Requirement`；host Identifier `local.devpulse.app`、Apple Development 证书、Team `JYL9G28DP3`。
+  - 新进程运行：PID 60655，路径 `/Applications/DevPulse.app/Contents/MacOS/DevPulse`；`pluginkit` → `local.devpulse.app.widget(0.2.0)` 注册。
+- **剩余风险**：免费 Apple ID 的 macOS provisioning profile 有效期为 **7 天**（本次至 2026-08-22），过期后 app 本机运行不受影响，但重新签名安装需再跑一次标准脚本自动续期（Xcode 已登录，随时可执行）；收藏/排序与健康评分的最终视觉布局仍需人工目视确认。
