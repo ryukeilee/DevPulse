@@ -585,9 +585,19 @@
 				TargetAttributes = {
 					3F4D5EBC403852F2B41C01F8 = {
 						ProvisioningStyle = Automatic;
+						SystemCapabilities = {
+							com.apple.ApplicationGroups = {
+								enabled = 1;
+							};
+						};
 					};
 					E5041EA581BD0B987059594E = {
 						ProvisioningStyle = Automatic;
+						SystemCapabilities = {
+							com.apple.ApplicationGroups = {
+								enabled = 1;
+							};
+						};
 					};
 				};
 			};

@@ -6,6 +6,8 @@ options:
   xcodeVersion: "16.0"
   generateEmptyDirectories: true
   developmentLanguage: en
+  # 修正 XcodeGen 2.46.0 将嵌套 target attributes 序列化为字符串的问题。
+  postGenCommand: bash ../scripts/ensure-app-groups-capability.sh
 
 settings:
   base:
@@ -40,6 +42,10 @@ targets:
       properties:
         com.apple.security.application-groups:
           - group.local.devpulse
+    attributes:
+      SystemCapabilities:
+        com.apple.ApplicationGroups:
+          enabled: 1
     dependencies:
       - target: DevPulseWidgetExtension
       - sdk: IOKit.framework
@@ -85,6 +91,10 @@ targets:
         com.apple.security.app-sandbox: true
         com.apple.security.application-groups:
           - group.local.devpulse
+    attributes:
+      SystemCapabilities:
+        com.apple.ApplicationGroups:
+          enabled: 1
 
   DevPulseTests:
     type: bundle.unit-test

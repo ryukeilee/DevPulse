@@ -177,6 +177,16 @@ check_pbxproj_contains "PRODUCT_BUNDLE_IDENTIFIER = local.devpulse.app;" "projec
 check_pbxproj_contains "PRODUCT_BUNDLE_IDENTIFIER = local.devpulse.app.widget;" "project sets the widget bundle identifier"
 check_pbxproj_contains "APP_BUNDLE_ID = local.devpulse.app;" "project passes the app bundle id to the widget"
 
+app_groups_capability_count="$(grep -Fc 'com.apple.ApplicationGroups = {' "$PBXPROJ" || true)"
+app_groups_enabled_count="$(grep -Fc 'enabled = 1;' "$PBXPROJ" || true)"
+if [ "$app_groups_capability_count" -eq 2 ] && [ "$app_groups_enabled_count" -eq 2 ]; then
+    pass "app 与 widget target 均已启用 App Groups"
+else
+    fail "app 与 widget target 均已启用 App Groups"
+    printf '      capability 字典数：%s\n' "$app_groups_capability_count" >&2
+    printf '      enabled 标志数：%s\n' "$app_groups_enabled_count" >&2
+fi
+
 if [ "$FAIL_COUNT" -gt 0 ]; then
     printf 'WidgetKit verification failed: %d PASS, %d FAIL\n' "$PASS_COUNT" "$FAIL_COUNT" >&2
     exit 1
