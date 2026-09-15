@@ -266,7 +266,7 @@ struct BackupIntegrationConfiguration: Codable, Equatable, Sendable {
 
 // MARK: - Backup summary (for listing)
 
-struct BackupSummary: Identifiable, Equatable {
+struct BackupSummary: Identifiable, Equatable, Sendable {
     let id: String
     let createdAt: Date
     let appVersion: String
@@ -335,7 +335,7 @@ enum RestoreConflictResolution: String, Codable, Sendable {
     }
 }
 
-struct RestoreConflict: Codable, Equatable, Identifiable {
+struct RestoreConflict: Codable, Equatable, Identifiable, Sendable {
     let id: String
     let storeType: BackupStoreType
     let conflictType: RestoreConflictType
@@ -353,7 +353,7 @@ struct RestoreConflict: Codable, Equatable, Identifiable {
 
 // MARK: - Restore precheck result
 
-struct RestorePrecheckResult: Equatable {
+struct RestorePrecheckResult: Equatable, Sendable {
     let backupID: String
     let backupVersion: Int
     let isCompatible: Bool

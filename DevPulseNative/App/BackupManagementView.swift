@@ -577,6 +577,7 @@ struct BackupAlertItem: Identifiable {
 
 // MARK: - ViewModel
 
+@MainActor
 final class BackupViewModel: ObservableObject {
     @Published var backups: [BackupSummary] = []
     @Published var isLoading = true
@@ -592,42 +593,45 @@ final class BackupViewModel: ObservableObject {
 
     func refresh() {
         isLoading = true
-        weak var wSelf = self
-        DispatchQueue.global(qos: .utility).async {
-            guard let s = wSelf else { return }
-            let listing = s.backupManager.listBackups(config: s.config)
-            DispatchQueue.main.async {
-                guard let s = wSelf else { return }
-                s.backups = listing.backups
-                s.isLoading = false
+        let manager = backupManager
+        let config = config
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard self != nil else { return }
+            let backups = manager.listBackups(config: config).backups
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.backups = backups
+                self.isLoading = false
             }
         }
     }
 
-    func createBackup(notes: String?, completion: @escaping () -> Void) {
-        weak var wSelf = self
-        DispatchQueue.global(qos: .utility).async {
-            guard let s = wSelf else { completion(); return }
-            let stores = s.gatherCurrentStores()
+    func createBackup(notes: String?, completion: @escaping @MainActor @Sendable () -> Void) {
+        let manager = backupManager
+        let config = config
+        let stores = gatherCurrentStores()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard self != nil else {
+                Task { @MainActor in completion() }
+                return
+            }
             do {
-                let summary = try s.backupManager.createBackup(
-                    config: s.config,
+                let summary = try manager.createBackup(
+                    config: config,
                     stores: stores,
                     notes: notes,
                     isIncremental: false
                 )
-                DispatchQueue.main.async {
-                    guard let s = wSelf else { completion(); return }
-                    s.backups.insert(summary, at: 0)
+                Task { @MainActor [weak self] in
+                    if let self {
+                        self.backups.insert(summary, at: 0)
+                    }
                     completion()
                 }
             } catch {
-                DispatchQueue.main.async {
-                    guard let s = wSelf else { completion(); return }
-                    s.alertItem = BackupAlertItem(
-                        title: "备份失败",
-                        message: error.localizedDescription
-                    )
+                let message = error.localizedDescription
+                Task { @MainActor [weak self] in
+                    self?.alertItem = BackupAlertItem(title: "备份失败", message: message)
                     completion()
                 }
             }
@@ -635,35 +639,32 @@ final class BackupViewModel: ObservableObject {
     }
 
     func verifyBackup(_ backup: BackupSummary) {
-        weak var wSelf = self
-        DispatchQueue.global(qos: .utility).async {
-            guard let s = wSelf else { return }
-            let result = s.backupManager.verifyIntegrity(backupID: backup.id, config: s.config)
-            DispatchQueue.main.async {
-                guard let s = wSelf else { return }
-                if result.overallIntegrity {
-                    s.alertItem = BackupAlertItem(
-                        title: "完整性验证通过",
-                        message: "备份 \(backup.id) 所有文件完整且校验一致。"
-                    )
-                } else {
-                    s.alertItem = BackupAlertItem(
-                        title: "完整性验证失败",
-                        message: result.errors.joined(separator: "\n")
-                    )
-                }
+        let manager = backupManager
+        let config = config
+        let backupID = backup.id
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard self != nil else { return }
+            let result = manager.verifyIntegrity(backupID: backupID, config: config)
+            let title = result.overallIntegrity ? "完整性验证通过" : "完整性验证失败"
+            let message = result.overallIntegrity
+                ? "备份 \(backupID) 所有文件完整且校验一致。"
+                : result.errors.joined(separator: "\n")
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.alertItem = BackupAlertItem(title: title, message: message)
             }
         }
     }
 
     func deleteBackup(_ backup: BackupSummary) {
-        weak var wSelf = self
-        DispatchQueue.global(qos: .utility).async {
-            guard let s = wSelf else { return }
-            try? s.backupManager.deleteBackup(backupID: backup.id, config: s.config)
-            DispatchQueue.main.async {
-                guard let s = wSelf else { return }
-                s.backups.removeAll { $0.id == backup.id }
+        let manager = backupManager
+        let config = config
+        let backupID = backup.id
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard self != nil else { return }
+            try? manager.deleteBackup(backupID: backupID, config: config)
+            Task { @MainActor [weak self] in
+                self?.backups.removeAll { $0.id == backupID }
             }
         }
     }
@@ -697,67 +698,77 @@ final class BackupViewModel: ObservableObject {
     }
 
     func importBackup(from url: URL) {
-        weak var wSelf = self
-        DispatchQueue.global(qos: .utility).async {
-            guard let s = wSelf else { return }
+        let manager = backupManager
+        let config = config
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard self != nil else { return }
             do {
-                let summary = try s.backupManager.importBackup(from: url, config: s.config)
-                DispatchQueue.main.async {
-                    guard let s = wSelf else { return }
-                    s.refresh()
-                    s.alertItem = BackupAlertItem(
-                        title: "导入成功", message: "备份「\(summary.id)」已导入。"
+                let backupID = try manager.importBackup(from: url, config: config).id
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.refresh()
+                    self.alertItem = BackupAlertItem(
+                        title: "导入成功", message: "备份「\(backupID)」已导入。"
                     )
                 }
             } catch {
-                DispatchQueue.main.async {
-                    guard let s = wSelf else { return }
-                    s.alertItem = BackupAlertItem(
-                        title: "导入失败", message: error.localizedDescription
-                    )
+                let message = error.localizedDescription
+                Task { @MainActor [weak self] in
+                    self?.alertItem = BackupAlertItem(title: "导入失败", message: message)
                 }
             }
         }
     }
 
-    func precheckRestore(backup: BackupSummary, completion: @escaping (RestorePrecheckResult) -> Void) {
-        weak var wSelf = self
-        DispatchQueue.global(qos: .utility).async {
-            guard let s = wSelf else { return }
-            let currentStores = s.gatherCurrentStores()
-            let result = s.restoreManager.precheck(backupID: backup.id, config: s.config, currentStores: currentStores)
-            DispatchQueue.main.async {
+    func precheckRestore(
+        backup: BackupSummary,
+        completion: @escaping @MainActor @Sendable (RestorePrecheckResult) -> Void
+    ) {
+        let manager = restoreManager
+        let config = config
+        let backupID = backup.id
+        let currentStores = gatherCurrentStores()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard self != nil else { return }
+            let result = manager.precheck(
+                backupID: backupID,
+                config: config,
+                currentStores: currentStores
+            )
+            Task { @MainActor in
                 completion(result)
             }
         }
     }
 
     func executeRestore(backup: BackupSummary) {
-        weak var wSelf = self
-        DispatchQueue.global(qos: .utility).async {
-            guard let s = wSelf else { return }
-            let currentStores = s.gatherCurrentStores()
+        let manager = restoreManager
+        let config = config
+        let backupID = backup.id
+        let currentStores = gatherCurrentStores()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard self != nil else { return }
             let storeWriters: [BackupStoreType: (Data) throws -> Void] = [:]
             do {
-                let result = try s.restoreManager.executeRestore(
-                    backupID: backup.id, config: s.config,
+                let result = try manager.executeRestore(
+                    backupID: backupID, config: config,
                     currentStores: currentStores, storeWriters: storeWriters,
                     resolveConflicts: [:]
                 )
-                DispatchQueue.main.async {
-                    guard let s = wSelf else { return }
-                    s.alertItem = BackupAlertItem(
+                let restoredCount = result.restoredEntries.count
+                let totalCount = result.totalEntries
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.alertItem = BackupAlertItem(
                         title: "恢复完成",
-                        message: "已恢复 \(result.restoredEntries.count)/\(result.totalEntries) 项数据。"
+                        message: "已恢复 \(restoredCount)/\(totalCount) 项数据。"
                     )
-                    s.refresh()
+                    self.refresh()
                 }
             } catch {
-                DispatchQueue.main.async {
-                    guard let s = wSelf else { return }
-                    s.alertItem = BackupAlertItem(
-                        title: "恢复失败", message: error.localizedDescription
-                    )
+                let message = error.localizedDescription
+                Task { @MainActor [weak self] in
+                    self?.alertItem = BackupAlertItem(title: "恢复失败", message: message)
                 }
             }
         }
