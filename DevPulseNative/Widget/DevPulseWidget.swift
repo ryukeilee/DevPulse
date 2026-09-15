@@ -1771,6 +1771,7 @@ struct DevPulseWidget: Widget {
         }
         .configurationDisplayName("DevPulse")
         .description("一眼查看本地 Git 仓库状态。")
+        .containerBackgroundRemovable(false)
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
     }
 }
