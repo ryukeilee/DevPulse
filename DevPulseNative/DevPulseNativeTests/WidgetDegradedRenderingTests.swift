@@ -46,13 +46,13 @@ struct WidgetDegradedRenderingTests {
             let entry = WidgetEntry.loadFailed(error)
             #expect(entry.loadState == .loadFailed)
             #expect(entry.loadFailure != nil)
-            #expect(!(entry.loadFailure?.title ?? "").isEmpty,
+            #expect(entry.loadFailure?.title.isEmpty == false,
                     "Title must be non-empty for \(error)")
-            #expect(!(entry.loadFailure?.detail ?? "").isEmpty,
+            #expect(entry.loadFailure?.detail.isEmpty == false,
                     "Detail must be non-empty for \(error)")
-            #expect(!(entry.loadFailure?.icon ?? "").isEmpty,
+            #expect(entry.loadFailure?.icon.isEmpty == false,
                     "Icon must be non-empty for \(error)")
-            #expect(!(entry.loadFailure?.footerText ?? "").isEmpty,
+            #expect(entry.loadFailure?.footerText.isEmpty == false,
                     "Footer text must be non-empty for \(error)")
         }
     }

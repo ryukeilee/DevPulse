@@ -21,24 +21,6 @@
 
 ---
 
-## Loop 11 — 2026-08-11（合并提交推送前复验）
-
-- **问题**：无（本轮判定无高价值问题，记录「无变更」后进入签名安装与合并提交推送流程）。
-- **证据**：
-  - 工作区未提交改动 = Loop 10 的健康评分 WIP（`Core/RepositoryHealthOverview.swift` / `App/RepositoryHealthOverviewView.swift` / `DevPulseNativeTests/RepositoryHealthOverviewTests.swift`）+ 本记录；`git status --porcelain=v2 --branch` → `branch.ab +0 -0`，HEAD `aa436d4`，与 origin/main 同步。
-  - `grep -rn -e TODO -e FIXME DevPulseNative/` → 无匹配（exit 1）。
-  - `git diff --check` → 通过。
-  - 本轮 `bash ./scripts/verify.sh build` → `[verify] Build succeeded`（编译基线正常）。
-  - 定向测试 `bash ./scripts/verify.sh test DevPulseTests/RepositoryHealthOverviewTests` → `[verify] tests passed`。
-  - 全量验收 `bash ./scripts/verify.sh final` → `full test suite passed`、`Final acceptance passed — all checks green`（47.6s）。
-  - 无新增用户反馈；Loop 10 已记录该功能的实现与验证细节。
-- **原因**：不满足 `loop.md` Evidence 阶段的任何有效依据（无新增可复现 Bug / 测试失败 / 行为异常 / 用户反馈）；按规则「没有足够证据 → 不修改」。用户授权将既有未提交改动签名安装后合并提交并推送。
-- **修改**：无业务代码改动；追加本轮 Loop 记录。
-- **验证**：build、定向测试、全量验收（`verify.sh final`）、`git diff --check` 全部通过。
-- **剩余风险**：评分行在签名 macOS 窗口中的最终视觉布局仍需安装后人工确认（本流程随后执行签名安装）；评分基于最近一次已有快照的可解释估计。
-
----
-
 ## Loop 12 — 2026-08-11
 
 - **问题**：无（本轮判定无高价值问题，记录「无变更」）。
@@ -450,5 +432,40 @@
   - 有 timeout 分支（PATH 含 `/opt/homebrew/bin`）：`run_with_timeout 5 true` → 0。
   - `git diff --check` → 通过；最终 `git status` = `scripts/verify.sh` 与 `.agent/history.md` 修改 + 归档新文件，无生成物。
 - **剩余风险**：降级分支下无超时强制（仅当环境缺 GNU coreutils 时，正常 PATH 环境行为不变）；本机免费 Apple ID profile 至 2026-08-22 过期（app 运行不受影响，重签需再跑标准脚本）；收藏/排序与健康评分的最终视觉布局仍需人工目视确认；本轮未运行全量测试套件（无产品代码改动，编译基线 + 定向测试已覆盖修复点）。
+
+---
+
+## Loop 31 — 2026-09-17（macOS 27 大尺寸 Widget 背景修复验证）
+
+- **问题**：用户反馈 macOS 27 下 DevPulse 大尺寸桌面 Widget 变白且内容不显示。
+- **证据**：
+  - `sw_vers` → macOS `27.0`；当前 HEAD 提交为「修复 macOS 27 桌面 Widget 背景显示」。
+  - `DevPulseWidgetEntryView` 已同时使用嵌入式 `WidgetPanelBackground` 与 `.containerBackground(for: .widget)`；背景使用可填充的 `Rectangle`，不再依赖 `ContainerRelativeShape`。
+  - macOS 27 的 `chronod` 日志显示 `DevPulseWidget:systemLarge` timeline request ended `success`，并接受 `systemLarge` archive；`pluginkit` 注册当前 `/Applications/DevPulse.app` Widget extension。
+- **原因**：这是用户可见的高优先级 Widget 渲染问题；本轮围绕现有最小生产修复进行 macOS 27 构建、安装和渲染管线复验。
+- **修改**：
+  - 生产修复已在当前 HEAD；本轮未扩大 Widget 业务逻辑。
+  - `DevPulseNativeTests/WidgetDegradedRenderingTests.swift`、`WidgetLifecycleScenariosTests.swift`：将 Xcode 27 下失效的 `#expect(!(optional ?? "").isEmpty)` 改为等价的可观测 `optional.isEmpty == false` 断言，恢复 Widget 场景测试的真实校验。
+- **验证**：
+  - `./scripts/verify.sh build` → Build succeeded。
+  - `./scripts/verify.sh test DevPulseTests/WidgetDegradedRenderingTests`、`WidgetLifecycleScenariosTests` → tests passed。
+  - `./scripts/verify-widgetkit.sh` → 16 PASS, 0 FAIL。
+  - `DERIVED_DATA_PATH=/tmp/devpulse-widget-macos27-verify bash scripts/install-and-self-check.sh` → install_and_self_check=pass；self-check result/refresh/validation 均 pass，`lifecycle.widget_registration=active`。
+  - `codesign --verify --deep --strict /Applications/DevPulse.app` → pass；Widget 保留 `group.local.devpulse`。
+  - `pluginkit -vm -A -D -i local.devpulse.app.widget` → 当前安装路径已注册。
+  - `./scripts/verify.sh final` → 893 tests / 89 suites 中 Widget 相关套件通过；整体仍有 6 个与本问题无关的既有生命周期/发现测试失败，未伪装为通过。
+  - 直接像素截图受当前会话 `CGSSessionScreenIsLocked = 1` 影响，锁屏会将 Widget 内容遮蔽为占位背景；因此最终可见像素仍需解锁后人工确认。
+- **剩余风险**：生产修复已通过 macOS 27 的真实构建、签名安装、WidgetKit archive/timeline 成功和注册验证；锁屏环境无法完成最终肉眼显示确认，且全量测试有上述 6 个非 Widget 失败。
+
+---
+
+## Loop 32 — 2026-09-17（本地签名安装并发布 macOS 27 Widget 修复）
+
+- **问题**：用户明确要求用本地签名安装运行新版 App，然后直接提交并推送。
+- **证据**：当前代码已完成 macOS 27 Widget 背景修复；工作区仅包含本轮测试断言、维护记录和归档文件。
+- **原因**：用户已明确授权安装、commit 和 push；本轮只完成落地与发布，不扩大业务范围。
+- **修改**：无新增业务代码；安装当前 HEAD + 工作区测试修复，并追加本记录。
+- **验证**：`DERIVED_DATA_PATH=/tmp/devpulse-widget-macos27-install bash scripts/install-and-self-check.sh` → `install_and_self_check=pass`；签名校验、`self_check.result=pass`、`validation=pass`、`lifecycle.widget_registration=active` 均通过。
+- **剩余风险**：全量测试既有 6 个非 Widget 失败，以及锁屏导致的 Widget 最终像素确认限制，已在 Loop 31 记录。
 
 ---

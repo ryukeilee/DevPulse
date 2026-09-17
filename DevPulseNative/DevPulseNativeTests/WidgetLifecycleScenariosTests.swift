@@ -48,8 +48,8 @@ struct WidgetLifecycleScenariosTests {
             let entry = WidgetEntry.loadFailed(error)
             #expect(entry.loadState == .loadFailed)
             #expect(entry.loadFailure != nil)
-            #expect(!(entry.loadFailure?.title ?? "").isEmpty)
-            #expect(!(entry.loadFailure?.detail ?? "").isEmpty)
+            #expect(entry.loadFailure?.title.isEmpty == false)
+            #expect(entry.loadFailure?.detail.isEmpty == false)
         }
     }
 
@@ -79,7 +79,7 @@ struct WidgetLifecycleScenariosTests {
             let entry = WidgetEntry.loadFailed(error)
             #expect(entry.loadState == .loadFailed)
             #expect(entry.loadFailure != nil)
-            #expect(!(entry.loadFailure?.title ?? "").isEmpty, "title for \(error)")
+            #expect(entry.loadFailure?.title.isEmpty == false, "title for \(error)")
         }
     }
 
