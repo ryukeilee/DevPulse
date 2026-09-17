@@ -21,61 +21,6 @@
 
 ---
 
-## Loop 15 — 2026-08-11（六大体验区域证据驱动深度优化：口径统一 + 完整性 + 重复派生清理）
-
-- **问题**：今日摘要 / 最近变化 / 项目健康 / 开发趋势 / 项目列表与详情 / Widget-App 六区域存在跨模块口径不一致与无效重复派生，用户打开 Overview 时可能看到互相矛盾的"最近活动"时间与缺失的完整性警告。
-- **证据**（详见 `{SCRATCH}/review.md`）：
-  - 最近活动时间三处口径不同：健康概览 `max(lastActivityAt, lastChangedAt)`（`Core/RepositoryHealthOverview.swift:230-243`）、列表行 `lastActivityAt ?? lastChangedAt`（`Core/Models.swift:1043`）、Widget `.current` 仅 `lastChangedAt`（`Widget/DevPulseWidget.swift:1738-1740`）；同一快照可显示"活跃 1 小时前"（App）与"改动 3 天前"（Widget）。
-  - 今日摘要完整性漏报：`unavailableProjectCount` 只统计今日新增 `readFailed`（`Core/DailyDevelopmentSummary.swift:101-108`），昨日已失败今日仍不可读的仓库不触发 `hasDataWarning`（`App/TodayDevelopmentSummaryView.swift:157-160`）。
-  - 重复派生：`TodayDevelopmentSummaryView.summary`、`RepositoryHealthOverviewView.items/overviewSummary`、`ActivityTimelineView.decisionsByRepositoryID` 为计算属性，一次 body 求值内被访问 10+ 次，每次都全量重算。
-  - 死分支：`Core/DailyDevelopmentSummary.swift:106-108` `guard day <= todayStart` 恒真。
-- **原因**：六区域数据来源统一但派生口径分裂，属于用户可见的矛盾与无效计算，符合计划要求的检查维度；修复全部落在既有纯函数与视图层，不触碰扫描管线、快照格式与 Widget 刷新策略。
-- **修改**：
-  - `Core/Models.swift`：新增共享纯函数 `RepositorySnapshot.mostRecentActivityTimestamp`（取两者较新、过滤未来时间戳）；列表行 `recentActivityLabel` 与 `ActivityTimelineItem.mostRecentActivityTimestamp` 改用它。
-  - `Core/RepositoryHealthOverview.swift`：`activityTimestamp` 委托同一共享函数。
-  - `Widget/DevPulseWidget.swift`：`.current` 活跃文案改由共享派生（`lastChangedAt` → `mostRecentActivityTimestamp`，前缀"改动"→"活跃"），落在 widget 编译子集内。
-  - `Core/DailyDevelopmentSummary.swift`：`unavailableProjectCount` 改为"窗口内最新读取状态为 readFailed"的仓库数（跨日未恢复计入）；删除恒真死分支；复用今日 focusMinutes。
-  - `App/TodayDevelopmentSummaryView.swift` / `App/RepositoryHealthOverviewView.swift` / `App/ActivityTimelineView.swift`：body 内一次派生后传入子视图；警告文案"今天有 N 个"→"当前有 N 个"。
-  - `App/RepositoryDetailView.swift`：`.lastSuccessful` 仓库变更文件空态改为"上次成功时…"。
-  - `DevPulseNativeTests/RepositoryActivityConsistencyTests.swift`（新增）：同一夹具喂健康/列表/共享派生，断言一致；`DailyDevelopmentSummaryTests.swift`：新增跨日失败计入、恢复后清除、再失败重计三例。
-- **验证**：
-  - `bash scripts/verify.sh build` → Build succeeded。
-  - 定向测试全过：DailyDevelopmentSummaryTests、RepositoryActivityConsistencyTests、RepositoryHealthOverviewTests、CommitReadinessEngineTests、ActivityEventTests、WidgetLifecycleScenariosTests、WidgetDegradedRenderingTests。
-  - `bash scripts/verify.sh final` → full test suite passed，Final acceptance passed。
-  - `bash scripts/verify.sh widgetkit` → 15 PASS, 0 FAIL。
-  - `bash scripts/verify-activity-timeline.sh` → passed；`bash scripts/verify-build-consistency.sh` → 20 pass, 0 fail, 1 skip。
-  - 两次 `--self-check` 启动冒烟（无签名测试构建）：报告除动态 written_at 外逐行一致，退出码一致（exit=1）；`lifecycle.self_heal=^pass`、`widget_registration=active`。扫描自检 fail 系未签名构建无 App Group/扫描根目录权限的环境限制，已按计划回退条款以构建+全量测试+widget 接线作为接受标准。
-  - `git diff --stat`：仅 6 个目标区域文件 + 3 个 Core/Widget 派生文件 + 2 个测试文件；未改 project.yml、entitlements、签名、快照格式、扫描管线。
-- **剩余风险**：Widget 活跃文案（前缀/相对时间）与最活跃项目趋势的视觉呈现需在真实安装 + 桌面上人工确认；`mostRecentActivityTimestamp` 的未来时间戳（时钟偏差）边缘语义在列表与健康概览间仍有"时间未知/无活动记录"措辞差异（语义一致，文案不同）；未做签名安装。
-
----
-
-## Loop 16 — 2026-08-11（签名安装运行新 app，提交推送 Loop 15 改动）
-
-- **问题**：无新的高价值代码问题（Decide 判定本轮无 Bug）。工作区有 Loop 15 已完成并验证的六区域优化改动，用户要求执行 loop 后签名安装运行新 app，并把改动合并提交推送（明确授权 commit/push）。
-- **证据**：
-  - `git status --porcelain=v2 --branch` → main 与 origin/main 同步（4217561），工作区 11 个未提交文件（Loop 15 改动 + 本文件）。
-  - `grep -rn -e TODO -e FIXME DevPulseNative/` → 无匹配。
-  - Loop 15 已验证：`verify.sh final`（full test suite passed）、`verify.sh widgetkit`（15 PASS, 0 FAIL）、`verify-activity-timeline.sh`、`verify-build-consistency.sh`（20 pass, 0 fail）。
-  - 签名环境：keychain 有 `Apple Development: ryukei_li@hotmail.com (5BJ9GM7VZR)`；本地 provisioning profiles 匹配 bundle（team JYL9G28DP3）；Xcode 无登录账号。
-- **原因**：无新证据支持业务修改；最高价值动作是把已验证改动落地：签名安装运行（用户要求）并提交推送（用户授权）。
-- **修改**：
-  - 无业务代码修改；追加 Loop 16 记录。
-  - 标准 `install-and-self-check.sh` 被环境阻塞：`ERROR: No Xcode Apple account is configured on this Mac`（与 Loop 14 相同）。
-  - 手动签名路径（沿用 Loop 14 成功方案 + 脚本 re-sign 逻辑）：
-    - 用 `verify.sh build` 产物复制、移除测试 bundle、放入 embedded.provisionprofile（host + widget，从已安装 app 复制）。
-    - `codesign --force --sign` host（`--entitlements App/DevPulse.entitlements`，保留 App Group）与 widget（`--entitlements Widget/DevPulseWidgetExtension.entitlements`）。
-    - 安装到 `/Applications/DevPulse.app`（旧版备份到临时目录），`open -n` 启动。
-- **验证**：
-  - `codesign --verify --deep --strict` → valid on disk, satisfies Designated Requirement；host/widget entitlements 均含 `com.apple.security.application-groups`；无测试 bundle。
-  - GUI 进程运行，命令路径 = `/Applications/DevPulse.app/Contents/MacOS/DevPulse`。
-  - `--self-check`（签名后）→ `self_check.result=pass`、`refresh_phase=success`、`repository_count=3`、`validation=pass`、`lifecycle.widget_registration=active`、`lifecycle.self_heal=^pass`、exit=0（对比无签名构建的 result=fail）。
-  - 共享快照：`generatedAt/writtenAt/lastSuccessfulRefreshAt` 为启动后新值；`DevPulse status=changed changed=11` 与工作区 11 个未提交文件一致。
-  - 提交前：`scripts/secret-scan.sh staged`、`git diff --cached --check` 通过；push 到 `origin/main`。
-- **剩余风险**：无签名自动安装能力（需 Xcode 登录 Apple 账号）——手动签名路径已验证可用但每次需人工执行；Widget 在桌面上的实际渲染与交互仍需人工确认。
-
----
-
 ## Loop 17 — 2026-08-12（「最近变化」注意力计数稳定性修复：仅统计未解除的冲突/读取异常）
 
 - **问题**：「最近变化」提示条的注意力计数把已解除/已恢复的事件永久计入——`ActivityTimelineAttention.count(in:)` 无条件统计所有 `.conflictStarted` / `.readFailed`（`Core/ActivityEvent.swift` 修复前 ~237-241），导致冲突已解决、读取已恢复后，Overview 提示条仍持续显示「建议优先确认 N 项」，直到事件过期（7 天）或用户展开查看。折叠态下视图用 `max(0, count(ordered) - count(displayed))` 分算，显示区按子集计算家族状态会漏计「更早记录」中的未解除事件（如 repo-B 的读取失败在折叠区外、其恢复在折叠区外，而显示区内 repo-C 的读取失败已在全列表中恢复——additional 被 clamp 成 0，漏报）。
@@ -437,6 +382,43 @@
   - `DERIVED_DATA_PATH=/tmp/devpulse-widget-macos27-current-install bash scripts/install-and-self-check.sh` → `install_and_self_check=pass`；自动签名构建成功，`self_check.result=pass`、`refresh_phase=success`、`validation=pass`、`lifecycle.widget_registration=active`、`lifecycle.self_heal=^pass`。
   - 安装包签名校验通过，Widget 注册有效；当前快照由新进程写入，`snapshot.repoStatus=changed`、`changedFileCount=3`。
   - 提交前将执行 staged secret scan、diff check、commit 和 push；本记录随本轮发布提交保存。
-- **剩余风险**：Loop 33 记录的桌面最终像素仍需可见桌面会话人工确认；免费 Apple ID profile 需定期续期。
+- **剩余风险**：当前会话 `CGSSessionScreenIsLocked=Yes`，macOS 会按安全策略显示 Widget placeholder；解锁后的最终桌面像素仍需人工目视确认。当前 systemLarge archive 已有实际内容，未见 WidgetKit/扩展错误。
+
+---
+
+## Loop 35 — 2026-09-17（macOS 27 大尺寸 Widget 终态审计：确认内容链路，锁屏占位为当前可见空白的系统原因）
+
+- **问题**：继续排查 macOS 27 下 systemLarge Widget 空白容器，需区分 WidgetKit/SwiftUI 内容渲染失败、medium/large 分支差异，以及 macOS 锁屏对 Widget 的安全占位。
+- **证据**：
+  - `sw_vers` → macOS `27.0`；`xcodebuild -version` → Xcode `27.0`。构建设置确认 `MACOSX_DEPLOYMENT_TARGET=14.0`、`SDKROOT=MacOSX27.0.sdk`、`SWIFT_VERSION=6.0`。
+  - macOS 27 SDK 中 `containerBackground(for: .widget)` 与 `containerBackgroundRemovable(_:)` 均声明为 macOS 14.0+；现有实现使用直接嵌入的 `WidgetPanelBackground`（可填充 `Rectangle`）+ `.containerBackground(for: .widget)`，并在 Widget 配置上设置 `.containerBackgroundRemovable(false)`。历史实现曾使用 `ContainerRelativeShape`，已在之前修复中移除。
+  - `DevPulseWidgetEntryView` 的 systemMedium/systemLarge 都经过同一 `WidgetEntry` 状态树；medium 使用 `.medium`、最多 2 个项目和 `.panel` 行，large 使用 `.large`、最多 3 个项目和 `.compact` 卡片行。`WidgetPrimaryContentSelectionBuilder` 在有 feed 时不会因 family 分支返回空。
+  - 真实 macOS 27 `chronod` 日志：systemLarge render session `LIVE`；随后多次 `DevPulseWidget:systemLarge` timeline request `ended ... success`、`Accepted successfully`、`reload: succeeded with 1 entries`。当前 `/Users/ryukeili/Library/Containers/local.devpulse.app.widget/.../systemLarge...chrono-timeline` 为 44,152 bytes，`strings` 可观察到 `DevPulse`、`Dirty` 等实际视图文本。
+  - 当前屏幕状态查询得到 `CGSSessionScreenIsLocked=Yes`；macOS 27 `chronod` 明确记录 `Security policy yielding placeholder content: Keybag locked and widget's configured to not 'canAppearInSecureEnvironment'`。因此锁屏时看到的 placeholder/空白容器是系统安全策略，不是 large 内容分支消失。
+- **原因**：原有 macOS 14 兼容性问题是 `ContainerRelativeShape`/container background 不可靠；macOS 27 新的可移除 Widget container background/render scheme 会在背景被移除时暴露空白容器。当前必要修复 `.containerBackgroundRemovable(false)` 与 Rectangle/ZStack 背景已生效；systemLarge 内容链路和 archive 均成功，未发现 medium/large 条件渲染导致内容消失的新证据。
+- **修改**：无新增生产代码；仅追加本轮审计记录，并按 20 条规则将 Loop 15 归档到 `.agent/archive/history-2026-08-11-loop15-15.md`。
+- **验证**：
+  - `./scripts/verify.sh build` → Build succeeded。
+  - `./scripts/verify.sh test DevPulseTests/WidgetDegradedRenderingTests`、`WidgetLifecycleScenariosTests`、`BuildConfigConsistencyTests` → tests passed。
+  - `./scripts/verify-widgetkit.sh` → 16 PASS, 0 FAIL。
+  - `/Applications/DevPulse.app/Contents/MacOS/DevPulse --self-check` → `self_check.result=pass`、`refresh_phase=success`、`validation=pass`、`lifecycle.widget_registration=active`、exit 0。
+  - `codesign --verify --deep --strict /Applications/DevPulse.app` → pass；`pluginkit` 当前注册 `/Applications/DevPulse.app` Widget。
+  - `git diff --check`（记录前）→ 通过；此前工作区干净，无生成物。
+- **剩余风险**：当前会话锁屏阻止 `screencapture` 获得非占位桌面像素；解锁后需人工确认 Widget 的最终非空、非纯白视觉。解锁前不应把安全 placeholder 当作产品渲染回归。
+
+---
+
+## Loop 36 — 2026-09-17（无新增高价值问题：macOS 27 Widget 终态保持）
+
+- **问题**：本轮用户仅要求执行一次 Maintenance Loop；未提供新的 Bug、测试失败或行为异常。
+- **证据**：
+  - `git status --porcelain=v2 --branch` → main 与 origin/main 同步；工作区仅有上一轮维护记录及待归档历史文件，无产品源码改动。
+  - `git log -1 --oneline` → `8443968 chore: record macOS 27 widget installation`。
+  - `grep -rn -e TODO -e FIXME DevPulseNative/` → 无匹配。
+  - 最近记录已确认 macOS 27 `systemLarge` WidgetKit archive/reload 成功；未出现新的 WidgetKit、SwiftUI、签名或共享快照错误证据。
+- **原因**：已有 macOS 27 Widget 问题已在 Loop 35 完成终态审计；本轮没有新的有效依据，按规则不重复修改或强行重构。
+- **修改**：无业务代码修改；运行 `./scripts/verify.sh build` 确认编译基线；追加本记录，并按 20 条规则将 Loop 16 归档到 `.agent/archive/history-2026-08-11-loop16-16.md`。
+- **验证**：`./scripts/verify.sh build` → Build succeeded；`git diff --check` → 通过；未运行全量测试（本轮无产品代码变更）。
+- **剩余风险**：锁屏环境下无法人工确认 Widget 最终桌面像素；如需确认，应在解锁桌面会话中目视检查，不应将锁屏 placeholder 误判为产品回归。
 
 ---
