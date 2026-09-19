@@ -21,31 +21,6 @@
 
 ---
 
-## Loop 17 — 2026-08-12（「最近变化」注意力计数稳定性修复：仅统计未解除的冲突/读取异常）
-
-- **问题**：「最近变化」提示条的注意力计数把已解除/已恢复的事件永久计入——`ActivityTimelineAttention.count(in:)` 无条件统计所有 `.conflictStarted` / `.readFailed`（`Core/ActivityEvent.swift` 修复前 ~237-241），导致冲突已解决、读取已恢复后，Overview 提示条仍持续显示「建议优先确认 N 项」，直到事件过期（7 天）或用户展开查看。折叠态下视图用 `max(0, count(ordered) - count(displayed))` 分算，显示区按子集计算家族状态会漏计「更早记录」中的未解除事件（如 repo-B 的读取失败在折叠区外、其恢复在折叠区外，而显示区内 repo-C 的读取失败已在全列表中恢复——additional 被 clamp 成 0，漏报）。
-- **证据**：
-  - 既有测试 `attentionCountCoversConflictsAndReadFailuresOnly`（`DevPulseNativeTests/ActivityEventTests.swift`）注释自述「冲突解除、读取恢复与普通改动不计入…已解除/已恢复的注意力事件同样不计入：它们不再需要优先确认」，但其断言 `count(in: all) == 2`（all 含 resolved/recovered 事件）与注释意图直接矛盾——测试把注释写成意图、断言写成旧行为。
-  - 视图文案为「建议优先确认」（`App/ActivityTimelineView.swift` `attentionNotice`），已解除状态不再需要确认。
-  - `pre-fix.log`：未修复代码上定向测试 5 处断言失败（`(ActivityTimelineAttention.count(in: all) → 2) == 0`、`count([conflictStarted, conflictResolved]) → 1 == 0`、`count([readFailed, readRecovered]) → 1 == 0`、跨仓库 `→ 2 == 1` 等），与缺陷语义一致。
-  - Loop 13/15 记录声明的「时间线提示条与计数共用此定义」是共享口径的要求，并非「已解除事件必须计数」；本次修复保留共享口径并使其感知解除状态。
-- **原因**：`count(in:)` 只按事件类型过滤、不感知同仓库同类型的后续解除/恢复事件，导致可见状态与提示不一致（已确认的注意力事件仍被提示）；折叠态分算公式在不同子集上重复计算家族状态，产生漏报。修复全部落在纯逻辑层与视图消费点，不触碰扫描管线、快照格式、Widget 或项目配置。
-- **修改**：
-  - `Core/ActivityEvent.swift`：`ActivityTimelineAttention` 重写为「未解除状态感知」——`attentionFamily(for:)`（conflict/read 两族）、`openAttentionEvents(in:)`（按 (repositoryID, family) 取最新事件，最新为冲突开始/读取失败才计入，保持入参顺序）、`count(in:)`（委托 openAttentionEvents）、`split(events:displayedPrefix:)`（折叠态下 displayed=显示区内未解除数、additional=更早记录中未解除数，两数之和恒等于总数，恒非负）。`newestFirst` 排序复用 `DateFormatting` 与 id 决胜，与 `ActivityEventOrdering` 同构。
-  - `App/ActivityTimelineView.swift`：提示条计数由 `max(0, count(ordered) - count(displayed))` 改为 `split(events:displayedPrefix:displayedEvents.count)`，`attentionNotice(displayedCount:additionalCount:)` 签名不变。
-  - `DevPulseNativeTests/ActivityEventTests.swift`：`attentionCountCoversConflictsAndReadFailuresOnly` 断言 `== 2` → `== 0`（与注释意图一致）；新增 `attentionCountReflectsUnresolvedStateOnly`（未解除计入 / 解除不计入 / 再次开始恢复计入 / 跨仓库独立）与 `attentionSplitSeparatesDisplayedAndEarlierRecords`（12 条事件折叠 8 / 展开 12 / prefix 0 / prefix 3 / prefix 1 的 displayed/additional 拆分）。
-  - 实施中第一版修复漏校验「家族最新事件自身是注意力类型」，导致解除/恢复事件被计入（`count([conflictResolved, readRecovered, changed]) → 2`）；定向测试立即暴露，补上类型校验后全绿——TDD 按证据迭代，未扩大范围。
-- **验证**：
-  - `bash scripts/verify.sh build` → Build succeeded（多次）。
-  - `bash scripts/verify.sh test DevPulseTests/ActivityEventTests`（pre-fix）→ 5 处断言失败，捕获 `{SCRATCH}/pre-fix.log`；修复后 → 18/18 通过，捕获 `{SCRATCH}/post-fix.log`。
-  - `bash scripts/verify-activity-timeline.sh` → Activity timeline verification passed。
-  - `bash scripts/verify.sh final` → full test suite passed，Final acceptance passed — all checks green。
-  - `git diff --check` → 通过；`git status` 仅 3 个目标文件（Core/App 源文件 + 测试文件），无生成物、无扫描/快照/签名/project.yml 改动。
-  - 独立交叉 Review：委派给同工作区空闲的 codex（w4:p2，非主要修改者），只读审查本次 diff。
-- **剩余风险**：CLI 无法无头验证 macOS 窗口内提示条的实际布局/文案渲染（折叠/展开切换、更早记录计数展示），需签名安装后在应用窗口中人工确认；`displayedPrefix` 与视图实际展示条数由 `showsAllEvents` 状态决定，其联动逻辑未被单独测试覆盖（视图体内部状态），但计数口径本身已由纯层测试覆盖。
-
----
-
 ## Loop 18 — 2026-08-12（「最近变化总览」「今日摘要」「Project Health」显示链路可靠性修复：App/Widget 语义统一、无状态回退、无多余 reload）
 
 - **问题**：显示链路存在 6 项经一手证据确认的缺陷（A-E 修复，F 为低危观察不修）：
@@ -420,5 +395,24 @@
 - **修改**：无业务代码修改；运行 `./scripts/verify.sh build` 确认编译基线；追加本记录，并按 20 条规则将 Loop 16 归档到 `.agent/archive/history-2026-08-11-loop16-16.md`。
 - **验证**：`./scripts/verify.sh build` → Build succeeded；`git diff --check` → 通过；未运行全量测试（本轮无产品代码变更）。
 - **剩余风险**：锁屏环境下无法人工确认 Widget 最终桌面像素；如需确认，应在解锁桌面会话中目视检查，不应将锁屏 placeholder 误判为产品回归。
+
+---
+
+## Loop 37 — 2026-09-19（无新增高价值问题：维护基线保持）
+
+- **问题**：本轮用户仅要求运行一次 Maintenance Loop，未提供新的 Bug、测试失败或行为异常。
+- **证据**：
+  - `git status --porcelain=v2 --branch` → `main` 与 `origin/main` 同步（`branch.ab +0 -0`），工作区在记录前无改动；HEAD 为 `0d47c62`。
+  - `git log -1 --oneline` → `0d47c62 chore: record macOS 27 widget maintenance`。
+  - `grep -rn -e TODO -e FIXME DevPulseNative/` → 无匹配。
+  - 最近 Loop 35/36 已记录 macOS 27 `systemLarge` WidgetKit 内容链路成功；本轮没有新的 WidgetKit、SwiftUI、签名或共享快照错误证据。
+  - `./scripts/verify.sh build` → `Build succeeded`。
+- **原因**：现有证据未满足可复现 Bug、测试失败、明确行为异常、稳定性/性能风险或测试缺口中的任何一项；按 Loop 规则不修改业务代码、不重复处理已完成问题。
+- **修改**：无业务代码修改；追加本记录，并按最近 20 条规则将 Loop 17 剪切归档到 `.agent/archive/history-2026-08-12-loop17-17.md`。
+- **验证**：
+  - `./scripts/verify.sh build` → Build succeeded。
+  - 记录前 `git status --porcelain=v2 --branch` → `branch.ab +0 -0`。
+  - 未运行全量测试：本轮无产品代码变更，编译基线已通过。
+- **剩余风险**：macOS 27 Widget 的最终非占位桌面像素仍需在解锁桌面会话中人工确认；本轮未重新执行签名安装或 GUI 检查。维护记录和归档文件尚未提交，需用户明确授权后再提交。
 
 ---
