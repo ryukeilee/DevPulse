@@ -945,7 +945,6 @@ git diff origin/main...HEAD -U0 | rg -n 'isRefreshing'
 **该豁免不覆盖的情形**（出现即判不通过）：任何不在基线清单内的新失败；任何同名测试断言文本
 发生变化；任何既有测试被跳过 / 改写断言 / 通过调整签名设置绕过。本次核验**均未出现**。
 
-**该豁免的剩余风险**：本机 `group.local.devpulse` 容器的权限问题使这 6 项既有失败无法在当前
-环境判定成因（与基线文档一致）。这 6 项中有 4 项与共享快照 / App Group 写入、discovery/pin
-迁移、backup recovery 区域**直接重叠**。若要在干净环境（带正确签名与 App Group 权限）下确认
-这 4 项本身是否也是既有失败，需要一次带签名身份的独立验证——本次未能执行。
+**该豁免的剩余风险**：根因已由机制隔离实验与签名对照证实；详见
+[`docs/main-test-baseline.md`](main-test-baseline.md)。其中 5 项是无签名 test host 缺少 App Group
+entitlement 的环境假象，另 1 项是与签名无关的既有 SleepWake 时序 flake。
