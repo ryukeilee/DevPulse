@@ -221,6 +221,71 @@ struct RepositoryHistoryStoreTests {
         #expect(entries.allSatisfy { $0.repositoryID == "repoA" })
     }
 
+    @Test func groupedLoadPreservesPerRepositoryDescendingOrder() throws {
+        let benchmarkStore = makeBenchmarkStore()
+        seed(benchmarkStore, entries: makeHistoryEntries(repositoryCount: 5, entriesPerRepository: 60))
+
+        let grouped = try benchmarkStore.loadGrouped().get()
+        for repositoryIndex in 0..<5 {
+            let repositoryID = historyRepositoryID(repositoryIndex)
+            let expected = try benchmarkStore.load(for: repositoryID).get()
+            #expect(grouped[repositoryID] == expected)
+            #expect(expected == expected.sorted { $0.recordedAt > $1.recordedAt })
+        }
+    }
+
+    @Test func refreshHistoryPathsDecodeArchiveAtMostTwice() throws {
+        let benchmarkStore = makeBenchmarkStore()
+        let repositories = (0..<5).map { makeSnapshot(name: "history-\($0)", branch: "main", changedCount: $0) }
+        seed(benchmarkStore, entries: makeHistoryEntries(repositoryCount: 5, entriesPerRepository: 60))
+
+        benchmarkStore.resetDiagnostics()
+        let outcome = try benchmarkStore.recordSnapshotStates(
+            repositories: repositories,
+            recordedAt: "2026-08-01T00:00:00Z"
+        ).get()
+        #expect(outcome.addedCount == repositories.count)
+        #expect(benchmarkStore.loadMetrics().archiveDecodeCount == 1)
+
+        let grouped = try benchmarkStore.loadGrouped().get()
+        #expect(grouped.count == repositories.count)
+        #expect(grouped[repositories[0].id]?.first?.kind == .scanRecord)
+        let metrics = benchmarkStore.loadMetrics()
+        #expect(metrics.archiveDecodeCount == 2)
+        #expect(metrics.archiveBytesRead > 0)
+    }
+
+    @Test func groupedLoadBenchmark300EntriesFiveRepositories() throws {
+        let benchmarkStore = makeBenchmarkStore()
+        seed(benchmarkStore, entries: makeHistoryEntries(repositoryCount: 5, entriesPerRepository: 60))
+
+        let repositoryIDs = (0..<5).map(historyRepositoryID)
+        let iterations = 30
+        benchmarkStore.resetDiagnostics()
+        let repeatedLoadSamples = (0..<iterations).map { _ in
+            elapsedMilliseconds {
+                for repositoryID in repositoryIDs {
+                    _ = try? benchmarkStore.load(for: repositoryID).get()
+                }
+            }
+        }
+        let repeatedLoadMetrics = benchmarkStore.loadMetrics()
+
+        benchmarkStore.resetDiagnostics()
+        let groupedLoadSamples = (0..<iterations).map { _ in
+            elapsedMilliseconds {
+                _ = try? benchmarkStore.loadGrouped().get()
+            }
+        }
+        let groupedLoadMetrics = benchmarkStore.loadMetrics()
+
+        print("history-load-benchmark entries=300 repositories=5 iterations=30 old_median_ms=\(median(repeatedLoadSamples)) old_p95_ms=\(p95(repeatedLoadSamples)) old_mad_ms=\(mad(repeatedLoadSamples)) new_median_ms=\(median(groupedLoadSamples)) new_p95_ms=\(p95(groupedLoadSamples)) new_mad_ms=\(mad(groupedLoadSamples)) old_decodes=\(repeatedLoadMetrics.archiveDecodeCount) new_decodes=\(groupedLoadMetrics.archiveDecodeCount) old_bytes=\(repeatedLoadMetrics.archiveBytesRead) new_bytes=\(groupedLoadMetrics.archiveBytesRead)")
+
+        #expect(repeatedLoadMetrics.archiveDecodeCount == iterations * repositoryIDs.count)
+        #expect(groupedLoadMetrics.archiveDecodeCount == iterations)
+        #expect(repeatedLoadMetrics.archiveBytesRead == groupedLoadMetrics.archiveBytesRead * repositoryIDs.count)
+    }
+
     @Test func testPrune() async throws {
         let state = HistoryStatePoint(snapshot: makeSnapshot(name: "test", branch: "main", changedCount: 0))
 
@@ -491,6 +556,76 @@ struct RepositoryHealthEngineTests {
 // MARK: - Helpers
 
 private typealias RHT = RepositoryHealthEngineTests
+
+private func makeBenchmarkStore() -> RepositoryHistoryStore {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("devpulse-history-benchmark-\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    return RepositoryHistoryStore(
+        fileURL: directory.appendingPathComponent("repository-history.json"),
+        config: .init(
+            retentionDays: 100_000,
+            maxEntriesPerRepo: 1_000,
+            maxTotalEntries: 10_000,
+            compactionInterval: 10_000,
+            softThresholdFraction: 0.9
+        )
+    )
+}
+
+private func historyRepositoryID(_ index: Int) -> String {
+    RepositoryIdentity.id(for: "/Users/test/history-\(index)")
+}
+
+private func makeHistoryEntries(repositoryCount: Int, entriesPerRepository: Int) -> [RepositoryHistoryEntry] {
+    let formatter = ISO8601DateFormatter()
+    let start = Date(timeIntervalSince1970: 1_720_000_000)
+    return (0..<repositoryCount).flatMap { repositoryIndex in
+        let state = HistoryStatePoint(snapshot: makeSnapshot(
+            name: "history-\(repositoryIndex)",
+            branch: "main",
+            changedCount: repositoryIndex
+        ))
+        return (0..<entriesPerRepository).map { entryIndex in
+            RepositoryHistoryEntry(
+                repositoryID: historyRepositoryID(repositoryIndex),
+                recordedAt: formatter.string(from: start.addingTimeInterval(TimeInterval(entryIndex * repositoryCount + repositoryIndex))),
+                kind: .stateChange,
+                state: state
+            )
+        }
+    }
+}
+
+private func seed(_ store: RepositoryHistoryStore, entries: [RepositoryHistoryEntry]) {
+    let repositoryCount = 5
+    let entriesPerRepository = entries.count / repositoryCount
+    for entryIndex in 0..<entriesPerRepository {
+        let batch = (0..<repositoryCount).map { entries[$0 * entriesPerRepository + entryIndex] }
+        #expect((try? store.record(entries: batch).get()) == repositoryCount)
+    }
+}
+
+private func elapsedMilliseconds(_ operation: () -> Void) -> Double {
+    let start = DispatchTime.now().uptimeNanoseconds
+    operation()
+    return Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+}
+
+private func median(_ samples: [Double]) -> Double {
+    let sorted = samples.sorted()
+    return sorted[sorted.count / 2]
+}
+
+private func p95(_ samples: [Double]) -> Double {
+    let sorted = samples.sorted()
+    return sorted[min(sorted.count - 1, Int((Double(sorted.count) * 0.95).rounded(.up)) - 1)]
+}
+
+private func mad(_ samples: [Double]) -> Double {
+    let middle = median(samples)
+    return median(samples.map { abs($0 - middle) })
+}
 
 /// Extracts the success value or fails the test.
 extension Result {
