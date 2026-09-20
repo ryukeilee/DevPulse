@@ -1,6 +1,24 @@
 import Foundation
 
 enum DateFormatting {
+    /// A short-lived parser for one synchronous operation. ISO8601DateFormatter
+    /// is not thread-safe, so callers must not share an instance across tasks.
+    struct TimestampParser {
+        private let fractionalSecondsFormatter: ISO8601DateFormatter
+        private let standardFormatter: ISO8601DateFormatter
+
+        init() {
+            fractionalSecondsFormatter = ISO8601DateFormatter()
+            fractionalSecondsFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            standardFormatter = ISO8601DateFormatter()
+        }
+
+        func date(from iso8601String: String) -> Date? {
+            fractionalSecondsFormatter.date(from: iso8601String)
+                ?? standardFormatter.date(from: iso8601String)
+        }
+    }
+
     /// Format a relative time string like "2m ago", "1h ago", etc.
     static func relativeTime(from iso8601String: String, relativeTo now: Date = Date()) -> String {
         let formatter = ISO8601DateFormatter()
@@ -54,10 +72,7 @@ enum DateFormatting {
 
     /// Parse an ISO-8601 string into a Date when possible.
     static func date(from iso8601String: String) -> Date? {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.date(from: iso8601String)
-            ?? ISO8601DateFormatter().date(from: iso8601String)
+        TimestampParser().date(from: iso8601String)
     }
 
     static func displayString(from date: Date) -> String {
