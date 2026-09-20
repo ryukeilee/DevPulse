@@ -931,18 +931,18 @@ final class ScanScheduler: ObservableObject {
             var healthAssessments: [String: RepositoryHealthAssessment] = [:]
             var historyLoadErrors: [String] = []
             if !skipHealthAssessments, let historyStore {
-                for repo in repos {
-                    switch historyStore.load(for: repo.id) {
-                    case .success(let entries):
+                switch historyStore.loadGrouped() {
+                case .success(let entriesByRepository):
+                    for repo in repos {
                         let assessment = RepositoryHealthEngine.assess(
                             repositoryID: repo.id,
                             repositoryName: repo.name,
-                            entries: entries
+                            entries: entriesByRepository[repo.id] ?? []
                         )
                         healthAssessments[repo.id] = assessment
-                    case .failure:
-                        historyLoadErrors.append(repo.id)
                     }
+                case .failure:
+                    historyLoadErrors = repos.map(\.id)
                 }
             }
 
@@ -2908,56 +2908,12 @@ final class ScanScheduler: ObservableObject {
         let repositories = snapshot.repositories
 
         Task.detached(priority: .utility) { @Sendable [weak self] in
-            let loadResult = historyStore.load()
-            let previousStates: [String: HistoryStatePoint]
-            switch loadResult {
-            case .success(let entries):
-                var latest: [String: RepositoryHistoryEntry] = [:]
-                for entry in entries {
-                    if let existing = latest[entry.repositoryID] {
-                        if entry.recordedAt > existing.recordedAt {
-                            latest[entry.repositoryID] = entry
-                        }
-                    } else {
-                        latest[entry.repositoryID] = entry
-                    }
-                }
-                previousStates = latest.mapValues(\.state)
-            case .failure:
-                previousStates = [:]
-            }
-
-            var historyEntries: [RepositoryHistoryEntry] = []
-
-            for repo in repositories {
-                let point = HistoryStatePoint(snapshot: repo)
-                let previousPoint = previousStates[repo.id]
-                let previousDS = previousPoint?.dataSource
-                let kind = HistoryEntryKindClassifier.classify(
-                    previous: previousPoint,
-                    current: point,
-                    lastDataSource: previousDS,
-                    currentDataSource: point.dataSource
-                )
-
-                let entry = RepositoryHistoryEntry(
-                    repositoryID: repo.id,
-                    recordedAt: recordedAt,
-                    kind: kind,
-                    state: point
-                )
-                historyEntries.append(entry)
-            }
-
-            guard !historyEntries.isEmpty else { return }
-
-            switch historyStore.record(entries: historyEntries) {
-            case .success(let added):
-                if added > 0 {
-                    _ = added
-                    // Non-blocking background compaction if nearing limit
-                    let currentCount = historyStore.count()
-                    if currentCount > 8000 {
+            // Classification and read-merge-write share one locked archive load.
+            switch historyStore.recordSnapshotStates(repositories: repositories, recordedAt: recordedAt) {
+            case .success(let outcome):
+                if outcome.addedCount > 0 {
+                    // Non-blocking background compaction if nearing limit.
+                    if outcome.totalEntryCount > 8000 {
                         historyStore.compact()
                     }
                     // Non-blocking background note — diagnostics available via scheduler.historyDiagnostics

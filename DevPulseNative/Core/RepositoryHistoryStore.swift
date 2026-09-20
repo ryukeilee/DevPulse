@@ -63,6 +63,7 @@ final class RepositoryHistoryStore: @unchecked Sendable {
 
     // In-memory diagnostics counters (not persisted)
     private var _diagnostics = HistoryDiagnosticsSnapshot.empty()
+    private var _loadMetrics = RepositoryHistoryLoadMetrics()
     private var writeCountSinceLastCompaction = 0
 
     var diagnostics: HistoryDiagnosticsSnapshot {
@@ -102,86 +103,45 @@ final class RepositoryHistoryStore: @unchecked Sendable {
             processLock.lock()
             defer { processLock.unlock() }
 
-            var archive: RepositoryHistoryArchive
+            return recordUnlocked(entries: entries, archive: loadArchiveForRecordingUnlocked())
+                .map(\.addedCount)
+        }
+    }
+
+    /// Record state points derived from one snapshot while the archive remains locked.
+    /// This keeps classification and read-merge-write on the same archive decode.
+    func recordSnapshotStates(
+        repositories: [RepositorySnapshot],
+        recordedAt: String
+    ) -> Result<HistoryRecordOutcome, HistoryStoreError> {
+        queue.sync {
+            processLock.lock()
+            defer { processLock.unlock() }
+
             switch loadUnlocked() {
-            case .success(let loaded):
-                archive = loaded
-            case .failure(let error):
-                logger.warning("history store load failed, starting fresh: \(error.localizedDescription)")
-                archive = RepositoryHistoryArchive(entries: [])
-            }
-
-            let beforeCount = archive.entries.count
-            var dedupSkipped = 0
-
-            // Group entries by repository, keep newest first for each
-            let grouped = Dictionary(grouping: entries, by: { $0.repositoryID })
-            var entriesToAdd: [RepositoryHistoryEntry] = []
-
-            for (repoID, repoEntries) in grouped {
-                let sorted = repoEntries.sorted { $0.recordedAt > $1.recordedAt }
-                guard let newest = sorted.first else { continue }
-
-                // Check if the latest entry for this repo is identical
-                let lastForRepo = archive.entries
-                    .filter { $0.repositoryID == repoID }
-                    .max { $0.recordedAt < $1.recordedAt }
-
-                if let last = lastForRepo,
-                   last.kind == .scanRecord,
-                   newest.kind == .scanRecord,
-                   last.state == newest.state {
-                    dedupSkipped += 1
-                    continue
+            case .success(let archive):
+                let latestStates = latestStates(in: archive.entries)
+                let entries = snapshotEntries(
+                    repositories: repositories,
+                    recordedAt: recordedAt,
+                    previousStates: latestStates
+                )
+                guard !entries.isEmpty else {
+                    return .success(HistoryRecordOutcome(addedCount: 0, totalEntryCount: archive.entries.count))
                 }
-
-                entriesToAdd.append(newest)
-            }
-
-            var updated = archive.entries + entriesToAdd
-            updated.sort { $0.recordedAt > $1.recordedAt }
-
-            let added = updated.count - beforeCount
-            let skipped = entries.count - added
-
-            // Update diagnostics
-            _diagnostics.totalEntriesWritten += entries.count
-            _diagnostics.totalDedupSkipped += skipped
-
-            // Check if compaction is needed
-            let compactionNeeded = updated.count > Int(Double(config.maxTotalEntries) * config.softThresholdFraction)
-                || writeCountSinceLastCompaction >= config.compactionInterval
-
-            if compactionNeeded {
-                let result = compactUnlocked(entries: updated)
-                switch result {
-                case .success(let compacted):
-                    updated = compacted
-                    _diagnostics.totalCompactionRuns += 1
-                    // Purged count updated inside compactUnlocked
-                    writeCountSinceLastCompaction = 0
-                case .failure(let error):
-                    logger.error("compaction failed: \(error.localizedDescription)")
-                    _diagnostics.lastRecoveryCount = (_diagnostics.lastRecoveryCount ?? 0) + 1
-                    // Still try to persist uncompacted to avoid data loss
+                return recordUnlocked(entries: entries, archive: archive)
+            case .failure:
+                // Preserve the existing retry behavior: classify with no prior state,
+                // then let the read-merge-write path make one recovery attempt.
+                let entries = snapshotEntries(
+                    repositories: repositories,
+                    recordedAt: recordedAt,
+                    previousStates: [:]
+                )
+                guard !entries.isEmpty else {
+                    return .success(HistoryRecordOutcome(addedCount: 0, totalEntryCount: 0))
                 }
-            } else {
-                writeCountSinceLastCompaction += 1
-            }
-
-            let archiveToSave = RepositoryHistoryArchive(
-                schemaVersion: RepositoryHistorySchema.version,
-                entries: updated
-            )
-
-            switch saveUnlocked(archive: archiveToSave) {
-            case .success:
-                updateFileSizeDiagnostics()
-                _diagnostics.currentEntryCount = updated.count
-                _diagnostics.totalRepositoryCount = Set(updated.map(\.repositoryID)).count
-                return .success(added)
-            case .failure(let error):
-                return .failure(error)
+                return recordUnlocked(entries: entries, archive: loadArchiveForRecordingUnlocked())
             }
         }
     }
@@ -238,6 +198,22 @@ final class RepositoryHistoryStore: @unchecked Sendable {
                     .filter { $0.repositoryID == repositoryID }
                     .sorted { $0.recordedAt > $1.recordedAt }
                 return .success(entries)
+            case .failure(let error):
+                return .failure(error)
+            }
+        }
+    }
+
+    /// Load all history entries grouped by repository, newest first within each group.
+    func loadGrouped() -> Result<[String: [RepositoryHistoryEntry]], HistoryStoreError> {
+        queue.sync {
+            processLock.lock()
+            defer { processLock.unlock() }
+
+            switch loadUnlocked() {
+            case .success(let archive):
+                return .success(Dictionary(grouping: archive.entries, by: \.repositoryID)
+                    .mapValues { $0.sorted { $0.recordedAt > $1.recordedAt } })
             case .failure(let error):
                 return .failure(error)
             }
@@ -385,6 +361,8 @@ final class RepositoryHistoryStore: @unchecked Sendable {
 
         do {
             let data = try Data(contentsOf: fileURL)
+            _loadMetrics.archiveDecodeCount += 1
+            _loadMetrics.archiveBytesRead += data.count
             let decoder = JSONDecoder()
             let archive = try decoder.decode(RepositoryHistoryArchive.self, from: data)
 
@@ -430,6 +408,117 @@ final class RepositoryHistoryStore: @unchecked Sendable {
                 ))
             }
             return .success(fresh)
+        }
+    }
+
+    private func latestStates(in entries: [RepositoryHistoryEntry]) -> [String: HistoryStatePoint] {
+        var latest: [String: RepositoryHistoryEntry] = [:]
+        for entry in entries where entry.recordedAt > (latest[entry.repositoryID]?.recordedAt ?? "") {
+            latest[entry.repositoryID] = entry
+        }
+        return latest.mapValues(\.state)
+    }
+
+    private func snapshotEntries(
+        repositories: [RepositorySnapshot],
+        recordedAt: String,
+        previousStates: [String: HistoryStatePoint]
+    ) -> [RepositoryHistoryEntry] {
+        repositories.map { repository in
+            let state = HistoryStatePoint(snapshot: repository)
+            let previousState = previousStates[repository.id]
+            return RepositoryHistoryEntry(
+                repositoryID: repository.id,
+                recordedAt: recordedAt,
+                kind: HistoryEntryKindClassifier.classify(
+                    previous: previousState,
+                    current: state,
+                    lastDataSource: previousState?.dataSource,
+                    currentDataSource: state.dataSource
+                ),
+                state: state
+            )
+        }
+    }
+
+    private func loadArchiveForRecordingUnlocked() -> RepositoryHistoryArchive {
+        switch loadUnlocked() {
+        case .success(let archive):
+            return archive
+        case .failure(let error):
+            logger.warning("history store load failed, starting fresh: \(error.localizedDescription)")
+            return RepositoryHistoryArchive(entries: [])
+        }
+    }
+
+    private func recordUnlocked(
+        entries: [RepositoryHistoryEntry],
+        archive: RepositoryHistoryArchive
+    ) -> Result<HistoryRecordOutcome, HistoryStoreError> {
+        let beforeCount = archive.entries.count
+
+        // Group entries by repository, keep newest first for each.
+        let grouped = Dictionary(grouping: entries, by: { $0.repositoryID })
+        var entriesToAdd: [RepositoryHistoryEntry] = []
+
+        for (repoID, repoEntries) in grouped {
+            let sorted = repoEntries.sorted { $0.recordedAt > $1.recordedAt }
+            guard let newest = sorted.first else { continue }
+
+            // Check if the latest entry for this repo is identical.
+            let lastForRepo = archive.entries
+                .filter { $0.repositoryID == repoID }
+                .max { $0.recordedAt < $1.recordedAt }
+
+            if let last = lastForRepo,
+               last.kind == .scanRecord,
+               newest.kind == .scanRecord,
+               last.state == newest.state {
+                continue
+            }
+
+            entriesToAdd.append(newest)
+        }
+
+        var updated = archive.entries + entriesToAdd
+        updated.sort { $0.recordedAt > $1.recordedAt }
+
+        let added = updated.count - beforeCount
+        let skipped = entries.count - added
+
+        _diagnostics.totalEntriesWritten += entries.count
+        _diagnostics.totalDedupSkipped += skipped
+
+        let compactionNeeded = updated.count > Int(Double(config.maxTotalEntries) * config.softThresholdFraction)
+            || writeCountSinceLastCompaction >= config.compactionInterval
+
+        if compactionNeeded {
+            switch compactUnlocked(entries: updated) {
+            case .success(let compacted):
+                updated = compacted
+                _diagnostics.totalCompactionRuns += 1
+                writeCountSinceLastCompaction = 0
+            case .failure(let error):
+                logger.error("compaction failed: \(error.localizedDescription)")
+                _diagnostics.lastRecoveryCount = (_diagnostics.lastRecoveryCount ?? 0) + 1
+            }
+        } else {
+            writeCountSinceLastCompaction += 1
+        }
+
+        let archiveToSave = RepositoryHistoryArchive(
+            schemaVersion: RepositoryHistorySchema.version,
+            entries: updated
+        )
+
+        switch saveUnlocked(archive: archiveToSave) {
+        case .success:
+            updateFileSizeDiagnostics()
+            _diagnostics.currentEntryCount = updated.count
+            _diagnostics.totalRepositoryCount = Set(updated.map(\.repositoryID)).count
+            return .success(HistoryRecordOutcome(addedCount: added, totalEntryCount: updated.count))
+        case .failure(let error):
+            return .failure(error)
         }
     }
 
@@ -540,13 +629,29 @@ final class RepositoryHistoryStore: @unchecked Sendable {
     }
 }
 
+struct HistoryRecordOutcome: Equatable, Sendable {
+    let addedCount: Int
+    let totalEntryCount: Int
+}
+
+struct RepositoryHistoryLoadMetrics: Equatable, Sendable {
+    var archiveDecodeCount = 0
+    var archiveBytesRead = 0
+}
+
 extension RepositoryHistoryStore {
     /// Reset diagnostics counters (for testing).
     func resetDiagnostics() {
         queue.sync {
             _diagnostics = HistoryDiagnosticsSnapshot.empty()
+            _loadMetrics = RepositoryHistoryLoadMetrics()
             writeCountSinceLastCompaction = 0
         }
+    }
+
+    /// Get archive load metrics for deterministic performance tests.
+    func loadMetrics() -> RepositoryHistoryLoadMetrics {
+        queue.sync { _loadMetrics }
     }
 
     /// Get the current diagnostics snapshot.

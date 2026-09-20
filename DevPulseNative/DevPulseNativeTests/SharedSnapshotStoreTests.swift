@@ -413,6 +413,81 @@ struct SharedSnapshotStoreTests {
         }
     }
 
+    @Test func nonIdenticalRecoveryCopyRetainsPreCommitSafeguard() throws {
+        let directory = try temporaryDirectory()
+        let alternateDirectory = try temporaryDirectory()
+        defer {
+            removeTemporaryDirectory(directory)
+            removeTemporaryDirectory(alternateDirectory)
+        }
+
+        let recorder = SnapshotOperationRecorder()
+        let snapshotStore = SharedSnapshotStore(
+            directoryURL: directory,
+            fileName: "repositories.json",
+            now: { Self.date("2026-07-18T10:00:00Z") },
+            operationObserver: { recorder.record($0) }
+        )
+        let alternateStore = store(in: alternateDirectory, now: date("2026-07-18T10:00:00Z"))
+        try requireSuccess(
+            snapshotStore.commit(fixture(label: "initial", timestamp: "2026-07-18T09:00:00Z"))
+        )
+        try requireSuccess(
+            alternateStore.commit(fixture(label: "alternate", timestamp: "2026-07-18T09:00:00Z"))
+        )
+        try Data(contentsOf: alternateStore.primaryURL).write(to: snapshotStore.backupURL)
+
+        recorder.reset()
+        try requireSuccess(
+            snapshotStore.commit(fixture(label: "next", timestamp: "2026-07-18T10:00:00Z"))
+        )
+
+        let operations = recorder.operations()
+        let writeCount = operations.filter { $0 == .fileWrite }.count
+        let fullSyncCount = operations.filter {
+            $0 == .fullFileSync || $0 == .fullDirectorySync
+        }.count
+        print("SharedSnapshotStore non-identical recovery operations: writes=\(writeCount), F_FULLFSYNC=\(fullSyncCount)")
+        #expect(writeCount == 3)
+        #expect(fullSyncCount == 6)
+        #expect(try Data(contentsOf: snapshotStore.primaryURL)
+            == Data(contentsOf: snapshotStore.backupURL))
+    }
+
+    @Test func identicalRecoveryCopyAvoidsRedundantPreCommitWriteAndSync() throws {
+        let directory = try temporaryDirectory()
+        defer { removeTemporaryDirectory(directory) }
+
+        let recorder = SnapshotOperationRecorder()
+        let snapshotStore = SharedSnapshotStore(
+            directoryURL: directory,
+            fileName: "repositories.json",
+            now: { Self.date("2026-07-18T10:00:00Z") },
+            operationObserver: { recorder.record($0) }
+        )
+        try requireSuccess(
+            snapshotStore.commit(fixture(label: "initial", timestamp: "2026-07-18T09:00:00Z"))
+        )
+        #expect(try Data(contentsOf: snapshotStore.primaryURL)
+            == Data(contentsOf: snapshotStore.backupURL))
+
+        recorder.reset()
+        try requireSuccess(
+            snapshotStore.commit(fixture(label: "next", timestamp: "2026-07-18T10:00:00Z"))
+        )
+
+        let operations = recorder.operations()
+        let writeCount = operations.filter { $0 == .fileWrite }.count
+        let fullSyncCount = operations.filter {
+            $0 == .fullFileSync || $0 == .fullDirectorySync
+        }.count
+        print("SharedSnapshotStore steady-state operations: writes=\(writeCount), F_FULLFSYNC=\(fullSyncCount)")
+        #expect(writeCount == 2)
+        #expect(fullSyncCount == 4)
+        #expect(try Data(contentsOf: snapshotStore.primaryURL)
+            == Data(contentsOf: snapshotStore.backupURL))
+    }
+
     @Test func freshlyCommittedSnapshotLoadsWithPrimarySource() throws {
         let directory = try temporaryDirectory()
         defer { removeTemporaryDirectory(directory) }
@@ -882,6 +957,22 @@ struct SharedSnapshotStoreTests {
         #expect(read.snapshot.persistenceState == .recovered)
         #expect(read.snapshot.repositories.isEmpty)
         #expect(read.snapshot.storageRevision > 0)
+    }
+}
+
+private final class SnapshotOperationRecorder: @unchecked Sendable {
+    private var recordedOperations: [SharedSnapshotStoreOperation] = []
+
+    func record(_ operation: SharedSnapshotStoreOperation) {
+        recordedOperations.append(operation)
+    }
+
+    func reset() {
+        recordedOperations.removeAll()
+    }
+
+    func operations() -> [SharedSnapshotStoreOperation] {
+        recordedOperations
     }
 }
 

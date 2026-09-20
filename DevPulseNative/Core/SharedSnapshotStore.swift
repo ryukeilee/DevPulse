@@ -39,6 +39,7 @@ final class SharedSnapshotStore: @unchecked Sendable {
     private let fileManager: FileManager
     private let now: () -> Date
     private let failureInjector: ((SharedSnapshotCommitPhase) throws -> Void)?
+    private let operationObserver: ((SharedSnapshotStoreOperation) -> Void)?
     private let logger = Logger(
         subsystem: "local.devpulse.app",
         category: "SharedSnapshotStore"
@@ -49,7 +50,8 @@ final class SharedSnapshotStore: @unchecked Sendable {
         fileName: String,
         fileManager: FileManager = .default,
         now: @escaping () -> Date = Date.init,
-        failureInjector: ((SharedSnapshotCommitPhase) throws -> Void)? = nil
+        failureInjector: ((SharedSnapshotCommitPhase) throws -> Void)? = nil,
+        operationObserver: ((SharedSnapshotStoreOperation) -> Void)? = nil
     ) {
         self.directoryURL = directoryURL
         primaryURL = directoryURL.appendingPathComponent(fileName)
@@ -59,6 +61,7 @@ final class SharedSnapshotStore: @unchecked Sendable {
         self.fileManager = fileManager
         self.now = now
         self.failureInjector = failureInjector
+        self.operationObserver = operationObserver
     }
 
     func load() -> Result<SharedSnapshotRead, AppGroupStoreError> {
@@ -405,6 +408,7 @@ final class SharedSnapshotStore: @unchecked Sendable {
         defer { try? fileManager.removeItem(at: stagingURL) }
         do {
             try encoded.write(to: stagingURL, options: [.withoutOverwriting])
+            operationObserver?(.fileWrite)
             try synchronizeFile(at: stagingURL)
             try failureInjector?(.afterStaging)
         } catch {
@@ -501,12 +505,24 @@ final class SharedSnapshotStore: @unchecked Sendable {
         }
 
         if let validPrimary {
-            if let validBackup,
-               backupIsNewer(primary: validPrimary.snapshot, backup: validBackup.snapshot) {
-                return CommitBaseline(
-                    snapshot: validBackup.snapshot,
-                    recoveryCopyPlan: .preserveExistingBackup
-                )
+            if let validBackup {
+                if backupIsNewer(primary: validPrimary.snapshot, backup: validBackup.snapshot) {
+                    return CommitBaseline(
+                        snapshot: validBackup.snapshot,
+                        recoveryCopyPlan: .preserveExistingBackup
+                    )
+                }
+                // A byte-identical backup has already been fully verified and
+                // synchronized by the preceding commit. It is therefore a
+                // durable recovery copy at the primary commit point; writing
+                // the same bytes again would add no crash-recovery value.
+                if validBackup.snapshot.storageRevision == validPrimary.snapshot.storageRevision,
+                   validBackup.bytes == validPrimary.bytes {
+                    return CommitBaseline(
+                        snapshot: validPrimary.snapshot,
+                        recoveryCopyPlan: .preserveIdenticalBackup
+                    )
+                }
             }
             return CommitBaseline(
                 snapshot: validPrimary.snapshot,
@@ -672,6 +688,11 @@ final class SharedSnapshotStore: @unchecked Sendable {
     }
 
     private func validateRepositoryPayload(_ snapshot: AppGroupData) throws {
+        // ISO8601DateFormatter is not thread-safe, so this parser is scoped to
+        // this synchronous validation pass. Reusing it avoids allocating one
+        // or two formatters for every repository timestamp.
+        let timestampParser = DateFormatting.TimestampParser()
+
         // This must precede every `ScanSummary.build` call below. The model's
         // summary builder intentionally assumes already-validated app data and
         // uses ordinary integer addition.
@@ -683,14 +704,14 @@ final class SharedSnapshotStore: @unchecked Sendable {
                     "repository \(repository.id) has no explicit dataSource"
                 )
             }
-            guard DateFormatting.date(from: repository.lastScannedAt) != nil else {
+            guard timestampParser.date(from: repository.lastScannedAt) != nil else {
                 throw SnapshotValidationError(
                     "repository \(repository.id) has invalid lastScannedAt"
                 )
             }
             if source == .current || source == .lastSuccessful {
                 guard let successfulAt = repository.lastSuccessfulScanAt,
-                      DateFormatting.date(from: successfulAt) != nil else {
+                      timestampParser.date(from: successfulAt) != nil else {
                     throw SnapshotValidationError(
                         "repository \(repository.id) lacks a valid successful scan time"
                     )
@@ -803,6 +824,7 @@ final class SharedSnapshotStore: @unchecked Sendable {
         defer { try? fileManager.removeItem(at: temporaryURL) }
         do {
             try bytes.write(to: temporaryURL, options: [.withoutOverwriting])
+            operationObserver?(.fileWrite)
             try synchronizeFile(at: temporaryURL)
         } catch {
             throw AppGroupStoreError.writeFailed(
@@ -830,6 +852,11 @@ final class SharedSnapshotStore: @unchecked Sendable {
             // following primary replacement always has a durable fallback.
             try synchronizeFile(at: backupURL)
             try synchronizeDirectory()
+        case .preserveIdenticalBackup:
+            // This backup is byte-identical to the verified primary and was
+            // durably published by the preceding commit. It is already a
+            // suitable recovery copy before the next primary rename.
+            break
         case .publishCandidate:
             try atomicWrite(candidateBytes, to: backupURL)
         }
@@ -903,6 +930,7 @@ final class SharedSnapshotStore: @unchecked Sendable {
         }
         defer { Darwin.close(descriptor) }
 
+        operationObserver?(.fullFileSync)
         if Darwin.fcntl(descriptor, F_FULLFSYNC) == 0 {
             return
         }
@@ -926,6 +954,7 @@ final class SharedSnapshotStore: @unchecked Sendable {
         }
         defer { Darwin.close(descriptor) }
 
+        operationObserver?(.fullDirectorySync)
         if Darwin.fcntl(descriptor, F_FULLFSYNC) == 0 {
             return
         }
@@ -1042,7 +1071,14 @@ fileprivate struct CommitBaseline {
 fileprivate enum RecoveryCopyPlan {
     case publish(Data)
     case preserveExistingBackup
+    case preserveIdenticalBackup
     case publishCandidate
+}
+
+enum SharedSnapshotStoreOperation: Equatable {
+    case fileWrite
+    case fullFileSync
+    case fullDirectorySync
 }
 
 private struct SnapshotValidationError: LocalizedError {
