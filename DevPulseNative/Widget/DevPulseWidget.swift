@@ -284,8 +284,12 @@ extension WidgetEntry {
             break
         }
 
-        // Refreshing flag from the live snapshot gets first priority.
-        if snapshot?.isRefreshing == true {
+        // A refresh-start snapshot can survive an app crash. Only trust the
+        // flag while its write timestamp is inside the normal refresh window;
+        // otherwise let the snapshot's persisted data freshness decide.
+        if snapshot?.isRefreshing == true,
+           let writtenAt = snapshot?.writtenAt.flatMap(DateFormatting.date),
+           Date().timeIntervalSince(writtenAt) <= RefreshStatusFormatter.staleThreshold {
             return .refreshing(reason: "正在更新仓库状态")
         }
 

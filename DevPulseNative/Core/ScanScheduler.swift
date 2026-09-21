@@ -1970,10 +1970,13 @@ final class ScanScheduler: ObservableObject {
                 }
 
                 let previous = self.lastResult
-                let pinned = self.applyPins(result.data)
+                let discoveryWasIncomplete = GitRepositoryScanner.discoveryWasIncomplete(result.warnings)
+                let pinned = self.applyPins(result.data).withDiscoveryWasIncomplete(
+                    discoveryWasIncomplete ? true : nil
+                )
                 let completedAt = DateFormatting.date(from: pinned.generatedAt)
                 let isDegraded = pinned.scanSummary.errorRepositories > 0
-                    || GitRepositoryScanner.discoveryWasIncomplete(result.warnings)
+                    || discoveryWasIncomplete
                 let trustedResult = pinned.withLastSuccessfulRefreshAt(
                     !isDegraded && completedAt != nil
                         ? pinned.generatedAt

@@ -636,6 +636,7 @@ struct DataFreshnessStateTests {
     /// Build a committed snapshot whose content drives a specific trust state.
     private func contentSnapshot(
         generatedAt: Date?,
+        writtenAt: Date? = nil,
         lastSuccessfulRefreshAt: Date? = nil,
         errorRepositories: Int = 0,
         persistenceState: SharedSnapshotPersistenceState = .committed,
@@ -646,7 +647,7 @@ struct DataFreshnessStateTests {
         return AppGroupData(
             schemaVersion: RepositorySnapshotSchema.version,
             generatedAt: generatedAt.map(formatter.string(from:)) ?? "",
-            writtenAt: nil,
+            writtenAt: writtenAt.map(formatter.string(from:)),
             lastSuccessfulRefreshAt: lastSuccessfulRefreshAt.map(formatter.string(from:)),
             scanSummary: ScanSummary(
                 totalRepositories: repos.count,
@@ -691,6 +692,7 @@ struct DataFreshnessStateTests {
         let now = Date()
         let snapshot = contentSnapshot(
             generatedAt: now.addingTimeInterval(-60),
+            writtenAt: now,
             lastSuccessfulRefreshAt: now.addingTimeInterval(-60),
             isRefreshing: true
         )
