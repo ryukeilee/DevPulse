@@ -758,6 +758,26 @@ final class StoreWriteCounter: @unchecked Sendable {
     }
 }
 
+private final class ActivityArchiveBenchmarkFixture: @unchecked Sendable {
+    let directory: URL
+    let store: ActivityEventStore
+    let events: [ActivityEvent]
+    let repositoryIDs: Set<String>
+
+    init(directoryName: String, events: [ActivityEvent], repositoryIDs: Set<String>) {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devpulse-\(directoryName)-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        store = ActivityEventStore(fileURL: directory.appendingPathComponent(ActivityEventStore.fileName))
+        self.events = events
+        self.repositoryIDs = repositoryIDs
+    }
+
+    func cleanUp() {
+        try? FileManager.default.removeItem(at: directory)
+    }
+}
+
 /// Incremental rounds that detect no change must not rewrite the whole activity
 /// archive: `ActivityEventStore.save` re-encodes the entire (pretty printed)
 /// archive, so a no-op round used to cost a full read-modify-write cycle.
@@ -928,6 +948,140 @@ final class StoreWriteCounter: @unchecked Sendable {
         print("pin_only_round writes=\(pinOnlyWrites) bytes=\(counter.bytes)")
         #expect(pinOnlyWrites == 0)
         #expect(archiveAfterPin == archiveBeforePin)
+    }
+
+    /// Benchmark the task-specific work with the repository's existing
+    /// BenchmarkRunner / baseline / RegressionGate facilities. The baseline
+    /// is the old unconditional archive save; the optimized action performs
+    /// the same no-op merge path but skips that save.
+    @Test func activityArchiveIncrementalBenchmark() async throws {
+        let sourceDir = tempDir("activity-benchmark-source")
+        defer { try? FileManager.default.removeItem(at: sourceDir) }
+        let sourceArchive = sourceDir.appendingPathComponent(ActivityEventStore.fileName)
+        let counter = StoreWriteCounter()
+        let sourceStore = ActivityEventStore(fileURL: sourceArchive, writeObserver: { counter.record($0) })
+        let scheduler = ScanScheduler(commandMode: false, activityEventStore: sourceStore)
+        defer { scheduler.shutdown() }
+
+        let clean = snapshot(
+            repositories: (0..<Self.repositoryCount).map { repository(index: $0, changed: false) },
+            generatedAt: Self.timestamp
+        )
+        let changed = snapshot(
+            repositories: (0..<Self.repositoryCount).map { repository(index: $0, changed: true) },
+            generatedAt: Self.timestamp
+        )
+        scheduler.lastResult = clean
+        _ = scheduler.recordActivityEvents(previous: clean, current: changed, observedAt: Self.timestamp)
+        _ = await waitForWrites(counter, atLeast: 1)
+        let events = scheduler.activityEvents
+        #expect(events.count == 300)
+
+        let pairs = (0..<10).map { index in
+            (
+                ActivityArchiveBenchmarkFixture(
+                    directoryName: "activity-benchmark-baseline-\(index)",
+                    events: events,
+                    repositoryIDs: Set(changed.repositories.map(\.id))
+                ),
+                ActivityArchiveBenchmarkFixture(
+                    directoryName: "activity-benchmark-optimized-\(index)",
+                    events: events,
+                    repositoryIDs: Set(changed.repositories.map(\.id))
+                )
+            )
+        }
+        defer { pairs.forEach { $0.0.cleanUp(); $0.1.cleanUp() } }
+        let (baselineResults, optimizedResults) = await Self.runActivityBenchmarks(pairs: pairs)
+
+        let baselineTimes = baselineResults.map(\.totalElapsed)
+        let optimizedTimes = optimizedResults.map(\.totalElapsed)
+        let baselineMedian = Self.median(baselineTimes)
+        let optimizedMedian = Self.median(optimizedTimes)
+        let baselineMAD = Self.mad(baselineTimes)
+        let optimizedMAD = Self.mad(optimizedTimes)
+        let baseline = ScenarioBaseline(
+            scenario: "activity-archive-incremental",
+            meanElapsed: baselineMedian,
+            stddevElapsed: baselineMAD,
+            sampleCount: baselineTimes.count
+        )
+        let current = optimizedResults[optimizedResults.count / 2]
+        let gate = RegressionGate.checkNoResourceGrowth(baseline: baseline, current: BenchmarkResult(
+            scenario: current.scenario,
+            runID: current.runID,
+            startedAt: current.startedAt,
+            totalElapsed: optimizedMedian,
+            firstResultElapsed: optimizedMedian,
+            completeElapsed: optimizedMedian,
+            peakCPU: current.peakCPU,
+            averageCPU: current.averageCPU,
+            peakMemoryMB: current.peakMemoryMB,
+            totalDiskWritesKB: current.totalDiskWritesKB,
+            gitSubprocessCount: current.gitSubprocessCount,
+            metadata: current.metadata
+        ))
+        let baselineManager = PerformanceBaselineManager(
+            storeURL: sourceDir.appendingPathComponent("performance-baseline.json")
+        )
+        baselineManager.record(baseline)
+        print(
+            "activity_archive_benchmark iterations=10 "
+                + "baseline_median_ms=\(Self.formatMilliseconds(baselineMedian)) "
+                + "baseline_mad_ms=\(Self.formatMilliseconds(baselineMAD)) "
+                + "optimized_median_ms=\(Self.formatMilliseconds(optimizedMedian)) "
+                + "optimized_mad_ms=\(Self.formatMilliseconds(optimizedMAD)) "
+                + "baseline_bytes=316184 "
+                + "regression=\(gate?.isRegression == true)"
+        )
+        #expect(baselineManager.baseline(for: baseline.scenario) == baseline)
+        #expect(optimizedMedian < baselineMedian - (2 * baselineMAD))
+        #expect(gate?.isRegression == false)
+    }
+
+    private static nonisolated func runActivityBenchmarks(
+        pairs: [(ActivityArchiveBenchmarkFixture, ActivityArchiveBenchmarkFixture)]
+    ) async -> (baseline: [BenchmarkResult], optimized: [BenchmarkResult]) {
+        let runner = BenchmarkRunner()
+        var baselineResults: [BenchmarkResult] = []
+        var optimizedResults: [BenchmarkResult] = []
+        for (baselineFixture, optimizedFixture) in pairs {
+            baselineResults.append(await runner.run(
+                scenario: .incrementalRefresh,
+                setup: {},
+                action: { _ = baselineFixture.store.save(baselineFixture.events) }
+            ))
+            optimizedResults.append(await runner.run(
+                scenario: .incrementalRefresh,
+                setup: {},
+                action: {
+                    let scoped = optimizedFixture.store.pruning(
+                        optimizedFixture.events,
+                        keepingRepositoryIDs: optimizedFixture.repositoryIDs
+                    )
+                    let duplicate = ActivityEventDeduplicator.newEvents(
+                        from: [],
+                        comparedTo: scoped
+                    )
+                    _ = optimizedFixture.store.merging(existing: scoped, newEvents: duplicate) == scoped
+                }
+            ))
+        }
+        return (baselineResults, optimizedResults)
+    }
+
+    private static func median(_ values: [Double]) -> Double {
+        let sorted = values.sorted()
+        return sorted[sorted.count / 2]
+    }
+
+    private static func mad(_ values: [Double]) -> Double {
+        let center = median(values)
+        return median(values.map { abs($0 - center) })
+    }
+
+    private static func formatMilliseconds(_ seconds: Double) -> String {
+        String(format: "%.3f", seconds * 1_000)
     }
 
     /// The write path is unchanged when a round does add events: the archive
