@@ -1060,4 +1060,112 @@ struct RefreshEngineIntegrationTests {
         #expect(result.data.repositories.count == 3, "Expected all 3 repos retained, got \(result.data.repositories.count)")
         #expect(result.data.repositories.allSatisfy { $0.resolvedDataSource == .current })
     }
+
+    // MARK: - Idle round observation archive
+
+    /// Deterministic write accounting for incremental rounds that find no new
+    /// repository state. Round 1 (first refresh) must record one observation;
+    /// every following unchanged round must not touch the archive at all.
+    ///
+    /// The observation archive is a fixed-size ring of whole-file rewrites, so
+    /// "no rewrite" is proven by counting writes and bytes, not by wall clock.
+    @Test func unchangedIncrementalRoundDoesNotRewriteObservationArchive() async throws {
+        let root = reposRoot("idle-observation")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        for i in 0..<2 {
+            try createTempGitRepo(at: root.appendingPathComponent("repo-\(i)"))
+        }
+
+        // The archive lives outside the scan root so discovery cannot see it.
+        let archiveDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devpulse-observation-archive-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: archiveDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: archiveDir) }
+        let archive = archiveDir.appendingPathComponent("refresh-observations.json")
+
+        let counter = StoreWriteCounter()
+        let store = RefreshObservationStore(fileURL: archive, writeObserver: { counter.record($0) })
+        let mock = MockGitCommandRunner()
+
+        // Pre-fill the 50-slot ring so a whole-archive rewrite is measured at
+        // the same size scale as the real container file (~63 KB on the
+        // reporting machine). Seeding uses the production store API.
+        for index in 0..<49 {
+            store.append(Self.seedObservation(index: index))
+        }
+        let seededBytes = (try? Data(contentsOf: archive).count) ?? 0
+        counter.reset()
+
+        // Round 1: first refresh ever (no previous snapshot) — one write.
+        let first = await RefreshEngine(observationStoreOverride: store).execute(
+            config: scanConfig(),
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true,
+            source: .manual,
+            gitCommandRunner: mock.runner()
+        )
+        let firstRoundBytes = counter.bytes
+        print("observation_round=1 writes=\(counter.writes) bytes=\(counter.bytes) git_calls=\(first.diagnostics.totalGitCalls)")
+        print("observation_ring_bytes_before_round1=\(seededBytes)")
+        #expect(counter.writes == 1)
+        #expect(firstRoundBytes > 0)
+
+        // Rounds 2–4: identical git output, previous snapshot supplied, no new
+        // repository state. Every round still performs git work, so the old
+        // unconditional append rewrote the whole archive each time.
+        var previous = first.data
+        for round in 2...4 {
+            counter.reset()
+            let result = await RefreshEngine(observationStoreOverride: store).execute(
+                config: scanConfig(),
+                scanRoots: [root.path],
+                knownRepositoryPaths: first.discoveredRepositoryPaths,
+                forceRepositoryDiscovery: false,
+                previousSnapshot: previous,
+                source: .timer,
+                gitCommandRunner: mock.runner()
+            )
+            print(
+                "observation_round=\(round) writes=\(counter.writes) bytes=\(counter.bytes) "
+                    + "git_calls=\(result.diagnostics.totalGitCalls) repositories=\(result.data.repositories.count)"
+            )
+            #expect(counter.writes == 0, "unchanged round rewrote the whole observation archive")
+            #expect(counter.bytes == 0)
+            previous = result.data
+        }
+
+        let archiveBytes = (try? Data(contentsOf: archive).count) ?? 0
+        print("observation_archive_bytes_after_idle_rounds=\(archiveBytes) round1_write_bytes=\(firstRoundBytes)")
+        #expect(archiveBytes > 0)
+        // Ring semantics unchanged: same 50 entries (49 seeded + round 1), no
+        // truncation drift and no extra entries from idle rounds.
+        let loaded = store.loadAll()
+        print("observation_ring_count=\(loaded.count) newest_source=\(loaded.first?.source ?? "nil")")
+        #expect(loaded.count == 50)
+        #expect(loaded.first?.source == "manual")
+        #expect(Set(loaded.map(\.runID)).count == loaded.count)
+    }
+
+    /// Deterministic filler observation used to size the ring.
+    private static func seedObservation(index: Int) -> RefreshObservation {
+        RefreshObservation(
+            schemaVersion: RefreshObservation.currentSchemaVersion,
+            runID: "seed-run-\(index)",
+            startedAt: "2026-01-01T00:00:00Z",
+            overallElapsed: 0.5,
+            totalGitCalls: 2,
+            stageSpans: [:],
+            repositoryTiming: [:],
+            repositoryCount: 2,
+            currentRepositoryCount: 2,
+            reusedSnapshotCount: 0,
+            totalCPU: 0,
+            peakMemoryMB: 0,
+            totalDiskWritesKB: 0,
+            wasCancelled: false,
+            wasTimedOut: false,
+            source: "seed"
+        )
+    }
 }

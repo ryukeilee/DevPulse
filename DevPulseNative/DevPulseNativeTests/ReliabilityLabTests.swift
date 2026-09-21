@@ -729,3 +729,210 @@ import Testing
         #expect(result.gitSubprocessCount >= 0)
     }
 }
+
+// MARK: - Deterministic whole-archive write counting (idle-round elimination)
+
+/// Thread-safe counter used as the `writeObserver` of both archive stores. It
+/// counts successful whole-file writes and their byte sizes so an "idle round"
+/// can be judged by deterministic numbers instead of wall-clock time.
+final class StoreWriteCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var writeCount = 0
+    private var byteCount = 0
+
+    func record(_ bytes: Int) {
+        lock.withLock {
+            writeCount += 1
+            byteCount += bytes
+        }
+    }
+
+    var writes: Int { lock.withLock { writeCount } }
+    var bytes: Int { lock.withLock { byteCount } }
+
+    func reset() {
+        lock.withLock {
+            writeCount = 0
+            byteCount = 0
+        }
+    }
+}
+
+/// Incremental rounds that detect no change must not rewrite the whole activity
+/// archive: `ActivityEventStore.save` re-encodes the entire (pretty printed)
+/// archive, so a no-op round used to cost a full read-modify-write cycle.
+@Suite(.serialized) @MainActor struct IdleRoundActivityArchiveTests {
+
+    private static let timestamp = "2026-01-01T00:00:00Z"
+    private static let repositoryCount = 100
+
+    private func tempDir(_ name: String) -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devpulse-idle-\(name)-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func repository(index: Int, changed: Bool) -> RepositorySnapshot {
+        RepositorySnapshot(
+            id: "idle-repo-\(index)",
+            name: "idle-repo-\(index)",
+            path: "/tmp/devpulse-idle/repo-\(index)",
+            branch: "main",
+            status: changed ? .changed : .clean,
+            modifiedFileCount: changed ? 3 : 0,
+            addedFileCount: changed ? 1 : 0,
+            deletedFileCount: 0,
+            untrackedFileCount: changed ? 2 : 0,
+            stagedFileCount: changed ? 1 : 0,
+            unstagedFileCount: changed ? 3 : 0,
+            conflictedFileCount: 0,
+            aheadCount: changed ? 1 : 0,
+            hasUpstream: true,
+            changedFileCount: changed ? 6 : 0,
+            changedFilesPreview: changed ? ["Sources/A.swift", "Sources/B.swift"] : [],
+            risk: changed ? .medium : .low,
+            lastScannedAt: Self.timestamp,
+            lastChangedAt: Self.timestamp,
+            lastCommitID: "abcdef1234567890",
+            lastCommitSummary: "Seed commit",
+            lastCommitMetadataAvailable: true,
+            lastActivityAt: Self.timestamp,
+            errorMessage: nil,
+            isPinned: false
+        )
+    }
+
+    private func snapshot(repositories: [RepositorySnapshot], generatedAt: String) -> AppGroupData {
+        AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: generatedAt,
+            writtenAt: nil,
+            lastSuccessfulRefreshAt: generatedAt,
+            scanSummary: ScanSummary.build(from: repositories),
+            repositories: repositories
+        )
+    }
+
+    /// One idle round must perform zero archive writes while a round that does
+    /// detect events must still write exactly once through the same store API.
+    @Test func idleRoundDoesNotRewriteActivityArchive() async throws {
+        let dir = tempDir("activity")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let archive = dir.appendingPathComponent(ActivityEventStore.fileName)
+
+        let clean = snapshot(
+            repositories: (0..<Self.repositoryCount).map { repository(index: $0, changed: false) },
+            generatedAt: Self.timestamp
+        )
+        let changed = snapshot(
+            repositories: (0..<Self.repositoryCount).map { repository(index: $0, changed: true) },
+            generatedAt: Self.timestamp
+        )
+
+        let counter = StoreWriteCounter()
+        let store = ActivityEventStore(fileURL: archive, writeObserver: { counter.record($0) })
+        let scheduler = ScanScheduler(commandMode: false, activityEventStore: store)
+        defer { scheduler.shutdown() }
+        scheduler.lastResult = clean
+
+        // Change round: populates the archive (and the in-memory event list)
+        // with a realistic, capacity-sized history.
+        counter.reset()
+        _ = scheduler.recordActivityEvents(
+            previous: clean,
+            current: changed,
+            observedAt: Self.timestamp
+        )
+        let changeRoundWrites = await waitForWrites(counter, atLeast: 1)
+        let archivedBytes = (try? Data(contentsOf: archive).count) ?? 0
+        print(
+            "activity_change_round writes=\(changeRoundWrites) bytes=\(counter.bytes) "
+                + "archive_bytes=\(archivedBytes) in_memory_events=\(scheduler.activityEvents.count)"
+        )
+        #expect(changeRoundWrites == 1)
+        #expect(archivedBytes > 0)
+
+        // Idle rounds: identical before/after state, so no new events exist.
+        let archiveBeforeIdleRounds = try Data(contentsOf: archive)
+        var observed: [Int] = []
+        for round in 1...3 {
+            counter.reset()
+            _ = scheduler.recordActivityEvents(
+                previous: changed,
+                current: changed,
+                observedAt: Self.timestamp
+            )
+            let writes = await waitForWrites(counter, atLeast: 1)
+            observed.append(writes)
+            print(
+                "activity_idle_round=\(round) writes=\(writes) bytes=\(counter.bytes) "
+                    + "archive_bytes=\((try? Data(contentsOf: archive).count) ?? -1)"
+            )
+        }
+        print("activity_idle_round_writes=\(observed)")
+        #expect(observed == [0, 0, 0])
+        #expect(try Data(contentsOf: archive) == archiveBeforeIdleRounds)
+    }
+
+    /// The write path itself is unchanged: when a round does add events the
+    /// archive keeps the same schema, ordering and capacity truncation.
+    @Test func changeRoundStillWritesDedupedAndTruncatedArchive() async throws {
+        let dir = tempDir("activity-change")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let archive = dir.appendingPathComponent(ActivityEventStore.fileName)
+
+        let clean = snapshot(
+            repositories: (0..<Self.repositoryCount).map { repository(index: $0, changed: false) },
+            generatedAt: Self.timestamp
+        )
+        let changed = snapshot(
+            repositories: (0..<Self.repositoryCount).map { repository(index: $0, changed: true) },
+            generatedAt: Self.timestamp
+        )
+
+        let counter = StoreWriteCounter()
+        let store = ActivityEventStore(fileURL: archive, writeObserver: { counter.record($0) })
+        let scheduler = ScanScheduler(commandMode: false, activityEventStore: store)
+        defer { scheduler.shutdown() }
+        scheduler.lastResult = clean
+
+        counter.reset()
+        _ = scheduler.recordActivityEvents(previous: clean, current: changed, observedAt: Self.timestamp)
+        #expect(await waitForWrites(counter, atLeast: 1) == 1)
+        // Repeating the exact same detected transition must be deduplicated.
+        let firstWriteBytes = counter.bytes
+        counter.reset()
+        _ = scheduler.recordActivityEvents(previous: clean, current: changed, observedAt: Self.timestamp)
+        let secondWrites = await waitForWrites(counter, atLeast: 1)
+
+        let loaded = try store.load().get()
+        let ids = loaded.events.map(\.id)
+        print(
+            "activity_dedup_round writes=\(secondWrites) bytes=\(counter.bytes) "
+                + "first_write_bytes=\(firstWriteBytes) stored_events=\(ids.count) "
+                + "unique_ids=\(Set(ids).count) capacity=\(store.capacity)"
+        )
+        #expect(secondWrites == 0)
+        #expect(ids.count == Set(ids).count)
+        #expect(ids.count <= store.capacity)
+        #expect(!ids.isEmpty)
+
+        // Schema and atomic write path are untouched.
+        let raw = try Data(contentsOf: archive)
+        let archiveJSON = try JSONSerialization.jsonObject(with: raw) as? [String: Any]
+        let schemaVersion = archiveJSON?["schemaVersion"] as? Int
+        print("activity_archive_schema_version=\(schemaVersion.map(String.init) ?? "nil")")
+        #expect(schemaVersion == ActivityEventArchive.currentSchemaVersion)
+    }
+
+    /// Polls the deterministic write counter until the detached archive save
+    /// has landed (or the grace window expires), then returns the count.
+    private func waitForWrites(_ counter: StoreWriteCounter, atLeast: Int) async -> Int {
+        let deadline = Date().addingTimeInterval(2)
+        while counter.writes < atLeast, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return counter.writes
+    }
+}
