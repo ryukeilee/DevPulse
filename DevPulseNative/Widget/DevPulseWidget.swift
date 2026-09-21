@@ -208,8 +208,12 @@ struct WidgetEntry: TimelineEntry {
     }
 
     static func content(snapshot: AppGroupData,
-                        feed: ActivityTimelineFeed) -> WidgetEntry {
-        let trustAssessment = RefreshStatusFormatter.snapshotAssessment(snapshot: snapshot)
+                        feed: ActivityTimelineFeed,
+                        now: Date = Date()) -> WidgetEntry {
+        let trustAssessment = RefreshStatusFormatter.snapshotAssessment(
+            snapshot: snapshot,
+            now: now
+        )
         // Recovered or migrated snapshots ARE loadable — the data was
         // reconstructed from backup or migrated from an older schema.
         // The trust assessment (below) correctly captures the degraded
@@ -272,6 +276,10 @@ struct WidgetEntry: TimelineEntry {
 extension WidgetEntry {
     /// Unified freshness state derived from the entry's load results.
     var freshnessState: DataFreshnessState {
+        freshnessState(at: Date())
+    }
+
+    func freshnessState(at now: Date) -> DataFreshnessState {
         switch loadState {
         case .placeholder:
             return .refreshing(reason: "等待首次数据")
@@ -289,7 +297,7 @@ extension WidgetEntry {
         // otherwise let the snapshot's persisted data freshness decide.
         if snapshot?.isRefreshing == true,
            let writtenAt = snapshot?.writtenAt.flatMap(DateFormatting.date),
-           Date().timeIntervalSince(writtenAt) <= RefreshStatusFormatter.staleThreshold {
+           now.timeIntervalSince(writtenAt) <= RefreshStatusFormatter.staleThreshold {
             return .refreshing(reason: "正在更新仓库状态")
         }
 

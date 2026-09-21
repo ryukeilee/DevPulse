@@ -661,10 +661,12 @@ struct DataFreshnessStateTests {
         )
     }
 
-    private func readyEntry(_ snapshot: AppGroupData) -> WidgetEntry {
+    private func readyEntry(_ snapshot: AppGroupData,
+                            now: Date = Date()) -> WidgetEntry {
         WidgetEntry.content(
             snapshot: snapshot,
-            feed: ActivityTimelineFeed(state: .neverScanned, items: [])
+            feed: ActivityTimelineFeed(state: .neverScanned, items: []),
+            now: now
         )
     }
 
@@ -697,6 +699,65 @@ struct DataFreshnessStateTests {
             isRefreshing: true
         )
         #expect(readyEntry(snapshot).freshnessState == .refreshing(reason: "正在更新仓库状态"))
+    }
+
+    @Test("completed snapshot clears refreshing and maps partial/full refresh correctly")
+    func completedSnapshotRefreshChain() throws {
+        let oldAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let completedAt = oldAt.addingTimeInterval(120)
+        let formatter = ISO8601DateFormatter()
+        let repositories = [makeRepo(dataSource: .current)]
+        let old = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: formatter.string(from: oldAt),
+            writtenAt: formatter.string(from: oldAt),
+            lastSuccessfulRefreshAt: formatter.string(from: oldAt),
+            scanSummary: ScanSummary.build(from: repositories),
+            repositories: repositories,
+            isRefreshing: true,
+            discoveryWasIncomplete: true
+        )
+        #expect(readyEntry(old, now: completedAt).freshnessState(at: completedAt) == .refreshing(reason: "正在更新仓库状态"))
+
+        let completed = AppGroupData(
+            schemaVersion: old.schemaVersion,
+            generatedAt: formatter.string(from: completedAt),
+            writtenAt: formatter.string(from: completedAt),
+            lastSuccessfulRefreshAt: formatter.string(from: completedAt),
+            scanSummary: old.scanSummary,
+            repositories: old.repositories,
+            isRefreshing: false,
+            discoveryWasIncomplete: nil
+        )
+        let committed = try JSONDecoder().decode(
+            AppGroupData.self,
+            from: JSONEncoder().encode(completed)
+        )
+        #expect(committed.isRefreshing == false)
+        #expect(committed.discoveryWasIncomplete == nil)
+        #expect(committed.generatedAt == formatter.string(from: completedAt))
+        #expect(committed.writtenAt == formatter.string(from: completedAt))
+        #expect(committed.lastSuccessfulRefreshAt == formatter.string(from: completedAt))
+        guard case .normal = readyEntry(committed, now: completedAt).freshnessState(at: completedAt) else {
+            Issue.record("A complete committed refresh should map to normal: \(readyEntry(committed, now: completedAt).freshnessState(at: completedAt))")
+            return
+        }
+
+        let partial = AppGroupData(
+            schemaVersion: completed.schemaVersion,
+            generatedAt: completed.generatedAt,
+            writtenAt: completed.writtenAt,
+            lastSuccessfulRefreshAt: formatter.string(from: oldAt),
+            scanSummary: completed.scanSummary,
+            repositories: completed.repositories,
+            isRefreshing: false,
+            discoveryWasIncomplete: true
+        )
+        guard case .degraded = readyEntry(partial, now: completedAt).freshnessState(at: completedAt) else {
+            Issue.record("A partial committed refresh should map to degraded, not expired")
+            return
+        }
+        #expect(partial.lastSuccessfulRefreshAt == formatter.string(from: oldAt))
     }
 
     @Test("widget fresh snapshot maps to normal")

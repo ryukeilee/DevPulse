@@ -581,6 +581,7 @@ enum GitRepositoryScanner {
             persistenceState: .committed,
             pendingItemWidgetSummary: previous?.pendingItemWidgetSummary,
             isRefreshing: previous?.isRefreshing,
+            discoveryWasIncomplete: previous?.discoveryWasIncomplete,
             appVersion: previous?.appVersion ?? RepositorySnapshotSchema.currentAppVersion,
             storageFormatVersion: previous?.storageFormatVersion ?? RepositorySnapshotSchema.storageFormatVersion
         )
@@ -664,6 +665,7 @@ enum GitRepositoryScanner {
                 persistenceState: .committed,
                 pendingItemWidgetSummary: previousSnapshot?.pendingItemWidgetSummary,
                 isRefreshing: previousSnapshot?.isRefreshing,
+                discoveryWasIncomplete: previousSnapshot?.discoveryWasIncomplete,
                 appVersion: previousSnapshot?.appVersion ?? RepositorySnapshotSchema.currentAppVersion,
                 storageFormatVersion: previousSnapshot?.storageFormatVersion ?? RepositorySnapshotSchema.storageFormatVersion
             ),

@@ -277,6 +277,7 @@ actor RefreshEngine {
             persistenceState: .committed,
             pendingItemWidgetSummary: previousSnapshot?.pendingItemWidgetSummary,
             isRefreshing: false,
+            discoveryWasIncomplete: previousSnapshot?.discoveryWasIncomplete,
             appVersion: previousSnapshot?.appVersion ?? RepositorySnapshotSchema.currentAppVersion,
             storageFormatVersion: previousSnapshot?.storageFormatVersion ?? RepositorySnapshotSchema.storageFormatVersion
         )
@@ -1158,6 +1159,7 @@ extension RefreshEngine {
                 persistenceState: .committed,
                 pendingItemWidgetSummary: previous?.pendingItemWidgetSummary,
                 isRefreshing: false,
+                discoveryWasIncomplete: previous?.discoveryWasIncomplete,
                 appVersion: previous?.appVersion ?? RepositorySnapshotSchema.currentAppVersion,
                 storageFormatVersion: previous?.storageFormatVersion ?? RepositorySnapshotSchema.storageFormatVersion
             ),
