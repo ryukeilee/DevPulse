@@ -168,6 +168,11 @@ final class RefreshObservationStore: @unchecked Sendable {
     private let queue = DispatchQueue(label: "local.devpulse.app.observation-store", qos: .utility)
     private static let maxStored = 50
 
+    /// Observation-only hook invoked with the byte count of every successful
+    /// whole-file write. `nil` (the default) leaves production behaviour and
+    /// semantics untouched; tests use it to count writes deterministically.
+    private let writeObserver: (@Sendable (Int) -> Void)?
+
     /// Versioned storage envelope for the on-disk file.
     /// Allows forward/backward compatible reads and explicit version tracking.
     private struct StoredObservations: Codable {
@@ -175,7 +180,8 @@ final class RefreshObservationStore: @unchecked Sendable {
         let observations: [RefreshObservation]
     }
 
-    init(fileURL: URL? = nil) {
+    init(fileURL: URL? = nil, writeObserver: (@Sendable (Int) -> Void)? = nil) {
+        self.writeObserver = writeObserver
         let url = fileURL ?? (
             FileManager.default.containerURL(
                 forSecurityApplicationGroupIdentifier: SharedSnapshotLocation.appGroupIdentifier
@@ -254,6 +260,7 @@ final class RefreshObservationStore: @unchecked Sendable {
         do {
             let data = try encoder.encode(envelope)
             try data.write(to: fileURL, options: .atomic)
+            writeObserver?(data.count)
             return .success(())
         } catch {
             logger.error("Save failed: \(error.localizedDescription)")

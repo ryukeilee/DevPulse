@@ -44,7 +44,13 @@ actor RefreshEngine {
     }
     private let logger = Logger(subsystem: "local.devpulse.app", category: "RefreshEngine")
 
-    init() {
+    /// Optional observation-store override used by tests to count writes
+    /// deterministically against a temporary file. `nil` (the default) keeps
+    /// the production store resolution unchanged.
+    private let observationStoreOverride: RefreshObservationStore?
+
+    init(observationStoreOverride: RefreshObservationStore? = nil) {
+        self.observationStoreOverride = observationStoreOverride
         var continuation: AsyncStream<RefreshProgress>.Continuation!
         progress = AsyncStream { continuation = $0 }
         progressContinuation = continuation
@@ -428,8 +434,17 @@ actor RefreshEngine {
         // Only persist the observation when meaningful git work was performed
         // or resource data was collected — skip for cancelled/no-op scans to
         // reduce unnecessary disk I/O.
-        if obs.totalGitCalls > 0 || obs.totalCPU > 0 || obs.totalDiskWritesKB > 0 {
-            let store = RefreshObservationStore()
+        //
+        // Additionally skip rounds that found no new repository state: the
+        // store is a fixed-size ring of whole-file rewrites (maxStored = 50),
+        // so an unchanged round re-read, re-encoded and re-wrote the entire
+        // archive (~63 KB on the reporting machine) to record state that is
+        // already represented by the previous entry. The first refresh of a
+        // process (no previous snapshot) and every round that does detect a
+        // change keep the previous behaviour byte-for-byte.
+        if (obs.totalGitCalls > 0 || obs.totalCPU > 0 || obs.totalDiskWritesKB > 0),
+           Self.recordsRepositoryChange(previous: previousSnapshot, current: persistedData) {
+            let store = observationStoreOverride ?? RefreshObservationStore()
             store.append(obs)
         }
 
@@ -441,6 +456,27 @@ actor RefreshEngine {
             isCancelled: false,
             timedOut: timedOut,
             diagnostics: diagnostics
+        )
+    }
+
+    // MARK: - Observation recording policy
+
+    /// Whether a finished refresh round must append an observation.
+    ///
+    /// Uses the scheduler's existing "meaningful snapshot change" policy, which
+    /// is the same predicate that decides whether a round counts as a change
+    /// (`ScanSchedulerPolicy.hasMeaningfulSnapshotChanges`). An unchanged round
+    /// is not recorded, which removes a whole-archive read + rewrite per idle
+    /// incremental refresh. A missing previous snapshot (first refresh) always
+    /// records, so the very first round after launch is never dropped.
+    static func recordsRepositoryChange(
+        previous: AppGroupData?,
+        current: AppGroupData
+    ) -> Bool {
+        guard let previous else { return true }
+        return ScanSchedulerPolicy.hasMeaningfulSnapshotChanges(
+            previousSnapshot: previous,
+            nextSnapshot: current
         )
     }
 

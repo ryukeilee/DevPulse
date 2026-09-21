@@ -2847,7 +2847,10 @@ final class ScanScheduler: ObservableObject {
         }
     }
 
-    private func recordActivityEvents(
+    /// Records activity events for a round and returns the snapshot with the
+    /// widget summary attached. Internal (not private) so tests can drive one
+    /// round deterministically without the scheduler's timers or App Group I/O.
+    func recordActivityEvents(
         previous: AppGroupData,
         current: AppGroupData,
         observedAt: String
@@ -2873,9 +2876,18 @@ final class ScanScheduler: ObservableObject {
             keepingRepositoryIDs: repositoryIDs
         )
 
+        // `save` re-encodes the whole (pretty printed) archive, so a round whose
+        // merged event list equals the list already held in memory — a round
+        // that produced no new events, e.g. because the differ found nothing or
+        // the deduplicator removed everything — would rewrite an identical
+        // file. Writing only on real change keeps the archive, its schema and
+        // the atomic write path identical while removing that whole-archive
+        // rewrite. Pruning (repository scope) still counts as a change because
+        // `merged` is then compared against the unpruned list.
+        let previousEvents = activityEvents
         activityEvents = merged
 
-        if let eventStore = activityEventStore {
+        if let eventStore = activityEventStore, merged != previousEvents {
             Task.detached(priority: .utility) { @Sendable [weak self] in
                 switch eventStore.save(merged) {
                 case .success(let saved):
