@@ -209,3 +209,11 @@ xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -co
 - 本次只记录基线，不修改生产 Swift、测试、`project.yml` 或 `.xcodeproj`。
 - 同机同时存在并行构建/基准任务；本次全程使用指定的独立 DerivedData。未观察到构建异常，因此未因并发重试全量构建。
 - 原始测试日志由 `verify.sh` 写入系统临时目录；本文保留了完整失败项的原始断言文本和可复现命令，作为长期可引用证据。
+
+## 当前 main 基线修订（`eb41ba0`）
+
+上面的历史记录基于 `7f29c0f`（893 tests / 89 suites），未包含随后合入的性能基准测试。当前集成起点 `eb41ba0` 的已知失败集合为 **7 项**（899 tests / 89 suites）：上文列出的 6 项，加上：
+
+- `LifecyclePerformanceTests.steadyStateCommitBenchmark()`
+
+该项的原始失败断言为 `Optimized median did not exceed the baseline noise band.`，对应断言表达式 `optimizedSummary.median < baselineSummary.median - baselineSummary.mad`；它与签名环境无关，属于性能基准时序波动。终局集成使用 signed 入口后，`verify.sh final` 两次均为退出码 `0`；裸 `xcodebuild test-without-building` 原始输出为 **905 tests / 90 suites passed**，因此终局分支没有保留上述已知失败。
