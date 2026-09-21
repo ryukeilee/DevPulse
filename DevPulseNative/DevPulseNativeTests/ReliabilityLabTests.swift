@@ -875,8 +875,63 @@ final class StoreWriteCounter: @unchecked Sendable {
         #expect(try Data(contentsOf: archive) == archiveBeforeIdleRounds)
     }
 
-    /// The write path itself is unchanged: when a round does add events the
-    /// archive keeps the same schema, ordering and capacity truncation.
+    /// The first round must still materialize an empty archive. Once that
+    /// confirmed save exists, a no-op round and a pin-only snapshot change do
+    /// not represent activity and may skip the archive rewrite.
+    @Test func firstEmptyArchivePersistsAndPinOnlyChangeSkips() async throws {
+        let dir = tempDir("activity-empty")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let archive = dir.appendingPathComponent(ActivityEventStore.fileName)
+
+        let clean = snapshot(
+            repositories: (0..<Self.repositoryCount).map { repository(index: $0, changed: false) },
+            generatedAt: Self.timestamp
+        )
+        let pinned = snapshot(
+            repositories: clean.repositories.map { repository in
+                var pinned = repository
+                pinned.isPinned = true
+                return pinned
+            },
+            generatedAt: Self.timestamp
+        )
+
+        let counter = StoreWriteCounter()
+        let store = ActivityEventStore(fileURL: archive, writeObserver: { counter.record($0) })
+        let scheduler = ScanScheduler(commandMode: false, activityEventStore: store)
+        defer { scheduler.shutdown() }
+        scheduler.lastResult = clean
+
+        counter.reset()
+        _ = scheduler.recordActivityEvents(previous: clean, current: clean, observedAt: Self.timestamp)
+        let firstWrites = await waitForWrites(counter, atLeast: 1)
+        let firstArchive = try store.load().get()
+        print(
+            "empty_archive_first_round writes=\(firstWrites) bytes=\(counter.bytes) "
+                + "archive_exists=\(FileManager.default.fileExists(atPath: archive.path)) "
+                + "stored_events=\(firstArchive.events.count)"
+        )
+        #expect(firstWrites == 1)
+        #expect(counter.bytes > 0)
+        #expect(firstArchive.events.isEmpty)
+
+        counter.reset()
+        _ = scheduler.recordActivityEvents(previous: clean, current: clean, observedAt: Self.timestamp)
+        let noOpWrites = await waitForWrites(counter, atLeast: 1)
+        #expect(noOpWrites == 0)
+
+        let archiveBeforePin = try Data(contentsOf: archive)
+        counter.reset()
+        _ = scheduler.recordActivityEvents(previous: clean, current: pinned, observedAt: Self.timestamp)
+        let pinOnlyWrites = await waitForWrites(counter, atLeast: 1)
+        let archiveAfterPin = try Data(contentsOf: archive)
+        print("pin_only_round writes=\(pinOnlyWrites) bytes=\(counter.bytes)")
+        #expect(pinOnlyWrites == 0)
+        #expect(archiveAfterPin == archiveBeforePin)
+    }
+
+    /// The write path is unchanged when a round does add events: the archive
+    /// keeps the same schema, ordering and capacity truncation.
     @Test func changeRoundStillWritesDedupedAndTruncatedArchive() async throws {
         let dir = tempDir("activity-change")
         defer { try? FileManager.default.removeItem(at: dir) }
