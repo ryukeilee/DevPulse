@@ -709,6 +709,23 @@ final class ScanScheduler: ObservableObject {
     @Published var diagnostics = DiagnosticsSnapshot()
     @Published var diagnosticEvents: [DiagnosticEvent] = []
     @Published private(set) var activityEvents: [ActivityEvent] = []
+
+    /// The activity event list that the archive is known to hold (or is being
+    /// written with right now).
+    ///
+    /// `activityEvents` is the in-memory list and is updated as soon as a round
+    /// merges its events; writes are asynchronous and can fail. A round only
+    /// skips its write when `merged` equals this marker, so the marker must
+    /// never claim more than the archive really holds:
+    /// - it is set when a write of exactly that list is dispatched;
+    /// - a failed write clears it again (while it is still the current marker),
+    ///   so the next round retries instead of leaving `activity-events.json`
+    ///   permanently stale;
+    /// - a successful write re-affirms it.
+    ///
+    /// `nil` means "no archive confirmed on disk" (missing archive, load
+    /// failure, or a failed save).
+    private var lastPersistedActivityEvents: [ActivityEvent]?
     @Published private(set) var ignoredRepositories: [IgnoredRepository] = []
     @Published private(set) var retryingRepositoryIDs: Set<String> = []
     @Published private(set) var lastScanMetrics: ScanMetrics?
@@ -2830,10 +2847,22 @@ final class ScanScheduler: ObservableObject {
                 keepingRepositoryIDs: repositoryIDs
             )
             activityEvents = scopedEvents
-            if scopedEvents != result.events,
-               case .failure(let error) = activityEventStore.save(scopedEvents) {
-                warnings.append(error.localizedDescription)
+            // Only claim the on-disk state when the archive exists and matches
+            // what we just decided to keep. A missing archive or a failed
+            // migration save leaves this nil, so the next round writes.
+            var persistedEvents: [ActivityEvent]? = FileManager.default.fileExists(
+                atPath: activityEventStore.fileURL.path
+            ) ? scopedEvents : nil
+            if scopedEvents != result.events {
+                switch activityEventStore.save(scopedEvents) {
+                case .success:
+                    persistedEvents = scopedEvents
+                case .failure(let error):
+                    warnings.append(error.localizedDescription)
+                    persistedEvents = nil
+                }
             }
+            lastPersistedActivityEvents = persistedEvents
             switch result.recovery {
             case .none:
                 break
@@ -2876,28 +2905,37 @@ final class ScanScheduler: ObservableObject {
             keepingRepositoryIDs: repositoryIDs
         )
 
-        // `save` re-encodes the whole (pretty printed) archive, so a round whose
-        // merged event list equals the list already held in memory — a round
-        // that produced no new events, e.g. because the differ found nothing or
-        // the deduplicator removed everything — would rewrite an identical
-        // file. Writing only on real change keeps the archive, its schema and
-        // the atomic write path identical while removing that whole-archive
-        // rewrite. Pruning (repository scope) still counts as a change because
-        // `merged` is then compared against the unpruned list.
-        let previousEvents = activityEvents
+        // `save` re-encodes the whole (pretty printed) archive, so writing a
+        // list that is already on disk rewrites an identical file. The skip is
+        // therefore keyed on the last *confirmed* on-disk content
+        // (`lastPersistedActivityEvents`, only advanced by a successful save),
+        // never on the in-memory list alone: if the previous save failed, the
+        // next round — changed or not — still writes. Repository-scope pruning
+        // counts as a change because `merged` is compared against the persisted
+        // list.
         activityEvents = merged
 
-        if let eventStore = activityEventStore, merged != previousEvents {
+        if let eventStore = activityEventStore, merged != lastPersistedActivityEvents {
+            // Optimistic marker: the archive either already holds `merged` or a
+            // write of exactly `merged` is now in flight, so an immediately
+            // following round with the same list may skip. A failed write clears
+            // it again (when it is still the current marker), so the next round
+            // retries instead of leaving the archive stale.
+            lastPersistedActivityEvents = merged
             Task.detached(priority: .utility) { @Sendable [weak self] in
                 switch eventStore.save(merged) {
                 case .success(let saved):
                     await MainActor.run { @MainActor in
                         self?.activityEvents = saved
+                        self?.lastPersistedActivityEvents = saved
                     }
                 case .failure(let error):
                     let message = error.localizedDescription
                     await MainActor.run { @MainActor in
                         guard let self else { return }
+                        if self.lastPersistedActivityEvents == merged {
+                            self.lastPersistedActivityEvents = nil
+                        }
                         if !self.warnings.contains(message) {
                             self.warnings.append(message)
                         }

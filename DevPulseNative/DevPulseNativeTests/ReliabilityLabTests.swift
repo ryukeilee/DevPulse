@@ -926,6 +926,99 @@ final class StoreWriteCounter: @unchecked Sendable {
         #expect(schemaVersion == ActivityEventArchive.currentSchemaVersion)
     }
 
+    /// Durability: a failed save must not be treated as "already persisted".
+    /// After a failure the next round — even one that changes nothing — still
+    /// writes; only a round after a confirmed save may skip.
+    @Test func failedSaveIsRetriedByTheNextUnchangedRound() async throws {
+        let dir = tempDir("activity-retry")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Make the archive path unwritable: its parent is a regular file, so the
+        // `createDirectory` inside `ActivityEventStore.save` fails.
+        let blockedParent = dir.appendingPathComponent("blocked")
+        try "not a directory".write(to: blockedParent, atomically: true, encoding: .utf8)
+        let archive = blockedParent.appendingPathComponent(ActivityEventStore.fileName)
+
+        let clean = snapshot(
+            repositories: (0..<Self.repositoryCount).map { repository(index: $0, changed: false) },
+            generatedAt: Self.timestamp
+        )
+        let changed = snapshot(
+            repositories: (0..<Self.repositoryCount).map { repository(index: $0, changed: true) },
+            generatedAt: Self.timestamp
+        )
+
+        let counter = StoreWriteCounter()
+        let store = ActivityEventStore(fileURL: archive, writeObserver: { counter.record($0) })
+        let scheduler = ScanScheduler(commandMode: false, activityEventStore: store)
+        defer { scheduler.shutdown() }
+        scheduler.lastResult = clean
+
+        // Round 1: a real change, but the save fails.
+        let warningsBefore = scheduler.warnings.count
+        counter.reset()
+        _ = scheduler.recordActivityEvents(previous: clean, current: changed, observedAt: Self.timestamp)
+        let failureWarning = await waitForWarning(scheduler, since: warningsBefore)
+        print(
+            "retry_phase=save-failed writes=\(counter.writes) bytes=\(counter.bytes) "
+                + "archive_exists=\(FileManager.default.fileExists(atPath: archive.path)) "
+                + "warning=\(failureWarning ?? "nil")"
+        )
+        #expect(counter.writes == 0)
+        #expect(failureWarning != nil)
+        #expect(!FileManager.default.fileExists(atPath: archive.path))
+
+        // The path becomes writable again; disk still holds no archive.
+        try FileManager.default.removeItem(at: blockedParent)
+        try FileManager.default.createDirectory(at: blockedParent, withIntermediateDirectories: true)
+
+        // First unchanged round after the failure must retry the write.
+        counter.reset()
+        _ = scheduler.recordActivityEvents(previous: changed, current: changed, observedAt: Self.timestamp)
+        let retryWrites = await waitForWrites(counter, atLeast: 1)
+        let retryBytes = counter.bytes
+        let loadedAfterRetry = try store.load().get()
+        print(
+            "retry_phase=unchanged-round-after-failure writes=\(retryWrites) bytes=\(retryBytes) "
+                + "stored_events=\(loadedAfterRetry.events.count) "
+                + "matches_memory=\(loadedAfterRetry.events == scheduler.activityEvents) "
+                + "unique_ids=\(Set(loadedAfterRetry.events.map(\.id)).count)"
+        )
+        #expect(retryWrites == 1)
+        #expect(retryBytes > 0)
+        #expect(loadedAfterRetry.events == scheduler.activityEvents)
+        #expect(loadedAfterRetry.events.count == Set(loadedAfterRetry.events.map(\.id)).count)
+
+        // Only after a confirmed save may an unchanged round skip.
+        counter.reset()
+        _ = scheduler.recordActivityEvents(previous: changed, current: changed, observedAt: Self.timestamp)
+        let writesAfterSuccess = await waitForWrites(counter, atLeast: 1)
+        print(
+            "retry_phase=unchanged-round-after-success writes=\(writesAfterSuccess) "
+                + "bytes=\(counter.bytes) archive_bytes=\((try? Data(contentsOf: archive).count) ?? -1)"
+        )
+        #expect(writesAfterSuccess == 0)
+
+        // Byte determinism: re-encoding the same event list must yield the same
+        // bytes, which is what makes "disk already equals memory" a valid
+        // reason to skip. `ActivityEventStore.save` encodes with
+        // `.prettyPrinted, .sortedKeys` and `ActivityEventArchive` holds only an
+        // Int plus an ordered array, so no dictionary ordering can leak in.
+        let scratchA = ActivityEventStore(fileURL: dir.appendingPathComponent("scratch-a.json"))
+        let scratchB = ActivityEventStore(fileURL: dir.appendingPathComponent("scratch-b.json"))
+        _ = scratchA.save(scheduler.activityEvents)
+        _ = scratchB.save(scheduler.activityEvents)
+        let archiveData = try Data(contentsOf: archive)
+        let scratchAData = try Data(contentsOf: dir.appendingPathComponent("scratch-a.json"))
+        let scratchBData = try Data(contentsOf: dir.appendingPathComponent("scratch-b.json"))
+        print(
+            "byte_determinism archive==scratchA=\(archiveData == scratchAData) "
+                + "scratchA==scratchB=\(scratchAData == scratchBData) bytes=\(scratchAData.count)"
+        )
+        #expect(archiveData == scratchAData)
+        #expect(scratchAData == scratchBData)
+    }
+
     /// Polls the deterministic write counter until the detached archive save
     /// has landed (or the grace window expires), then returns the count.
     private func waitForWrites(_ counter: StoreWriteCounter, atLeast: Int) async -> Int {
@@ -934,5 +1027,14 @@ final class StoreWriteCounter: @unchecked Sendable {
             try? await Task.sleep(for: .milliseconds(10))
         }
         return counter.writes
+    }
+
+    /// Waits for the detached save path to report a new failure warning.
+    private func waitForWarning(_ scheduler: ScanScheduler, since count: Int) async -> String? {
+        let deadline = Date().addingTimeInterval(2)
+        while scheduler.warnings.count <= count, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return scheduler.warnings.count > count ? scheduler.warnings.last : nil
     }
 }

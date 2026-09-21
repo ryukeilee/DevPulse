@@ -1063,13 +1063,17 @@ struct RefreshEngineIntegrationTests {
 
     // MARK: - Idle round observation archive
 
-    /// Deterministic write accounting for incremental rounds that find no new
-    /// repository state. Round 1 (first refresh) must record one observation;
-    /// every following unchanged round must not touch the archive at all.
+    /// Protective test for the observation ledger's semantics: an unchanged
+    /// idle round still appends exactly one observation (the append is new
+    /// data: runID/startedAt/overallElapsed/source), and the ring keeps its
+    /// `maxStored = 50` truncation with insert-at-0 ordering.
     ///
-    /// The observation archive is a fixed-size ring of whole-file rewrites, so
-    /// "no rewrite" is proven by counting writes and bytes, not by wall clock.
-    @Test func unchangedIncrementalRoundDoesNotRewriteObservationArchive() async throws {
+    /// The ledger is a fixed-size ring of whole-file rewrites, so both the
+    /// append and its byte cost are counted deterministically instead of by
+    /// wall clock. This deliberately pins the behaviour that an earlier
+    /// revision of this change silently dropped (idle rounds no longer being
+    /// recorded), so it cannot regress unnoticed again.
+    @Test func unchangedIncrementalRoundStillAppendsOneObservation() async throws {
         let root = reposRoot("idle-observation")
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -1112,8 +1116,8 @@ struct RefreshEngineIntegrationTests {
         #expect(firstRoundBytes > 0)
 
         // Rounds 2–4: identical git output, previous snapshot supplied, no new
-        // repository state. Every round still performs git work, so the old
-        // unconditional append rewrote the whole archive each time.
+        // repository state. Each round performs real git work and must still be
+        // recorded as its own ledger entry (it is new data, not a repeat).
         var previous = first.data
         for round in 2...4 {
             counter.reset()
@@ -1126,25 +1130,41 @@ struct RefreshEngineIntegrationTests {
                 source: .timer,
                 gitCommandRunner: mock.runner()
             )
+            let ring = store.loadAll()
             print(
                 "observation_round=\(round) writes=\(counter.writes) bytes=\(counter.bytes) "
-                    + "git_calls=\(result.diagnostics.totalGitCalls) repositories=\(result.data.repositories.count)"
+                    + "git_calls=\(result.diagnostics.totalGitCalls) repositories=\(result.data.repositories.count) "
+                    + "ring_count=\(ring.count) newest_source=\(ring.first?.source ?? "nil") "
+                    + "archive_bytes=\((try? Data(contentsOf: archive).count) ?? -1)"
             )
-            #expect(counter.writes == 0, "unchanged round rewrote the whole observation archive")
-            #expect(counter.bytes == 0)
+            #expect(counter.writes == 1, "an unchanged round must still record its own observation")
+            #expect(counter.bytes > 0)
+            // Ring semantics: 50 entries, newest first, oldest evicted.
+            #expect(ring.count == 50)
+            #expect(ring.first?.source == "timer")
+            #expect(Set(ring.map(\.runID)).count == ring.count)
             previous = result.data
         }
 
         let archiveBytes = (try? Data(contentsOf: archive).count) ?? 0
-        print("observation_archive_bytes_after_idle_rounds=\(archiveBytes) round1_write_bytes=\(firstRoundBytes)")
-        #expect(archiveBytes > 0)
-        // Ring semantics unchanged: same 50 entries (49 seeded + round 1), no
-        // truncation drift and no extra entries from idle rounds.
         let loaded = store.loadAll()
-        print("observation_ring_count=\(loaded.count) newest_source=\(loaded.first?.source ?? "nil")")
+        let runIDs = Set(loaded.map(\.runID))
+        print(
+            "observation_ring_count=\(loaded.count) newest_source=\(loaded.first?.source ?? "nil") "
+                + "timer_entries=\(loaded.filter { $0.source == "timer" }.count) "
+                + "seed3_present=\(runIDs.contains("seed-run-3")) seed2_present=\(runIDs.contains("seed-run-2")) "
+                + "seed0_present=\(runIDs.contains("seed-run-0")) "
+                + "archive_bytes=\(archiveBytes) round1_write_bytes=\(firstRoundBytes)"
+        )
+        #expect(archiveBytes > 0)
         #expect(loaded.count == 50)
-        #expect(loaded.first?.source == "manual")
-        #expect(Set(loaded.map(\.runID)).count == loaded.count)
+        #expect(loaded.first?.source == "timer")
+        // Three idle rounds appended three entries and evicted three oldest ones
+        // (seed-0 in round 2, seed-1 in round 3, seed-2 in round 4).
+        #expect(loaded.filter { $0.source == "timer" }.count == 3)
+        #expect(runIDs.contains("seed-run-3"))
+        #expect(!runIDs.contains("seed-run-2"))
+        #expect(!runIDs.contains("seed-run-0"))
     }
 
     /// Deterministic filler observation used to size the ring.
