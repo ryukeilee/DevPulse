@@ -124,6 +124,30 @@ private func makeTestScheduler(
     )
 }
 
+/// Wait, with an upper bound, until an observable condition becomes true.
+///
+/// Fixed wall-clock sleeps are not used to synchronise with the scheduler in
+/// this file: a budget that is too tight fails under load, and one that is
+/// generous enough wastes time on every run. Polling an observable condition
+/// with a deadline keeps the assertions exactly as strong (the caller still
+/// asserts the condition afterwards, so a condition that never becomes true
+/// fails after the deadline) while removing the timing guesswork.
+///
+/// `deadline` must stay far below the scheduler's own watchdog
+/// (`scanTimeout + 30s`, i.e. >= 60s) so a genuine regression is reported as an
+/// assertion failure rather than masked by production recovery.
+@MainActor
+private func waitUntil(
+    _ condition: () -> Bool,
+    deadline: Duration = .seconds(5)
+) async {
+    let end = ContinuousClock.now + deadline
+    while !condition() {
+        if ContinuousClock.now >= end { return }
+        try? await Task.sleep(nanoseconds: 1_000_000) // 1ms poll
+    }
+}
+
 /// Create an AppGroupData with a single repository for testing.
 /// Create a minimal RepositorySnapshot for testing.
 private func makeRepo(
@@ -482,17 +506,37 @@ private func snapshotWithRepository(
 
         // Start a scan
         scheduler.scanNow(source: .manual)
-        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        // Wait, with a bound, until the scan has actually parked in its hang
+        // state before simulating sleep — a handshake, not a fixed 50ms sleep.
+        // Two reasons this is required rather than optional:
+        // 1. `resumeHangingScan()` does not remember a resume delivered before
+        //    a scan parks, so resuming too early would strand the scan and
+        //    leave `isScanning == true` forever (the same lost-wakeup race that
+        //    `suspendForSleepCancelsActiveScan` was fixed for).
+        // 2. The scenario under test is cancelling an *active* scan; a scan that
+        //    has only been requested would not be exercised.
+        let parked = await executor.waitUntilHanging(deadline: .seconds(10))
+        #expect(parked,
+                "Scan must park in its hang state before sleep is simulated")
         #expect(scheduler.isScanning == true)
 
         // Simulate sleep — this cancels the scan
         scheduler.suspendForSleep()
         executor.resumeHangingScan() // Allow cancellation to complete
-        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        // Wait, with a bound, for the cancellation to reach the scheduler's
+        // observable scanning state instead of assuming a fixed 50ms covers the
+        // off-main unwinding plus the MainActor hop under load. Observed
+        // propagation is ~1-2ms; the 5s bound is >1000x that and stays far
+        // below the scheduler's watchdog (scanTimeout + 30s >= 60s), so a
+        // cancellation that never propagates still fails below.
+        await waitUntil { scheduler.isScanning == false }
+        await Task.yield()
 
         // After sleep cancellation, state should be clean
         #expect(scheduler.isScanning == false,
-                "Scan should be cancelled after sleep")
+                "Scan should still be cancelled after sleep (waited up to 5s)")
 
         // Wake up — should trigger a recovery refresh
         scheduler.resumeAfterWake()
@@ -696,11 +740,18 @@ private func snapshotWithRepository(
         // Trigger wake handler directly
         scheduler.handleLifecycleRefresh(.wake)
 
-        // Allow deferred scan (200ms coalescing) to fire
-        try? await Task.sleep(nanoseconds: 350_000_000)
+        // Wait, with a bound, for the coalesced scan to actually execute
+        // instead of assuming a fixed 350ms covers the 200ms coalescing
+        // debounce + 50ms mock delay + MainActor hops. The old 350ms budget
+        // left only ~90ms of margin and failed under load; the 5s bound is
+        // ~19x the observed unloaded duration (~0.26s) and stays far below the
+        // scheduler's watchdog (scanTimeout + 30s >= 60s), so a wake event that
+        // never runs a scan still fails below.
+        await waitUntil { executor.executionCount >= 1 }
 
         // A scan should have been executed
-        #expect(executor.executionCount >= 1)
+        #expect(executor.executionCount >= 1,
+                "Expected at least one scan execution within 5s of the wake event")
     }
 
     @Test("path availability recovery triggers scan when new repos accessible")
@@ -715,11 +766,18 @@ private func snapshotWithRepository(
             .pathAvailabilityChanged(rootPath: "/tmp/new-path", isAvailable: true)
         )
 
-        // Allow coalesced scan to fire
-        try? await Task.sleep(nanoseconds: 350_000_000)
+        // Wait, with a bound, for the coalesced scan to actually execute
+        // instead of assuming a fixed 350ms covers the 200ms coalescing
+        // debounce + 50ms mock delay + MainActor hops. The old 350ms budget
+        // left only ~90ms of margin and failed 4/12 runs under load; the 5s
+        // bound is ~19x the observed unloaded duration (~0.26s) and stays far
+        // below the scheduler's watchdog (scanTimeout + 30s >= 60s), so a path
+        // event that never runs a scan still fails below.
+        await waitUntil { executor.executionCount >= 1 }
 
         // Path recovery should trigger a scan
-        #expect(executor.executionCount >= 1)
+        #expect(executor.executionCount >= 1,
+                "Expected at least one scan execution within 5s of the path-availability event")
     }
 }
 
