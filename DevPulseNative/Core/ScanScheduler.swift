@@ -3957,44 +3957,48 @@ final class ScanScheduler: ObservableObject {
     // MARK: - Pins
 
     private func applyPins(_ data: AppGroupData) -> AppGroupData {
-        let scopedData = RepositoryScope.filtering(
-            data,
-            excluding: ignoredRepositoryPaths
-        )
-        let migration = RepositoryIdentityMigration.migrate(
-            snapshot: scopedData,
-            pinnedIDs: pinnedRepoIDs
-        )
-        if migration.pinnedIDs != pinnedRepoIDs {
-            pinnedRepoIDs = migration.pinnedIDs
-        }
-        let pinnedIDs = migration.pinnedIDs
-        var repos = migration.snapshot.repositories.map { repo -> RepositorySnapshot in
-            var copy = repo
-            copy.isPinned = pinnedIDs.contains(repo.id)
-            return copy
-        }
-        repos = RepositorySorter.sort(repos)
+        RepositoryIdentity.withCanonicalizationScopeSync(
+            RepositoryIdentity.CanonicalizationScope()
+        ) {
+            let scopedData = RepositoryScope.filtering(
+                data,
+                excluding: ignoredRepositoryPaths
+            )
+            let migration = RepositoryIdentityMigration.migrate(
+                snapshot: scopedData,
+                pinnedIDs: pinnedRepoIDs
+            )
+            if migration.pinnedIDs != pinnedRepoIDs {
+                pinnedRepoIDs = migration.pinnedIDs
+            }
+            let pinnedIDs = migration.pinnedIDs
+            var repos = migration.snapshot.repositories.map { repo -> RepositorySnapshot in
+                var copy = repo
+                copy.isPinned = pinnedIDs.contains(repo.id)
+                return copy
+            }
+            repos = RepositorySorter.sort(repos)
 
-        return AppGroupData(
-            schemaVersion: migration.snapshot.schemaVersion,
-            generatedAt: migration.snapshot.generatedAt,
-            writtenAt: migration.snapshot.writtenAt,
-            lastSuccessfulRefreshAt: migration.snapshot.lastSuccessfulRefreshAt,
-            historySchemaVersion: migration.snapshot.historySchemaVersion,
-            historyRecordingEnabled: migration.snapshot.historyRecordingEnabled,
-            scanSummary: migration.snapshot.scanSummary,
-            repositories: repos,
-            recentActivityEvents: migration.snapshot.recentActivityEvents,
-            repositoryUnavailableSinceByPath: migration.snapshot.repositoryUnavailableSinceByPath,
-            storageRevision: migration.snapshot.storageRevision,
-            persistenceState: migration.snapshot.persistenceState,
-            pendingItemWidgetSummary: migration.snapshot.pendingItemWidgetSummary,
-            isRefreshing: migration.snapshot.isRefreshing,
-            discoveryWasIncomplete: migration.snapshot.discoveryWasIncomplete,
-            appVersion: migration.snapshot.appVersion,
-            storageFormatVersion: migration.snapshot.storageFormatVersion
-        )
+            return AppGroupData(
+                schemaVersion: migration.snapshot.schemaVersion,
+                generatedAt: migration.snapshot.generatedAt,
+                writtenAt: migration.snapshot.writtenAt,
+                lastSuccessfulRefreshAt: migration.snapshot.lastSuccessfulRefreshAt,
+                historySchemaVersion: migration.snapshot.historySchemaVersion,
+                historyRecordingEnabled: migration.snapshot.historyRecordingEnabled,
+                scanSummary: migration.snapshot.scanSummary,
+                repositories: repos,
+                recentActivityEvents: migration.snapshot.recentActivityEvents,
+                repositoryUnavailableSinceByPath: migration.snapshot.repositoryUnavailableSinceByPath,
+                storageRevision: migration.snapshot.storageRevision,
+                persistenceState: migration.snapshot.persistenceState,
+                pendingItemWidgetSummary: migration.snapshot.pendingItemWidgetSummary,
+                isRefreshing: migration.snapshot.isRefreshing,
+                discoveryWasIncomplete: migration.snapshot.discoveryWasIncomplete,
+                appVersion: migration.snapshot.appVersion,
+                storageFormatVersion: migration.snapshot.storageFormatVersion
+            )
+        }
     }
 
     func togglePin(repoID: String) {

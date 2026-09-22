@@ -128,12 +128,10 @@ enum RepositoryIdentity {
 
     /// Task-scoped reuse map for `canonicalPath(_:)`.
     ///
-    /// The value is installed by `withRefreshCanonicalizationScope(_:)` for the
-    /// dynamic extent of a single refresh and released when that call returns.
-    /// It is never process-lifetime state, never shared across processes, and
-    /// never observable from outside the refresh that created it. Reads from a
-    /// context without a task (or outside the scope) see `nil`, which keeps the
-    /// unbuffered behaviour everywhere else — including the Widget extension.
+    /// The value is installed either for the dynamic extent of one refresh or
+    /// one synchronous post-processing operation, then released on return. It
+    /// is never process-lifetime state or shared across processes. Reads outside
+    /// those scopes see `nil`, including in the Widget extension.
     @TaskLocal private static var activeCanonicalizationScope: CanonicalizationScope?
 
     /// Reuse map for resolved canonical paths within one scope.
@@ -204,6 +202,16 @@ enum RepositoryIdentity {
         _ operation: sending () async -> T
     ) async -> T {
         await $activeCanonicalizationScope.withValue(scope, operation: operation)
+    }
+
+    /// Run one synchronous post-processing operation with a short-lived scope.
+    /// This keeps reuse local to a single filtering/snapshot operation rather
+    /// than extending a refresh scope across MainActor user actions.
+    static func withCanonicalizationScopeSync<T>(
+        _ scope: CanonicalizationScope,
+        _ operation: () -> T
+    ) -> T {
+        $activeCanonicalizationScope.withValue(scope, operation: operation)
     }
 
     /// Run one refresh with a canonicalization scope installed.

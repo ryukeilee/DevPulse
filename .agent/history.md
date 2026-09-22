@@ -416,3 +416,13 @@
 - **剩余风险**：macOS 27 Widget 的最终非占位桌面像素仍需在解锁桌面会话中人工确认；本轮未重新执行签名安装或 GUI 检查。维护记录和归档文件尚未提交，需用户明确授权后再提交。
 
 ---
+
+## Loop 38 — 2026-09-23（applyPins 单次路径规范化复用）
+
+- **问题**：`ScanScheduler.applyPins` 后处理阶段重复规范化相同仓库路径，20 仓库测量为 162 次 computation。
+- **证据**：`RepositoryPathCanonicalizationReuseTests.applyPinsCanonicalizationIsLocalAndEquivalent` 对相同输入使用 `reuseEnabled: false/true` 比较：lookups 均为 162，computations 从 162 降到 20，distinctInputs 为 20，处理后的 `AppGroupData` 相等。
+- **修改**：`RepositoryIdentity.withCanonicalizationScopeSync` 引入同步短作用域；`ScanScheduler.applyPins` 仅在单次调用内启用，不扩展刷新作用域；测试覆盖输出等价及后续 ignored 输入可见。
+- **验证**：`./scripts/verify.sh build`、canonicalization 定向测试（8 tests / 1 suite）、`RepositoryDiscoveryExperienceTests`（34 tests / 1 suite）、`./scripts/verify.sh final`（917 tests / 91 suites，`failedTests: 0`）通过；`git diff --check` 通过。全量验证时并发进程见线程报告。
+- **剩余风险**：`ScanScheduler` 中除 `applyPins` 外的快照规范化路径未纳入本次复用范围；Widget 可读快照路径亦未改动。
+
+---

@@ -438,35 +438,66 @@ struct RepositoryPathCanonicalizationReuseTests {
 
     // MARK: - 4. Known remainder
 
-    /// `ScanScheduler.applyPins()` runs after `execute()` returns, so its
-    /// canonicalization work is outside the refresh scope and is deliberately
-    /// left uncovered. This records the size of that remainder so the boundary
-    /// is measured rather than assumed.
-    @Test func applyPinsWorkRemainsOutsideTheRefreshScope() async throws {
+    /// Mirrors `ScanScheduler.applyPins()` exactly at its path-processing seam:
+    /// filtering, identity migration and sort. Reuse is scoped to that one
+    /// synchronous operation and cannot observe later pin/ignore mutations.
+    @Test func applyPinsCanonicalizationIsLocalAndEquivalent() async throws {
         let timestamp = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-3600))
         let repoCount = 20
         let paths = (0..<repoCount).map { "/devpulse-remainder/repo-\($0)" }
         let data = previousSnapshot(for: paths, timestamp: timestamp)
 
-        func measure(reuseEnabled: Bool) async -> RepositoryIdentity.CanonicalizationScope.Metrics {
+        func process(reuseEnabled: Bool) -> (RepositoryIdentity.CanonicalizationScope.Metrics, AppGroupData) {
             let scope = RepositoryIdentity.CanonicalizationScope(reuseEnabled: reuseEnabled)
-            await RepositoryIdentity.withCanonicalizationScope(scope) {
+            let result = RepositoryIdentity.withCanonicalizationScopeSync(scope) {
                 let scoped = RepositoryScope.filtering(data, excluding: [])
                 let migration = RepositoryIdentityMigration.migrate(snapshot: scoped, pinnedIDs: [])
-                _ = RepositorySorter.sort(migration.snapshot.repositories)
+                var repositories = migration.snapshot.repositories
+                repositories = RepositorySorter.sort(repositories)
+                return AppGroupData(
+                    schemaVersion: migration.snapshot.schemaVersion,
+                    generatedAt: migration.snapshot.generatedAt,
+                    writtenAt: migration.snapshot.writtenAt,
+                    lastSuccessfulRefreshAt: migration.snapshot.lastSuccessfulRefreshAt,
+                    historySchemaVersion: migration.snapshot.historySchemaVersion,
+                    historyRecordingEnabled: migration.snapshot.historyRecordingEnabled,
+                    scanSummary: migration.snapshot.scanSummary,
+                    repositories: repositories,
+                    recentActivityEvents: migration.snapshot.recentActivityEvents,
+                    repositoryUnavailableSinceByPath: migration.snapshot.repositoryUnavailableSinceByPath,
+                    storageRevision: migration.snapshot.storageRevision,
+                    persistenceState: migration.snapshot.persistenceState,
+                    pendingItemWidgetSummary: migration.snapshot.pendingItemWidgetSummary,
+                    isRefreshing: migration.snapshot.isRefreshing,
+                    discoveryWasIncomplete: migration.snapshot.discoveryWasIncomplete,
+                    appVersion: migration.snapshot.appVersion,
+                    storageFormatVersion: migration.snapshot.storageFormatVersion
+                )
             }
-            return scope.metrics
+            return (scope.metrics, result)
         }
 
-        let before = await measure(reuseEnabled: false)
-        let after = await measure(reuseEnabled: true)
+        let before = process(reuseEnabled: false)
+        let after = process(reuseEnabled: true)
         print("canonicalization_scheduler_remainder repos=\(repoCount) "
-              + "before{lookups=\(before.lookups),computations=\(before.computations)} "
-              + "after{lookups=\(after.lookups),computations=\(after.computations)}")
+              + "before{lookups=\(before.0.lookups),computations=\(before.0.computations),distinctInputs=\(before.0.distinctInputs)} "
+              + "after{lookups=\(after.0.lookups),computations=\(after.0.computations),distinctInputs=\(after.0.distinctInputs)}")
 
-        #expect(after.lookups == before.lookups)
-        #expect(after.computations < before.computations)
-        #expect(after.computations == after.distinctInputs)
+        #expect(after.0.lookups == before.0.lookups)
+        #expect(before.0.computations == before.0.lookups)
+        #expect(after.0.computations < before.0.computations)
+        #expect(after.0.computations == after.0.distinctInputs)
+        #expect(after.1 == before.1, "local reuse changed the applyPins processing result")
+
+        // A following invocation gets a new scope and observes changed ignore
+        // input rather than reusing any prior filtered result.
+        let ignoredPath = RepositoryIdentity.canonicalPath(paths[0])
+        let nextScope = RepositoryIdentity.CanonicalizationScope()
+        let next = RepositoryIdentity.withCanonicalizationScopeSync(nextScope) {
+            RepositoryScope.filtering(data, excluding: [ignoredPath])
+        }
+        #expect(next.repositories.count == repoCount - 1)
+        #expect(!next.repositories.contains { $0.path == paths[0] })
     }
 
     // MARK: - 5. Cost of one canonicalization
