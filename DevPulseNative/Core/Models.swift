@@ -56,7 +56,22 @@ enum RepositoryIdentity {
         return path == normalizedPrefix || path.hasPrefix(normalizedPrefix + "/")
     }
 
+    /// Resolve `rawPath` to the canonical form used for repository identity.
+    ///
+    /// Inside a `CanonicalizationScope` — installed for exactly one refresh by
+    /// `withRefreshCanonicalizationScope(_:)` — the result for a given raw
+    /// input is reused, so the filesystem work in `computeCanonicalPath(_:)`
+    /// runs once per distinct input per refresh instead of once per call site.
+    /// Outside a scope this is the unbuffered computation, unchanged.
     static func canonicalPath(_ rawPath: String) -> String {
+        guard let scope = activeCanonicalizationScope else {
+            return computeCanonicalPath(rawPath)
+        }
+        return scope.resolve(rawPath) { computeCanonicalPath($0) }
+    }
+
+    /// Unbuffered canonicalization. Callers must go through `canonicalPath(_:)`.
+    private static func computeCanonicalPath(_ rawPath: String) -> String {
         // Empty or whitespace-only paths cannot be resolved to a real location.
         let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
@@ -107,6 +122,103 @@ enum RepositoryIdentity {
         }
         let username = NSUserName()
         return username.isEmpty ? "/Users" : "/Users/\(username)"
+    }
+
+    // MARK: - Refresh-scoped canonicalization reuse
+
+    /// Task-scoped reuse map for `canonicalPath(_:)`.
+    ///
+    /// The value is installed by `withRefreshCanonicalizationScope(_:)` for the
+    /// dynamic extent of a single refresh and released when that call returns.
+    /// It is never process-lifetime state, never shared across processes, and
+    /// never observable from outside the refresh that created it. Reads from a
+    /// context without a task (or outside the scope) see `nil`, which keeps the
+    /// unbuffered behaviour everywhere else — including the Widget extension.
+    @TaskLocal private static var activeCanonicalizationScope: CanonicalizationScope?
+
+    /// Reuse map for resolved canonical paths within one scope.
+    ///
+    /// `reuseEnabled == false` disables reuse while keeping the counters, which
+    /// reproduces the pre-optimization work exactly. It exists so a test can
+    /// measure the same scenario with and without reuse through one code path.
+    final class CanonicalizationScope: @unchecked Sendable {
+        struct Metrics: Equatable {
+            /// `canonicalPath(_:)` calls served inside the scope.
+            let lookups: Int
+            /// Calls that ran `computeCanonicalPath(_:)` (filesystem access).
+            let computations: Int
+            /// Calls answered from the reuse map instead of recomputing.
+            let reuses: Int
+            /// Distinct raw inputs the scope was asked to resolve.
+            let distinctInputs: Int
+        }
+
+        let reuseEnabled: Bool
+
+        private let lock = NSLock()
+        private var resolved: [String: String] = [:]
+        private var lookups = 0
+        private var computations = 0
+        private var reuses = 0
+
+        init(reuseEnabled: Bool = true) {
+            self.reuseEnabled = reuseEnabled
+        }
+
+        var metrics: Metrics {
+            lock.lock()
+            defer { lock.unlock() }
+            return Metrics(lookups: lookups,
+                           computations: computations,
+                           reuses: reuses,
+                           distinctInputs: resolved.count)
+        }
+
+        func resolve(_ rawPath: String, compute: (String) -> String) -> String {
+            lock.lock()
+            lookups += 1
+            if reuseEnabled, let cached = resolved[rawPath] {
+                reuses += 1
+                lock.unlock()
+                return cached
+            }
+            computations += 1
+            lock.unlock()
+
+            // Compute outside the lock so concurrent callers keep running in
+            // parallel. Two callers racing on the same raw input produce the
+            // same value, so the last write wins harmlessly.
+            let value = compute(rawPath)
+
+            lock.lock()
+            resolved[rawPath] = value
+            lock.unlock()
+            return value
+        }
+    }
+
+    /// Run `operation` with `scope` installed, overriding any outer scope.
+    /// Test/diagnostic entry point for measuring with and without reuse.
+    static func withCanonicalizationScope<T>(
+        _ scope: CanonicalizationScope,
+        _ operation: sending () async -> T
+    ) async -> T {
+        await $activeCanonicalizationScope.withValue(scope, operation: operation)
+    }
+
+    /// Run one refresh with a canonicalization scope installed.
+    /// A nested call inherits the already-installed scope so that exactly one
+    /// reuse map is alive per outermost refresh.
+    static func withRefreshCanonicalizationScope<T>(
+        _ operation: sending () async -> T
+    ) async -> T {
+        if activeCanonicalizationScope != nil {
+            return await operation()
+        }
+        return await $activeCanonicalizationScope.withValue(
+            CanonicalizationScope(),
+            operation: operation
+        )
     }
 
     private static func passwdHomeDirectory() -> String? {

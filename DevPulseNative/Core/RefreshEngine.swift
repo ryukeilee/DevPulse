@@ -110,6 +110,13 @@ actor RefreshEngine {
 
     /// Run a full refresh with stage progress.
     /// Returns best-effort results even if cancelled or timed out.
+    ///
+    /// The refresh runs inside one `RepositoryIdentity` canonicalization scope:
+    /// every `canonicalPath` result needed to identify a repository is computed
+    /// once per distinct input for this refresh instead of once per call site.
+    /// The scope lives exactly as long as this call — a later refresh (including
+    /// one that observes a moved, replaced, pinned or ignored repository)
+    /// resolves paths from scratch.
     func execute(
         config: ScanConfig,
         scanRoots: [String],
@@ -119,6 +126,30 @@ actor RefreshEngine {
         previousSnapshot: AppGroupData? = nil,
         source: ScanRefreshSource = .manual,
         gitCommandRunner: @escaping GitCommandRunner = GitRepositoryScanner.defaultGitCommandRunner
+    ) async -> RefreshResult {
+        await RepositoryIdentity.withRefreshCanonicalizationScope {
+            await self.executeScoped(
+                config: config,
+                scanRoots: scanRoots,
+                knownRepositoryPaths: knownRepositoryPaths,
+                ignoredRepositoryPaths: ignoredRepositoryPaths,
+                forceRepositoryDiscovery: forceRepositoryDiscovery,
+                previousSnapshot: previousSnapshot,
+                source: source,
+                gitCommandRunner: gitCommandRunner
+            )
+        }
+    }
+
+    private func executeScoped(
+        config: ScanConfig,
+        scanRoots: [String],
+        knownRepositoryPaths: [String]?,
+        ignoredRepositoryPaths: Set<String>,
+        forceRepositoryDiscovery: Bool,
+        previousSnapshot: AppGroupData?,
+        source: ScanRefreshSource,
+        gitCommandRunner: @escaping GitCommandRunner
     ) async -> RefreshResult {
         await observationCollector.reset()
         await observationCollector.setSource(String(describing: source))
@@ -177,6 +208,8 @@ actor RefreshEngine {
         // looks up this map, and building it runs canonicalPath — a
         // filesystem check — per previous repository, so the single
         // construction avoids repeated disk access for the same data.
+        // The refresh-scoped reuse map collapses the remaining canonicalPath
+        // calls in this refresh to one computation per distinct input.
         let previousByPath = indexPreviousSnapshots(previousSnapshot)
         let coreResult = await readCoreStatusPriorityBatched(
             paths: isFastFirst
