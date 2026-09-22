@@ -1291,7 +1291,7 @@ extension RefreshEngine {
         persistError: String? = nil,
         widgetSyncError: String? = nil
     ) -> RefreshDiagnostics {
-        let totalGitCalls = (coreMetrics?.gitStatusCount ?? 0) + (extendedMetrics?.completed ?? 0)
+        let totalGitCalls = result.diagnostics.totalGitCalls
         let totalTimeouts = (coreMetrics?.gitTimeoutCount ?? 0)
         let totalCancellations = (coreMetrics?.gitCancelledCount ?? 0)
         let totalFailures = (coreMetrics?.gitFailureCount ?? 0)
