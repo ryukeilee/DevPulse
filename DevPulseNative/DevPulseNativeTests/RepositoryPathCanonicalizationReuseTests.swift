@@ -175,7 +175,9 @@ struct RepositoryPathCanonicalizationReuseTests {
     /// A deterministic scratch layout shared by the before/after comparison:
     /// the same paths in the pristine and the patched build, so the printed
     /// table can be diffed byte for byte.
-    private static let tableScratchPath = "/tmp/devpulse-canon-table"
+    private static let tableScratchPath = FileManager.default.temporaryDirectory
+        .appendingPathComponent("devpulse-canon-table-\(UUID().uuidString)")
+        .path
     private static let tableInputs = [
         "",
         "   ",
@@ -205,7 +207,6 @@ struct RepositoryPathCanonicalizationReuseTests {
     /// Create the deterministic scratch layout used by `tableInputs`.
     private static func prepareTableScratch() throws {
         let fileManager = FileManager.default
-        try? fileManager.removeItem(atPath: tableScratchPath)
         try fileManager.createDirectory(
             atPath: tableScratchPath + "/target",
             withIntermediateDirectories: true
