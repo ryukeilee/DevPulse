@@ -172,9 +172,8 @@ struct RepositoryPathCanonicalizationReuseTests {
               + "reuses=\(metrics.reuses) distinct=\(metrics.distinctInputs)")
     }
 
-    /// A deterministic scratch layout shared by the before/after comparison:
-    /// the same paths in the pristine and the patched build, so the printed
-    /// table can be diffed byte for byte.
+    /// A per-process unique scratch layout. The input forms and table structure
+    /// stay stable, while the unique root keeps concurrent test hosts isolated.
     private static let tableScratchPath = FileManager.default.temporaryDirectory
         .appendingPathComponent("devpulse-canon-table-\(UUID().uuidString)")
         .path
@@ -222,9 +221,9 @@ struct RepositoryPathCanonicalizationReuseTests {
         )
     }
 
-    /// Print `input -> canonicalPath -> id` for a fixed input set so the same
-    /// table produced by an unmodified build can be diffed against this one.
-    /// Printed, never asserted: the assertions live in
+    /// Print `input -> canonicalPath -> id` for a fixed set of input forms.
+    /// The unique scratch root varies per test host. Printed, never asserted:
+    /// the assertions live in
     /// `scopedAndUnscopedCanonicalizationAreByteIdentical`.
     @Test func canonicalizationTableIsStable() async throws {
         try Self.prepareTableScratch()

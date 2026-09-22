@@ -5,7 +5,7 @@
 本次 t-0031 的终局复核与过时内容更正见 §10，且以 §10 为当前状态的权威结论。
 
 - t-0009 核验者立场为只核验、不修复；历史测量保留原样，不追溯改写。
-- t-0031 未改生产代码或测试，只新增本文档的当前复核附录；原始输出保存在
+- t-0031 未改生产代码；除本轮唯一的 canonicalization 测试 fixture 隔离修正外，其余只新增本文档当前复核附录。原始输出保存在
   `.herdr-project/devpulse-t-0031/library/raw-evidence/`（线程工作目录的忽略目录，不随本次 commit 提交）。
 - 操作者提供的 `PROJECT.md` 五条 Acceptance 原文及目标原文逐字收录于 §11；正式判定以 §11 为准。
 
@@ -1214,26 +1214,26 @@ before-current paired deltas (ms): +1, +22, 0, -1, -9
 前两次完整套件在未改测试夹具前均 exit 0，917 / 91 / 0；本轮将测试夹具改为唯一目录后，按要求再次运行完整验证：
 
 ```sh
-DERIVED_DATA_PATH=/tmp/devpulse-t0031-final-revised ./scripts/verify.sh final
+DERIVED_DATA_PATH=/tmp/devpulse-t0031-final-final ./scripts/verify.sh final
 ```
 
 原始输出（命令退出码 `0`）：
 
 ```text
-[verify] Building for testing (DerivedData: /tmp/devpulse-t0031-final-revised)…
+[verify] Building for testing (DerivedData: /tmp/devpulse-t0031-final-final)…
 [verify] Test environment: unsigned (test host writes to an isolated scratch container)
 [verify] Build succeeded
 [verify] Test environment: unsigned (test host writes to an isolated scratch container)
-[verify] Test isolation: container=/var/folders/1z/bw5lw7ds72ngrqfz9fmz48mh0000gn/T//devpulse-appgroup.secY3K defaults=local.devpulse.app.tests.67f240aa-32ba-4143-be91-5f68ae6e4d35
+[verify] Test isolation: container=/var/folders/1z/bw5lw7ds72ngrqfz9fmz48mh0000gn/T//devpulse-appgroup.D4i8I4 defaults=local.devpulse.app.tests.f1bb2257-a9d4-446b-806a-82d45ca873fc
 [verify] Running full test suite
 [verify] full test suite passed
-	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
-✔ Test run with 917 tests in 91 suites passed after 112.099 seconds.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+✔ Test run with 917 tests in 91 suites passed after 106.435 seconds.
 [verify] Final acceptance passed — all checks green
 exit_code=0
 ```
 
-原始完整日志：`current/final-revised.log`；前两轮仍保留于 `current/final-1.log` / `current/final-2.log`。
+原始完整日志：`current/final-final.log`；此前两轮仍保留于 `current/final-1.log` / `current/final-2.log`，第一次夹具修改后的全量在 `current/final-revised.log`。
 “Executed 0 tests”是 xcodebuild XCTest wrapper 的空壳汇总行；Swift Testing 的实际汇总是紧随其后的
 `917 tests in 91 suites passed`，不能把 wrapper 行误作零测试。
 
@@ -1399,4 +1399,4 @@ private static let tableScratchPath = FileManager.default.temporaryDirectory
     .path
 ```
 
-同时移除 `prepareTableScratch()` 先删除固定路径的调用；测试结束仍用 `defer` 清理本次唯一的目录。这样每个测试 host 生成独立 scratch，不触碰其他运行的目录。改动后完整、无签名验证命令与原始输出见 §11.1；结果 **exit 0，917 tests / 91 suites / 0 failures**。`current/final-revised.log` 为此最后一次执行的完整日志。
+同时移除 `prepareTableScratch()` 先删除固定路径的调用；测试结束仍用 `defer` 清理本次唯一的目录。这样每个测试 host 生成独立 scratch，不触碰其他运行的目录。改动后完整、无签名验证命令与原始输出见 §11.1；结果 **exit 0，917 tests / 91 suites / 0 failures**。`current/final-final.log` 为夹具及其注释修订后的最后一次执行的完整日志。
