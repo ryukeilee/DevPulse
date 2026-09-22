@@ -1060,4 +1060,132 @@ struct RefreshEngineIntegrationTests {
         #expect(result.data.repositories.count == 3, "Expected all 3 repos retained, got \(result.data.repositories.count)")
         #expect(result.data.repositories.allSatisfy { $0.resolvedDataSource == .current })
     }
+
+    // MARK: - Idle round observation archive
+
+    /// Protective test for the observation ledger's semantics: an unchanged
+    /// idle round still appends exactly one observation (the append is new
+    /// data: runID/startedAt/overallElapsed/source), and the ring keeps its
+    /// `maxStored = 50` truncation with insert-at-0 ordering.
+    ///
+    /// The ledger is a fixed-size ring of whole-file rewrites, so both the
+    /// append and its byte cost are counted deterministically instead of by
+    /// wall clock. This deliberately pins the behaviour that an earlier
+    /// revision of this change silently dropped (idle rounds no longer being
+    /// recorded), so it cannot regress unnoticed again.
+    @Test func unchangedIncrementalRoundStillAppendsOneObservation() async throws {
+        let root = reposRoot("idle-observation")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        for i in 0..<2 {
+            try createTempGitRepo(at: root.appendingPathComponent("repo-\(i)"))
+        }
+
+        // The archive lives outside the scan root so discovery cannot see it.
+        let archiveDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devpulse-observation-archive-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: archiveDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: archiveDir) }
+        let archive = archiveDir.appendingPathComponent("refresh-observations.json")
+
+        let counter = StoreWriteCounter()
+        let store = RefreshObservationStore(fileURL: archive, writeObserver: { counter.record($0) })
+        let mock = MockGitCommandRunner()
+
+        // Pre-fill the 50-slot ring so a whole-archive rewrite is measured at
+        // the same size scale as the real container file (~63 KB on the
+        // reporting machine). Seeding uses the production store API.
+        for index in 0..<49 {
+            store.append(Self.seedObservation(index: index))
+        }
+        let seededBytes = (try? Data(contentsOf: archive).count) ?? 0
+        counter.reset()
+
+        // Round 1: first refresh ever (no previous snapshot) — one write.
+        let first = await RefreshEngine(observationStoreOverride: store).execute(
+            config: scanConfig(),
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true,
+            source: .manual,
+            gitCommandRunner: mock.runner()
+        )
+        let firstRoundBytes = counter.bytes
+        print("observation_round=1 writes=\(counter.writes) bytes=\(counter.bytes) git_calls=\(first.diagnostics.totalGitCalls)")
+        print("observation_ring_bytes_before_round1=\(seededBytes)")
+        #expect(counter.writes == 1)
+        #expect(firstRoundBytes > 0)
+
+        // Rounds 2–4: identical git output, previous snapshot supplied, no new
+        // repository state. Each round performs real git work and must still be
+        // recorded as its own ledger entry (it is new data, not a repeat).
+        var previous = first.data
+        for round in 2...4 {
+            counter.reset()
+            let result = await RefreshEngine(observationStoreOverride: store).execute(
+                config: scanConfig(),
+                scanRoots: [root.path],
+                knownRepositoryPaths: first.discoveredRepositoryPaths,
+                forceRepositoryDiscovery: false,
+                previousSnapshot: previous,
+                source: .timer,
+                gitCommandRunner: mock.runner()
+            )
+            let ring = store.loadAll()
+            print(
+                "observation_round=\(round) writes=\(counter.writes) bytes=\(counter.bytes) "
+                    + "git_calls=\(result.diagnostics.totalGitCalls) repositories=\(result.data.repositories.count) "
+                    + "ring_count=\(ring.count) newest_source=\(ring.first?.source ?? "nil") "
+                    + "archive_bytes=\((try? Data(contentsOf: archive).count) ?? -1)"
+            )
+            #expect(counter.writes == 1, "an unchanged round must still record its own observation")
+            #expect(counter.bytes > 0)
+            // Ring semantics: 50 entries, newest first, oldest evicted.
+            #expect(ring.count == 50)
+            #expect(ring.first?.source == "timer")
+            #expect(Set(ring.map(\.runID)).count == ring.count)
+            previous = result.data
+        }
+
+        let archiveBytes = (try? Data(contentsOf: archive).count) ?? 0
+        let loaded = store.loadAll()
+        let runIDs = Set(loaded.map(\.runID))
+        print(
+            "observation_ring_count=\(loaded.count) newest_source=\(loaded.first?.source ?? "nil") "
+                + "timer_entries=\(loaded.filter { $0.source == "timer" }.count) "
+                + "seed3_present=\(runIDs.contains("seed-run-3")) seed2_present=\(runIDs.contains("seed-run-2")) "
+                + "seed0_present=\(runIDs.contains("seed-run-0")) "
+                + "archive_bytes=\(archiveBytes) round1_write_bytes=\(firstRoundBytes)"
+        )
+        #expect(archiveBytes > 0)
+        #expect(loaded.count == 50)
+        #expect(loaded.first?.source == "timer")
+        // Three idle rounds appended three entries and evicted three oldest ones
+        // (seed-0 in round 2, seed-1 in round 3, seed-2 in round 4).
+        #expect(loaded.filter { $0.source == "timer" }.count == 3)
+        #expect(runIDs.contains("seed-run-3"))
+        #expect(!runIDs.contains("seed-run-2"))
+        #expect(!runIDs.contains("seed-run-0"))
+    }
+
+    /// Deterministic filler observation used to size the ring.
+    private static func seedObservation(index: Int) -> RefreshObservation {
+        RefreshObservation(
+            schemaVersion: RefreshObservation.currentSchemaVersion,
+            runID: "seed-run-\(index)",
+            startedAt: "2026-01-01T00:00:00Z",
+            overallElapsed: 0.5,
+            totalGitCalls: 2,
+            stageSpans: [:],
+            repositoryTiming: [:],
+            repositoryCount: 2,
+            currentRepositoryCount: 2,
+            reusedSnapshotCount: 0,
+            totalCPU: 0,
+            peakMemoryMB: 0,
+            totalDiskWritesKB: 0,
+            wasCancelled: false,
+            wasTimedOut: false,
+            source: "seed"
+        )
+    }
 }

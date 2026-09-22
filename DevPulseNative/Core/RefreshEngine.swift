@@ -44,7 +44,13 @@ actor RefreshEngine {
     }
     private let logger = Logger(subsystem: "local.devpulse.app", category: "RefreshEngine")
 
-    init() {
+    /// Optional observation-store override used by tests to count writes
+    /// deterministically against a temporary file. `nil` (the default) keeps
+    /// the production store resolution unchanged.
+    private let observationStoreOverride: RefreshObservationStore?
+
+    init(observationStoreOverride: RefreshObservationStore? = nil) {
+        self.observationStoreOverride = observationStoreOverride
         var continuation: AsyncStream<RefreshProgress>.Continuation!
         progress = AsyncStream { continuation = $0 }
         progressContinuation = continuation
@@ -428,8 +434,14 @@ actor RefreshEngine {
         // Only persist the observation when meaningful git work was performed
         // or resource data was collected — skip for cancelled/no-op scans to
         // reduce unnecessary disk I/O.
+        //
+        // Deliberately unconditional otherwise: every append carries a new
+        // runID/startedAt/overallElapsed, so the written bytes can never be
+        // identical to the existing archive. Skipping such a round would drop
+        // new diagnostic data (including idle-round steady-state cost), so no
+        // content-equality skip is applied here.
         if obs.totalGitCalls > 0 || obs.totalCPU > 0 || obs.totalDiskWritesKB > 0 {
-            let store = RefreshObservationStore()
+            let store = observationStoreOverride ?? RefreshObservationStore()
             store.append(obs)
         }
 

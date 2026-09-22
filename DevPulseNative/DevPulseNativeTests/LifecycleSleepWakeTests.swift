@@ -30,8 +30,27 @@ private final class MockScanExecutor: @unchecked Sendable {
     private var _shouldHang = false
     private var _executionCount = 0
     private var _hangResumeContinuation: CheckedContinuation<Void, Never>?
+    /// Number of scans that have parked in the hang state. Publishing this
+    /// count makes "the scan is actually hanging" observable, so tests can
+    /// wait for it instead of guessing with a fixed sleep.
+    private var _parkedScanCount = 0
 
     var executionCount: Int { lock.withLock { _executionCount } }
+
+    /// `true` once at least one scan has parked in its hang state.
+    var isHanging: Bool { lock.withLock { _parkedScanCount > 0 } }
+
+    /// Wait, up to `deadline`, for a scan to park in its hang state so that a
+    /// following `resumeHangingScan()` cannot be lost. Returns `false` if no
+    /// scan parked in time.
+    func waitUntilHanging(deadline: Duration = .seconds(10)) async -> Bool {
+        let start = ContinuousClock.now
+        while !isHanging {
+            if ContinuousClock.now - start >= deadline { return false }
+            try? await Task.sleep(nanoseconds: 1_000_000) // 1ms poll
+        }
+        return true
+    }
 
     func setResult(_ result: (data: AppGroupData, warnings: [String], discoveredRepositoryPaths: [String])) {
         lock.withLock { _result = result }
@@ -46,6 +65,10 @@ private final class MockScanExecutor: @unchecked Sendable {
         lock.withLock { _shouldHang = hang }
     }
 
+    /// Resume a scan parked in the hang state. Must only be called after
+    /// `isHanging`/`waitUntilHanging` reported a parked scan; a resume
+    /// delivered before a scan parks is not remembered and would strand the
+    /// scan (see `waitUntilHanging`).
     func resumeHangingScan() {
         let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
             let c = _hangResumeContinuation
@@ -66,9 +89,14 @@ private final class MockScanExecutor: @unchecked Sendable {
             // Check for hang mode
             let shouldHang = mock.lock.withLock { mock._shouldHang }
             if shouldHang {
+                // A scan that was cancelled before it parked must not park:
+                // nothing would ever resume it, and the scheduler would stay
+                // in `isScanning == true` forever.
+                guard !Task.isCancelled else { return emptyScanResult }
                 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                     mock.lock.lock()
                     mock._hangResumeContinuation = continuation
+                    mock._parkedScanCount += 1
                     mock.lock.unlock()
                 }
                 // After resume, check for cancellation
@@ -94,6 +122,30 @@ private func makeTestScheduler(
         commandMode: true,
         scanExecution: executor.makeExecution()
     )
+}
+
+/// Wait, with an upper bound, until an observable condition becomes true.
+///
+/// Fixed wall-clock sleeps are not used to synchronise with the scheduler in
+/// this file: a budget that is too tight fails under load, and one that is
+/// generous enough wastes time on every run. Polling an observable condition
+/// with a deadline keeps the assertions exactly as strong (the caller still
+/// asserts the condition afterwards, so a condition that never becomes true
+/// fails after the deadline) while removing the timing guesswork.
+///
+/// `deadline` must stay far below the scheduler's own watchdog
+/// (`scanTimeout + 30s`, i.e. >= 60s) so a genuine regression is reported as an
+/// assertion failure rather than masked by production recovery.
+@MainActor
+private func waitUntil(
+    _ condition: () -> Bool,
+    deadline: Duration = .seconds(5)
+) async {
+    let end = ContinuousClock.now + deadline
+    while !condition() {
+        if ContinuousClock.now >= end { return }
+        try? await Task.sleep(nanoseconds: 1_000_000) // 1ms poll
+    }
 }
 
 /// Create an AppGroupData with a single repository for testing.
@@ -181,10 +233,19 @@ private func snapshotWithRepository(
         executor.setHanging(true) // Scan hangs until we resume it
         let scheduler = makeTestScheduler(scanExecutor: executor)
 
-        // Start a scan
+        // Start a scan (runs in a detached task inside ScanScheduler)
         scheduler.scanNow(source: .manual)
-        // Give the scan time to start (Task.detached)
-        await Task.yield()
+
+        // Wait, with a bound, until the scan has actually parked in its hang
+        // state. Two reasons this handshake is required rather than optional:
+        // 1. `resumeHangingScan()` does not remember an early resume, so
+        //    resuming before the scan parks strands it and leaves
+        //    `isScanning == true` forever (the historical flake).
+        // 2. The scenario under test is cancelling an *active* scan; a scan
+        //    that has not entered its execution yet would not be exercised.
+        let parked = await executor.waitUntilHanging(deadline: .seconds(10))
+        #expect(parked,
+                "Scan must park in its hang state before sleep is simulated")
 
         // Suspend for sleep — should cancel the hanging scan
         scheduler.suspendForSleep()
@@ -192,8 +253,18 @@ private func snapshotWithRepository(
 
         // Resume the hanging scan so its cancellation can complete
         executor.resumeHangingScan()
-        // Wait for cancellation to propagate
-        try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+
+        // Wait, with a bound, for the cancellation to propagate to the
+        // scheduler's observable scanning state. This is a poll of production
+        // state with a deadline, not a fixed sleep: a cancellation that never
+        // propagates still fails the assertion below after the deadline.
+        // Observed propagation is ~1-2ms; the 5s deadline is ~3000x that and
+        // stays far below the scheduler's own watchdog (scanTimeout + 30s), so
+        // a genuine regression still fails instead of passing silently.
+        let cancellationDeadline = Date().addingTimeInterval(5)
+        while scheduler.isScanning, Date() < cancellationDeadline {
+            try? await Task.sleep(nanoseconds: 1_000_000) // 1ms poll
+        }
         await Task.yield()
 
         #expect(scheduler.isScanning == false,
@@ -435,17 +506,37 @@ private func snapshotWithRepository(
 
         // Start a scan
         scheduler.scanNow(source: .manual)
-        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        // Wait, with a bound, until the scan has actually parked in its hang
+        // state before simulating sleep — a handshake, not a fixed 50ms sleep.
+        // Two reasons this is required rather than optional:
+        // 1. `resumeHangingScan()` does not remember a resume delivered before
+        //    a scan parks, so resuming too early would strand the scan and
+        //    leave `isScanning == true` forever (the same lost-wakeup race that
+        //    `suspendForSleepCancelsActiveScan` was fixed for).
+        // 2. The scenario under test is cancelling an *active* scan; a scan that
+        //    has only been requested would not be exercised.
+        let parked = await executor.waitUntilHanging(deadline: .seconds(10))
+        #expect(parked,
+                "Scan must park in its hang state before sleep is simulated")
         #expect(scheduler.isScanning == true)
 
         // Simulate sleep — this cancels the scan
         scheduler.suspendForSleep()
         executor.resumeHangingScan() // Allow cancellation to complete
-        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        // Wait, with a bound, for the cancellation to reach the scheduler's
+        // observable scanning state instead of assuming a fixed 50ms covers the
+        // off-main unwinding plus the MainActor hop under load. Observed
+        // propagation is ~1-2ms; the 5s bound is >1000x that and stays far
+        // below the scheduler's watchdog (scanTimeout + 30s >= 60s), so a
+        // cancellation that never propagates still fails below.
+        await waitUntil { scheduler.isScanning == false }
+        await Task.yield()
 
         // After sleep cancellation, state should be clean
         #expect(scheduler.isScanning == false,
-                "Scan should be cancelled after sleep")
+                "Scan should still be cancelled after sleep (waited up to 5s)")
 
         // Wake up — should trigger a recovery refresh
         scheduler.resumeAfterWake()
@@ -649,11 +740,18 @@ private func snapshotWithRepository(
         // Trigger wake handler directly
         scheduler.handleLifecycleRefresh(.wake)
 
-        // Allow deferred scan (200ms coalescing) to fire
-        try? await Task.sleep(nanoseconds: 350_000_000)
+        // Wait, with a bound, for the coalesced scan to actually execute
+        // instead of assuming a fixed 350ms covers the 200ms coalescing
+        // debounce + 50ms mock delay + MainActor hops. The old 350ms budget
+        // left only ~90ms of margin and failed under load; the 5s bound is
+        // ~19x the observed unloaded duration (~0.26s) and stays far below the
+        // scheduler's watchdog (scanTimeout + 30s >= 60s), so a wake event that
+        // never runs a scan still fails below.
+        await waitUntil { executor.executionCount >= 1 }
 
         // A scan should have been executed
-        #expect(executor.executionCount >= 1)
+        #expect(executor.executionCount >= 1,
+                "Expected at least one scan execution within 5s of the wake event")
     }
 
     @Test("path availability recovery triggers scan when new repos accessible")
@@ -668,11 +766,18 @@ private func snapshotWithRepository(
             .pathAvailabilityChanged(rootPath: "/tmp/new-path", isAvailable: true)
         )
 
-        // Allow coalesced scan to fire
-        try? await Task.sleep(nanoseconds: 350_000_000)
+        // Wait, with a bound, for the coalesced scan to actually execute
+        // instead of assuming a fixed 350ms covers the 200ms coalescing
+        // debounce + 50ms mock delay + MainActor hops. The old 350ms budget
+        // left only ~90ms of margin and failed 4/12 runs under load; the 5s
+        // bound is ~19x the observed unloaded duration (~0.26s) and stays far
+        // below the scheduler's watchdog (scanTimeout + 30s >= 60s), so a path
+        // event that never runs a scan still fails below.
+        await waitUntil { executor.executionCount >= 1 }
 
         // Path recovery should trigger a scan
-        #expect(executor.executionCount >= 1)
+        #expect(executor.executionCount >= 1,
+                "Expected at least one scan execution within 5s of the path-availability event")
     }
 }
 

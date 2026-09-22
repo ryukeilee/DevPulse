@@ -528,9 +528,19 @@ struct ActivityEventStore {
     let fileURL: URL
     let capacity: Int
 
-    init(fileURL: URL, capacity: Int = defaultCapacity) {
+    /// Observation-only hook invoked with the byte count of every successful
+    /// whole-file write. `nil` (the default) leaves production behaviour and
+    /// semantics untouched; tests use it to count writes deterministically.
+    let writeObserver: (@Sendable (Int) -> Void)?
+
+    init(
+        fileURL: URL,
+        capacity: Int = defaultCapacity,
+        writeObserver: (@Sendable (Int) -> Void)? = nil
+    ) {
         self.fileURL = fileURL
         self.capacity = max(capacity, 1)
+        self.writeObserver = writeObserver
     }
 
     static func live() -> ActivityEventStore? {
@@ -587,7 +597,9 @@ struct ActivityEventStore {
                 at: directory,
                 withIntermediateDirectories: true
             )
-            try encoder.encode(archive).write(to: fileURL, options: .atomic)
+            let data = try encoder.encode(archive)
+            try data.write(to: fileURL, options: .atomic)
+            writeObserver?(data.count)
             return .success(normalizedEvents)
         } catch {
             return .failure(.writeFailed(error.localizedDescription))
