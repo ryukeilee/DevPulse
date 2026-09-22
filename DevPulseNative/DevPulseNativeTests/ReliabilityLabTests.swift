@@ -965,6 +965,19 @@ private final class ActivityArchiveBenchmarkFixture: @unchecked Sendable {
         while counter.writes < 2, Date() < writesDeadline {
             try? await Task.sleep(for: .milliseconds(10))
         }
+        // Let both completion callbacks reach the MainActor before the next
+        // unchanged round. The pre-fix implementation restores the older
+        // empty list here, causing that next round to write a 46-byte archive.
+        try? await Task.sleep(for: .milliseconds(100))
+        _ = scheduler.recordActivityEvents(
+            previous: changed,
+            current: changed,
+            observedAt: Self.timestamp
+        )
+        let finalWritesDeadline = Date().addingTimeInterval(2)
+        while counter.writes < 3, Date() < finalWritesDeadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
 
         let loaded = try store.load().get()
         print(
