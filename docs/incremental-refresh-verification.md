@@ -1,32 +1,31 @@
 # 增量刷新性能改动：集成与终局验收核验
 
-本文档是 Goal「在不改变现有功能和数据正确性的前提下，优化日常增量刷新性能」的
-**独立终局核验记录**。它由核验线程 `hp/devpulse/t-0009` 产出，可以脱离任何线程报告单独
-阅读：每条结论都附有可复核的命令、原始输出与临时日志路径。
+本文档主体 §1–§9 是核验线程 `hp/devpulse/t-0009` 对当时 integration-verify 状态的历史记录，
+其原始范围截至当时的集成 tip；旧结论不得自动视为 `e221536` 或 C5 交付状态的当前事实。
+本次 t-0031 的终局复核与过时内容更正见 §10，且以 §10 为当前状态的权威结论。
 
-- 核验者立场：**只核验，不修复**。核对中发现的所有问题都按原样记录；未修改任何生产代码、
-  测试或断言，未调整签名设置，未跳过测试。
-- 本分支只新增本文件。
+- t-0009 核验者立场为只核验、不修复；历史测量保留原样，不追溯改写。
+- t-0031 未改生产代码或测试，只新增本文档的当前复核附录；原始输出保存在
+  `.herdr-project/devpulse-t-0031/library/raw-evidence/`（线程工作目录的忽略目录，不随本次 commit 提交）。
+- 本次执行工作树中不存在 `PROJECT.md`（`git ls-tree HEAD PROJECT.md` 无输出）；因此 §10 明确区分
+  「对既有核验文档中标准摘要的条件性评估」和「无法逐字核对 PROJECT.md 原文的正式判定」，不冒充引用原文。
 
 ---
 
 ## 0. 判定总览
 
-| # | 验收标准（原文摘要） | 判定 | 主要依据 |
+| # | 验收标准（既有摘要；PROJECT.md 原文缺失，见 §10.1） | 当前状态 | 依据 |
 | --- | --- | --- | --- |
-| 1 | 不改功能与数据正确性；既有验证入口与全部单元测试通过；共享快照/CAS 语义与既有行为测试不变；无新增旁路写入 | **通过**（在 §9 显式写出的豁免口径下） | §4（全量比对）、§5（边界与旁路写入） |
-| 2 | 基于现有基准，同机同命令给出改动前后对比数字，附命令与原始输出 | **通过** | §2、§3（A/B/C 三组对比均附命令与原始输出） |
-| 3 | 刷新耗时 / Git 子进程调用次数 / 资源占用三项中至少一项有超出噪声范围的改善，并说明噪声估计与重复测量方法 | **通过**（改善落在共享快照 commit 的确定性 I/O 与 commit 墙钟；扫描器级耗时、Git 调用次数、资源占用均**未移动**） | §2（A：F_FULLFSYNC 6→4、写入 3→2、整档解码 5→1）；§3.3（commit 中位数 39.5→29.9 ms） |
-| 4 | 其他关键基准场景无 `RegressionGate` 判定的回退，未出现为改善单点指标而恶化的其他关键指标 | **通过**（限「有可无头运行入口的场景」）；未接入口的 `continuousManualRefresh` 为**无法判定** | §3.4（C：`checkNoResourceGrowth` / `checkRegression` 全部 `isRegression=false`，正向对照 +30% 为 `true`） |
-| 5 | 只消除重复工作，定位到最高实际开销（有文件/符号级证据），而非凭猜测重构 | **通过** | §6（文件:符号级证据 + 真实耗时量级） |
+| 1 | 不改功能与数据正确性；测试通过；共享快照/CAS 不变；无新增旁路写入 | **不能判定完整原标准**；两次全量各 917/91/0，生产 diff 未见旁路写入 | §10.2、§10.5 |
+| 2 | 同机同命令改动前后基准对比 | **不能判定原标准字面条件**；scanner 指标对噪声无显著改善，C5 确定性运算计数减少 | §10.3 |
+| 3 | 刷新耗时 / Git 调用 / 资源占用至少一项超噪声改善 | **不能判定原标准字面条件**；scanner 耗时、Git 次数、RSS/footprint 均未证实改善；C5 reduction 是 canonicalization 计算次数而非三项之一 | §10.3 |
+| 4 | 其他关键场景 RegressionGate 无回退 | **不能判定全部场景**；已运行的适用 gates 通过，若干场景无可运行入口且 Gate 有假阴性局限 | §10.4 |
+| 5 | 文件/符号级消除最高实际开销 | **不能判定原标准字面内容**；C1–C5 有实现与定向测试证据，端到端总体成本未全量测量 | §10.5 |
 
-**本次改动实际改善的指标**：`SharedSnapshotStore` 一次 commit 的写次数、`F_FULLFSYNC`
-次数与 commit 墙钟中位数；一轮刷新内 `RepositoryHistoryStore` 的整档 JSON 解码次数与历史
-读取耗时。
-
-**本次改动没有改善的指标**：`GitRepositoryScanner` 扫描器级增量刷新耗时
-（`incremental_elapsed_ms`）、Git 子进程调用次数（`incremental_git_calls`）、
-`xcodebuild` 命令级 RSS / footprint。这三项在噪声内未移动，本文档不把它们包装成改善。
+**历史集成版（截至 t-0009 当时）的观察**：`SharedSnapshotStore` commit 的结构计数与该时点基准
+见 §2–§3；不可外推到本次 C5 终局的完整刷新耗时。t-0031 在同一既有 scanner 脚本下重测的结果见
+§10.3。该 scanner 脚本不覆盖 `RefreshEngine` 内的路径规范化、`ScanScheduler`、历史存储或
+`SharedSnapshotStore`，任何单项结果均须按其真实边界解释。
 
 ---
 
@@ -910,8 +909,9 @@ git diff origin/main...HEAD -U0 | rg -n 'isRefreshing'
    环境与用户数据。
 4. **未覆盖** 多机器 / 多会话的长期稳定性；本核验为单机单会话（约 50 分钟，负载均值 3.2–3.5），
    且以交替测量抵消环境漂移。
-5. 全量套件在本机**退出码为 1**（pristine main 同样 6 个 issue）。标准 1 中「退出码 0」的字面
-   要求在当前环境下无法满足，故按 §9 的显式豁免口径判定，而不是默认套用。
+5. **历史记录，适用范围仅限 t-0009 当时的 integration-verify 与 pristine `7f29c0f`**：当时全量
+   分别为 899 / 89 / 5–6 issues 与 893 / 89 / 6 issues。该结论已被后续 `e221536` 测试隔离改动
+   取代；当前 C5 交付状态的两次实测为 917 / 91 / 0，见 §10.2。旧数字与失败集保留作历史，不得再写成当前结论。
 6. B 的三项资源 / 耗时指标在噪声内未移动；本文档不主张它们改善。
 7. `/tmp` 下的原始日志会被系统清理，因此已在库目录保留副本（§1.4）。
 8. C 的独立性有限：`checkNoResourceGrowth` 的「无回退」结论与 §3.3 的基准共用同一组数字，
@@ -919,7 +919,7 @@ git diff origin/main...HEAD -U0 | rg -n 'isRefreshing'
 
 ---
 
-## 9. 标准 1 的豁免口径（显式写出）
+## 9. 历史记录：标准 1 的豁免口径（仅适用 e221536 之前的状态）
 
 标准 1 的**原文**包含两项要求：
 
@@ -927,9 +927,10 @@ git diff origin/main...HEAD -U0 | rg -n 'isRefreshing'
    单元测试通过，退出码 0」；
 2. 「共享快照 / CAS 语义与既有行为测试不变，无新增旁路写入」。
 
-**第 1 项的字面要求（退出码 0）在当前环境下无法满足**：pristine main（`7f29c0f`）在**本次
-核验内重跑**即为 `✘ Test run with 893 tests in 89 suites failed after 45.250 seconds with
-6 issues`（等价入口退出码 1）。这 6 个 issue 是环境相关的既有失败，与本次改动无关。
+**历史结论（仅适用于 e221536 之前的验证脚本和测试隔离状态）**：pristine main（`7f29c0f`）当时实测
+`✘ Test run with 893 tests in 89 suites failed after 45.250 seconds with 6 issues`（等价入口退出码 1）。
+该结论是历史事实，不是当前环境结论。`e221536` 加入一次性 App Group 容器与一次性 suite 的测试隔离后，
+本机 unsigned 全量可以退出码 0；t-0031 对 C5 最终交付状态连续两次重新验证通过，详见 §10.2。
 
 因此本条的实际判定口径为（本节即显式豁免声明）：
 
@@ -939,8 +940,7 @@ git diff origin/main...HEAD -U0 | rg -n 'isRefreshing'
 > (c) 新增的测试全部通过；
 > (d) 共享快照 / CAS 语义相关既有行为测试全部通过且无新增旁路写入。
 
-**依据**：§4.3 的六项逐条比对满足 (a)(b)；§4.2 的 `899 − 893 = 6` 且 6 个新测试全部通过满足
-(c)；§5.2–§5.3 满足 (d)。
+**历史依据（只对应上述旧提交）**：§4.3 的六项逐条比对满足 (a)(b)；§4.2 的 `899 − 893 = 6` 且 6 个新增测试全部通过满足 (c)；§5.2–§5.3 满足 (d)。当前不得沿用这套旧失败集合或将豁免当成现行前提。
 
 **该豁免不覆盖的情形**（出现即判不通过）：任何不在基线清单内的新失败；任何同名测试断言文本
 发生变化；任何既有测试被跳过 / 改写断言 / 通过调整签名设置绕过。本次核验**均未出现**。
@@ -948,3 +948,255 @@ git diff origin/main...HEAD -U0 | rg -n 'isRefreshing'
 **该豁免的剩余风险**：根因已由机制隔离实验与签名对照证实；详见
 [`docs/main-test-baseline.md`](main-test-baseline.md)。其中 5 项是无签名 test host 缺少 App Group
 entitlement 的环境假象，另 1 项是与签名无关的既有 SleepWake 时序 flake。
+
+---
+
+## 10. t-0031 终局复核（2026-09-23；当前交付 `2db9218`）
+
+本节替代 §0 的旧「当前」总结与 §8.5 / §9 的旧豁免结论。§1–§9 中当时的原始数据与失败记录
+不删改，但只适用于旧集成核验提交；本节的当前测试、基准、Gate 和静态审计原始文件保存于线程
+证据目录 `.herdr-project/devpulse-t-0031/library/raw-evidence/`。
+
+### 10.1 判定边界：项目标准原文不可用
+
+复核命令：
+
+```sh
+git ls-tree --name-only HEAD PROJECT.md
+```
+
+原始输出为空（退出码 0）。当前工作目录的 `PROJECT.md` 不存在，`HEAD` 树中也没有该文件；因此
+无法核对用户所指「5 条标准」的逐字原文，亦不能声称本节表格是 PROJECT.md 原文引用。以下编号
+对应本文件旧 §0 的五条摘要和本线程 brief 中给出的要求，结论是对这些可见摘要的复证；就
+PROJECT.md 的正式逐条符合性，五条均标 **不能判定（规范原文缺失）**。缺失的文件是正式验收的
+阻塞项，不以猜测补写。
+
+另核对起点：`git rev-parse 7f29c0f 2db9218 origin/main` 输出依次为
+`7f29c0f24266fc3014c363671b2aeca8fdafee6c`、
+`2db9218a8bcd9f167a8d790fb916cb6a0e71c8f0`、
+`e22153642e2dd0607bfd8d055ba7b51ced0d1128`。当前 tip `2db9218` 是 `e221536` + C5；改动前
+基线仍是 `7f29c0f`。
+
+### 10.2 标准 1 摘要：测试通过与写入边界
+
+独立 DerivedData 下连续两次实际运行：
+
+```sh
+DERIVED_DATA_PATH=/tmp/devpulse-t0031-final-1 ./scripts/verify.sh final
+DERIVED_DATA_PATH=/tmp/devpulse-t0031-final-2 ./scripts/verify.sh final
+```
+
+第 1 次原始输出（退出码 `0`）：
+
+```text
+[verify] Building for testing (DerivedData: /tmp/devpulse-t0031-final-1)…
+[verify] Test environment: unsigned (test host writes to an isolated scratch container)
+[verify] Build succeeded
+[verify] Test environment: unsigned (test host writes to an isolated scratch container)
+[verify] Test isolation: container=/var/folders/1z/bw5lw7ds72ngrqfz9fmz48mh0000gn/T//devpulse-appgroup.cClpP2 defaults=local.devpulse.app.tests.27502434-7087-403b-8116-f3115f3886cd
+[verify] Running full test suite
+[verify] full test suite passed
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds.
+✔ Test run with 917 tests in 91 suites passed after 107.866 seconds.
+[verify] Final acceptance passed — all checks green
+exit_code=0
+```
+
+第 2 次原始输出（退出码 `0`）：
+
+```text
+[verify] Building for testing (DerivedData: /tmp/devpulse-t0031-final-2)…
+[verify] Test environment: unsigned (test host writes to an isolated scratch container)
+[verify] Build succeeded
+[verify] Test environment: unsigned (test host writes to an isolated scratch container)
+[verify] Test isolation: container=/var/folders/1z/bw5lw7ds72ngrqfz9fmz48mh0000gn/T//devpulse-appgroup.1l3qk8 defaults=local.devpulse.app.tests.0e965611-8ddf-43c8-ae13-d0a7486db854
+[verify] Running full test suite
+[verify] full test suite passed
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds.
+✔ Test run with 917 tests in 91 suites passed after 106.445 seconds.
+[verify] Final acceptance passed — all checks green
+exit_code=0
+```
+
+Thus current claim is **exit 0, 917 tests / 91 suites / failedTests 0, 2/2 runs**. Each run used a distinct
+DerivedData path and the script's disposable App Group container + preferences suite. Raw full command output
+is in `current/final-1.log`, `current/final-2.log`.
+
+C5-specific equivalence / deterministic-count command (same unsigned test host isolation, isolated build):
+
+```sh
+xcodebuild -project DevPulseNative/DevPulseNative.xcodeproj -scheme DevPulse -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath /tmp/devpulse-t0031-current-dd \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+  -only-testing:DevPulseTests/RepositoryPathCanonicalizationReuseTests test-without-building
+```
+
+原始关键输出，退出码 `0`：
+
+```text
+canonicalization_equivalence inputs=30 lookups=60 computations=29 reuses=31 distinct=29
+canonicalization repos=5 before{lookups=72,computations=72,reuses=0,distinct=6} after{lookups=72,computations=6,reuses=66,distinct=6}
+canonicalization repos=20 before{lookups=282,computations=282,reuses=0,distinct=21} after{lookups=282,computations=21,reuses=261,distinct=21}
+✔ Test incrementalRefreshComputesEachDistinctPathOnce() passed after 2.119 seconds.
+canonicalization_scheduler_remainder repos=20 before{lookups=162,computations=162} after{lookups=162,computations=20}
+canonicalization_cost per_call_us=54.68 samples=1000 total_ms=54.7 loadavg=5.29/4.79/4.94
+✔ Test run with 8 tests in 1 suite passed after 2.280 seconds.
+```
+
+新增 C5 测试逐输入验证 canonical path 与 ID 不变，refresh 返回 repository digest / warning 不变，scope
+不跨 refresh；也测出 `applyPins` 仍在 scope 外。这些通过不替代全量测试，但与两次全量一致。
+
+**delivery diff 静态旁路写入审计**只针对交付提交 `HEAD=2db9218` 的新增行，命令：
+
+```sh
+git show --format= --unified=0 HEAD | rg '^\+' | rg -v '^\+\+\+' | rg -n 'Process\(|ProcessRunner|\.write\(|AppGroupStore|removeItem|createDirectory|rename'
+```
+
+完整原始命中保存在 `current/diff-audit.txt`；共有 20 行（重复命中按原始 grep 行保留），归类如下：
+
+- `Process()`：仅 `RepositoryPathCanonicalizationReuseTests.swift` 的 `runGit` fixture helper，执行
+  `/usr/bin/git init/config/add/commit` 来构造**测试临时仓库**；没有新增生产 `Process` / `ProcessRunner`。
+- `.write(`：仅测试 fixture 写临时 README / 表格文件，不是 App Group / snapshot 写入。
+- `createDirectory`：仅建立测试 scratch 仓库、符号链接目标与临时 fixture。
+- `removeItem`：仅测试 `defer` 清理 scratch；但 `canonicalizationTableIsStable` 使用固定
+  `/tmp/devpulse-canon-table`，`prepareTableScratch()` 会先 `removeItem(atPath:)`，测试结束再删除。
+  这是确定的测试临时路径碰撞风险（如果该路径原先被其他主体使用会被覆盖/删除）；没有在本轮修改测试，
+  也不把它描述为生产旁路写入。需要单独消除此测试隔离风险。
+- `ProcessRunner`、`AppGroupStore`、`rename`：无命中。
+
+结论限于**没有新增生产旁路写入**；不能表述成「新增 diff 完全没有文件操作」。上述固定 `/tmp`
+fixture 风险需保留在剩余风险中。
+
+### 10.3 标准 2 / 3 摘要：同命令对比、噪声与可测范围
+
+改动前由 `git archive 7f29c0f | tar -x -C /tmp/devpulse-t0031-before-source` 导出到 `/tmp`，
+未切换、删除或改动任何其他检出。把同一个 `scripts/measure-incremental-refresh.sh` 放入导出目录，
+两边均独立构建并运行同一入口；改动前构建命令以 `build-for-testing` 完成，构建原始日志
+`before/build.log`。测量命令完全相同，仅输入树、DerivedData 与输出位置各自隔离：
+
+```sh
+# before：
+cd /tmp/devpulse-t0031-before-source
+DERIVED_DATA_PATH=/tmp/devpulse-t0031-before-dd RUNS=5 \
+OUTPUT_DIR=/Users/ryukeili/.herdr/worktrees/DevPulse/hp-devpulse-t-0031-5/.herdr-project/devpulse-t-0031/library/raw-evidence/before/measure \
+./scripts/measure-incremental-refresh.sh
+
+# current：从线程工作目录运行
+cd /Users/ryukeili/.herdr/worktrees/DevPulse/hp-devpulse-t-0031-5
+DERIVED_DATA_PATH=/tmp/devpulse-t0031-current-dd RUNS=5 \
+OUTPUT_DIR=/Users/ryukeili/.herdr/worktrees/DevPulse/hp-devpulse-t-0031-5/.herdr-project/devpulse-t-0031/library/raw-evidence/current/measure \
+./scripts/measure-incremental-refresh.sh
+```
+
+改动前原始样本 / 汇总：
+
+```text
+1  37  4  179765248  87573464
+2  38  4  179961856  88032216
+3  38  4  180240384  88343512
+4  37  4  180535296  88802264
+5  49  4  180748288  88507304
+metric                         mean          stddev_population  min       max       n
+incremental_elapsed_ms         39.800        4.622              37        49        5
+incremental_git_calls          4.000         0.000              4         4         5
+command_max_rss_bytes           180250214.400 359941.229         179765248 180748288 5
+command_peak_footprint_bytes    88251752.000  420728.143         87573464  88802264  5
+```
+
+交付状态原始样本 / 汇总：
+
+```text
+1  36  4  179912704  87507928
+2  38  4  179847168  88015808
+3  37  4  180404224  88556504
+4  35  4  180682752  88851416
+5  37  4  181026816  88523712
+metric                         mean          stddev_population  min       max       n
+incremental_elapsed_ms         36.600        1.020              35        38        5
+incremental_git_calls          4.000         0.000              4         4         5
+command_max_rss_bytes           180374732.800 450056.283         179847168 181026816 5
+command_peak_footprint_bytes    88291073.600  474899.086         87507928  88851416  5
+```
+
+并另作 **5 组交替配对**（每次独立运行均重新创建测试临时 Git 仓库；`current → before`），原始
+`elapsed_ms / git_calls` 配对如下：
+
+```text
+pair 1: current 48 / 4, before 49 / 4
+pair 2: current 37 / 4, before 59 / 4
+pair 3: current 37 / 4, before 37 / 4
+pair 4: current 38 / 4, before 37 / 4
+pair 5: current 48 / 4, before 39 / 4
+before-current paired deltas (ms): +1, +22, 0, -1, -9
+```
+
+样本创建方式与顺序解决同目录 commit/writeback 偏差和部分时间漂移问题；不能消除系统负载、缓存、
+常驻 App/Widget 干扰。本轮前组测量时 `uptime` 为
+`load averages: 2.89 4.63 4.93`；前组测量期间记录到 DevPulse.app 和 Widget、多个 `pi` / Herdr
+进程、`xcodebuildmcp` 服务。配对轮的采样 1-min load average 约 4.07–4.44（完整 1/5/15 分钟值见
+`paired/samples.tsv`）；同一时间系统另有其他进程，后续进程快照可见另一个仓库的 Git 刷新基准任务。
+因此墙钟仅作带噪声观察，不声称受控空闲基准。
+
+- `incremental_elapsed_ms`：5 次非配对均值 39.8 → 36.6 ms，差 −3.2 ms；改动前 `2×population SD`
+  噪声参考为 9.244 ms，绝对差没有超过该参考。5 组配对差中位数为 0 ms，仅 2/5 严格改善、2/5
+  变慢、1/5 相同（含 +22 ms 离群对）。判定：**未证明改善超出噪声**。
+- `incremental_git_calls`：4 → 4，逐样本恒定，确定性地无变化；无调用数改善。
+- command RSS：均值差 +124,518 bytes（+0.07%），小于改动前 SD 359,941 bytes；peak footprint 差
+  +39,322 bytes（+0.045%），小于改动前 SD 420,728 bytes。两者量测整个 `xcodebuild` 命令及测试 host，
+  不是 scanner 独占资源，未证明改善。
+- C5 真正被改变的确定性指标是 `RepositoryIdentity.canonicalPath` **计算次数**：5 repo 72→6（−66，
+  −91.7%），20 repo 282→21（−261，−92.6%）；输入 lookup 总数保持不变，结果与 ID 不变。这是
+  filesystem path-resolution 工作次数，不是 Git spawn 数。测试内的单次计算成本样本
+  `54.68 µs / 1000 calls` 只作成本量级线索，受当时负载影响，不能乘算并冒充完整 refresh wall time。
+
+该仓库已有 `measure-incremental-refresh.sh` 只调用 `GitRepositoryScanner.scan`，并不执行
+`RefreshEngine.execute` 的完整定时刷新路径；其 Git 计数只覆盖 `ScanMetrics` 测量区间，无法测 discovery
+阶段未注入的 worktree 查询。故它不能验证 C5 是否改善完整 refresh wall clock / 总 Git spawn。
+`BenchmarkRunner.gitSubprocessCount` 是前后瞬时活动进程数，不是累计启动数；`BenchmarkScenario` 未接真实
+刷新，两者均不作为结论指标。`--self-check` 强制发现与 `.manual` source，也不是稳态刷新指标；本轮未运行。
+
+### 10.4 标准 4 摘要：RegressionGate 场景与局限
+
+当前定向测试均用隔离容器、同一 `/tmp/devpulse-t0031-current-dd`、无并发 xcodebuild 顺序运行：
+
+| Gate / 情景 | 本轮实际证据 | 判定与局限 |
+| --- | --- | --- |
+| `checkNoZombieGitProcesses` | `FullRegressionGateTests.zombieGitCheckDoesNotCrash()` 与 `RegressionGateTests.noZombieGitProcesses()` 通过 | 本轮观测通过；该实现用 `pgrep` 瞬时进程匹配，不能证明刷新期间没有短命 spawn |
+| `checkNoMainThreadStall` | `FullRegressionGateTests.mainThreadStallCheckReturnsNilOnIdle()` 通过 | 当前 app-hosted 测试 main queue 有运行机会；无头命令行 harness 会因 semaphore 等待人为报 stall，不能据其判产品回退 |
+| `checkNoTaskLeak` | `taskLeakDetectsAddedTasks()` 通过 | 证明合成输入可识别一个新增 task；未在真实完整刷新前后采集任务集合，不能证明生产刷新零泄漏 |
+| `checkNoDuplicateSnapshotWrite` | `duplicateSnapshotDetection()` 通过 | 证明合成重复 runID 可被识别；未提供真实刷新 observation store 的端到端审计 |
+| `checkNoInfiniteRetries` | `RegressionGateTests.infiniteRetryDetection()` 通过 | 合成 `RefreshResult` 测试通过；没有对真实刷新所有重试链路作全量采样 |
+| `checkNoResourceGrowth` / `LifecyclePerformanceTests` | 同轮基准输出：5 repos paired median delta 6.914ms、positive 30/30；50 repos delta 6.290ms、positive 29/30；测试通过 | 本轮 Gate 没有 regression；但实现 `isRegression = delta > threshold`，优化值低于 baseline 时必为 false，无法捕获相对 baseline 的任何反向问题以外的「无退化」证明，强度有限 |
+| `checkAll` 完整组合 | 本轮未为 result/store/tasks 所有真实分支提供统一生产输入 | **不能判定**；个别 Gate 单测通过不等于生产 `checkAll` 完整场景通过 |
+| `continuousManualRefresh` | 无生产/测试刷新入口连接此 scenario | **不能判定**，没有真实数据；不得虚构结果 |
+
+这份 Gate 判定不扩大为「所有场景无回退」。另外 `checkNoResourceGrowth` 在
+`optimized < baseline` 时 `isRegression` 数学上必为 false；“测试 assert false”不能独立证成无回退。
+
+### 10.5 标准 5 摘要：C1–C5 文件/符号证据及未测开销
+
+| 改动 | 当前文件 / 符号证据与实测 |
+| --- | --- |
+| C1 (`5cc516f`) | `SharedSnapshotStore.swift` 的 `.preserveIdenticalBackup` 判定/执行与 `SharedSnapshotStoreTests` observer。当前定向实测 `non-identical writes=3, F_FULLFSYNC=6`，steady-state `writes=2, F_FULLFSYNC=4`；保护路径与稳态路径分开。`LifecyclePerformanceTests` 本轮 5/50 repos old/new median 分别 `41.619/35.791 ms` 与 `79.519/74.006 ms`，paired positive `30/30` 与 `29/30`；是测试内 commit A/B，不是完整 App 刷新。 |
+| C2 (`676919f`) | `RepositoryHistoryStore.recordSnapshotStates`、`loadGrouped`、`ScanScheduler` 调用点与 archive decode metrics。当前测试：300 entries / 5 repos / 30 iterations，old/new decode `150/30`、bytes `26088750/5217750`，median `10.280541/2.1295 ms`；定向 suite 13 tests passed。 |
+| C3 (`5cc516f`) | `DateFormatting.TimestampParser` 与 `SharedSnapshotStore.validateRepositoryPayload` 一次操作内复用 parser。存在 file/symbol 级实现证据，但本轮没有单独隔离计量 C3 时间收益；不宣称已量化消除多少总耗时。 |
+| C4 (`f2bcffa` 与后续 `9c34f8a` / `dedc1c5`) | `ScanScheduler.recordActivityEvents` 与 refresh observation 只在内容变化时保存；串行保存队列和陈旧回调不回滚内存列表。当前 `IdleRoundActivityArchiveTests` 原始输出 `activity_idle_round_writes=[0, 0, 0]`，每轮 0 writes / 0 bytes，archive 保持 316184 bytes；suite 6 tests passed。本轮未对 refresh-observation archive 作单独端到端文件写计数。 |
+| C5 (`2db9218`) | `RepositoryIdentity.canonicalPath` 的 refresh-scope map（`Models.swift`）由 `RefreshEngine.execute` 包围；当前真实 `RefreshEngine.execute(source: .timer)` 测试 72→6（5 repos）、282→21（20 repos），result digest / warnings 相同，scope 不跨轮。`applyPins` scope 外 162→20 的独立项亦被测试观察；未主张此余项已被整体消除。 |
+
+当前可证明的是各改动针对的重复工作与预期结构计数；本轮**没有**完成安装态完整 App 刷新端到端
+耗时、CPU/RSS 资源、全部文件 I/O、Widget reload、主线程真实交互 stall、所有仓库规模/异常路径长期测量。
+不能把 scanner microbenchmark 的 36.6 ms 称为完整用户刷新耗时，不能把 per-call 54.68µs 外推成 C5
+端到端收益，也不能称最高成本被全局排尽。
+
+### 10.6 当前结论与历史适用范围
+
+- §9 原「退出码 0 在当前环境无法满足」**已经过时**。当前 `e221536` 测试隔离下，本轮 C5 状态两次
+  unsigned `verify.sh final` 均 exit 0 / 917 tests / 91 suites / 0 failures；保留 §9 作为 e221536
+  之前的历史记录，不再作为豁免或当前判据。
+- §4 中 `899 / 89 / 5–6 issues` 与 `893 / 89 / 6 issues`、失败集合及其断言文本，只适用于旧
+  integration-verify 和 `7f29c0f` 的旧脚本环境，不是当前交付的失败集合。
+- §2–§3 的集成版 commit benchmark 数字适用于旧 tip；当前 C1/C2/C4/C5 的本轮原始输出见本节与
+  `current/*.log`，不得把历史数字标成 t-0031 本轮复测。
+- 对旧文档标准摘要逐条可见证据如上；因 `PROJECT.md` 缺失，正式五条验收均不能做逐字符合性判定。
+- 仍有静态检查发现的固定 `/tmp/devpulse-canon-table` 测试 fixture 覆盖风险；本线程遵守只读代码边界，
+  不修改测试/生产代码。不得把该风险隐藏在「没有任何写入命中」的表述下。
