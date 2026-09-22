@@ -67,6 +67,51 @@ struct WidgetDegradedRenderingTests {
         #expect(entry.trustAssessment != nil)
     }
 
+    @Test("stale persisted refreshing flag does not dominate widget freshness")
+    func stalePersistedRefreshingFlag() {
+        let now = Date()
+        let recent = AppGroupData.empty()
+            .withWrittenAt(DateFormatting.isoString(from: now))
+            .withIsRefreshing(true)
+        let recentEntry = WidgetEntry.content(
+            snapshot: recent,
+            feed: ActivityTimelineFeed(state: .neverScanned, items: [])
+        )
+        guard case .refreshing = recentEntry.freshnessState else {
+            Issue.record("A recent refresh-start snapshot should show refreshing")
+            return
+        }
+
+        let stale = AppGroupData.empty()
+            .withWrittenAt(DateFormatting.isoString(
+                from: now.addingTimeInterval(-RefreshStatusFormatter.staleThreshold - 1)
+            ))
+            .withIsRefreshing(true)
+        let staleEntry = WidgetEntry.content(
+            snapshot: stale,
+            feed: ActivityTimelineFeed(state: .neverScanned, items: [])
+        )
+        if case .refreshing = staleEntry.freshnessState {
+            Issue.record("A stale persisted refresh flag should not show refreshing")
+        }
+    }
+
+    @Test("incomplete discovery is observable as degraded widget data")
+    func incompleteDiscoveryIsDegraded() throws {
+        let snapshot = AppGroupData.empty().withDiscoveryWasIncomplete(true)
+        let encoded = try JSONEncoder().encode(snapshot)
+        let decoded = try JSONDecoder().decode(AppGroupData.self, from: encoded)
+        #expect(decoded.discoveryWasIncomplete == true)
+        let entry = WidgetEntry.content(
+            snapshot: decoded,
+            feed: ActivityTimelineFeed(state: .neverScanned, items: [])
+        )
+        guard case .degraded = entry.freshnessState else {
+            Issue.record("Incomplete discovery should map to degraded freshness")
+            return
+        }
+    }
+
     @Test("footer text for every load state provides meaningful info")
     func footerTextForAllStates() {
         let placeholder = WidgetEntry.placeholder

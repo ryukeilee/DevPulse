@@ -221,6 +221,7 @@ enum RepositoryIdentity {
             persistenceState: data.persistenceState,
             pendingItemWidgetSummary: data.pendingItemWidgetSummary,
             isRefreshing: data.isRefreshing,
+            discoveryWasIncomplete: data.discoveryWasIncomplete,
             appVersion: data.appVersion,
             storageFormatVersion: data.storageFormatVersion
         )
@@ -329,6 +330,7 @@ enum RepositoryIdentityMigration {
             persistenceState: normalizedSnapshot.persistenceState,
             pendingItemWidgetSummary: normalizedSnapshot.pendingItemWidgetSummary,
             isRefreshing: normalizedSnapshot.isRefreshing,
+            discoveryWasIncomplete: normalizedSnapshot.discoveryWasIncomplete,
             appVersion: normalizedSnapshot.appVersion,
             storageFormatVersion: normalizedSnapshot.storageFormatVersion
         )
@@ -445,6 +447,7 @@ enum RepositoryScope {
             persistenceState: data.persistenceState,
             pendingItemWidgetSummary: data.pendingItemWidgetSummary,
             isRefreshing: data.isRefreshing,
+            discoveryWasIncomplete: data.discoveryWasIncomplete,
             appVersion: data.appVersion,
             storageFormatVersion: data.storageFormatVersion
         )
@@ -1581,6 +1584,9 @@ struct AppGroupData: Codable, Equatable {
     /// Written during the persistence phase so the Widget can distinguish
     /// "refreshing" from "stale" / "degraded".
     let isRefreshing: Bool?
+    /// Whether repository discovery was incomplete for this snapshot.
+    /// Optional so older snapshots remain readable without migration.
+    let discoveryWasIncomplete: Bool?
     /// App version that wrote this snapshot. Written by `SharedSnapshotStore`
     /// during commit. Readers can use this to detect stale-format payloads
     /// that may need aggressive recovery.
@@ -1603,6 +1609,7 @@ struct AppGroupData: Codable, Equatable {
          persistenceState: SharedSnapshotPersistenceState = .committed,
          pendingItemWidgetSummary: PendingItemWidgetSummary? = nil,
          isRefreshing: Bool? = nil,
+         discoveryWasIncomplete: Bool? = nil,
          appVersion: String? = nil,
          storageFormatVersion: Int? = nil) {
         self.schemaVersion = schemaVersion
@@ -1619,6 +1626,7 @@ struct AppGroupData: Codable, Equatable {
         self.persistenceState = persistenceState
         self.pendingItemWidgetSummary = pendingItemWidgetSummary
         self.isRefreshing = isRefreshing
+        self.discoveryWasIncomplete = discoveryWasIncomplete
         self.appVersion = appVersion
         self.storageFormatVersion = storageFormatVersion
     }
@@ -1668,6 +1676,10 @@ struct AppGroupData: Codable, Equatable {
             Bool.self,
             forKey: .isRefreshing
         )
+        let decodedDiscoveryWasIncomplete = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .discoveryWasIncomplete
+        )
         self.init(
             schemaVersion: schemaVersion,
             generatedAt: try container.decode(String.self, forKey: .generatedAt),
@@ -1692,6 +1704,7 @@ struct AppGroupData: Codable, Equatable {
             persistenceState: persistenceState,
             pendingItemWidgetSummary: decodedPendingItemSummary,
             isRefreshing: decodedIsRefreshing,
+            discoveryWasIncomplete: decodedDiscoveryWasIncomplete,
             appVersion: decodedAppVersion,
             storageFormatVersion: decodedStorageFormatVersion
         )
@@ -1716,6 +1729,7 @@ struct AppGroupData: Codable, Equatable {
         try container.encode(persistenceState, forKey: .persistenceState)
         try container.encodeIfPresent(pendingItemWidgetSummary, forKey: .pendingItemWidgetSummary)
         try container.encodeIfPresent(isRefreshing, forKey: .isRefreshing)
+        try container.encodeIfPresent(discoveryWasIncomplete, forKey: .discoveryWasIncomplete)
         try container.encodeIfPresent(appVersion, forKey: .appVersion)
         try container.encodeIfPresent(storageFormatVersion, forKey: .storageFormatVersion)
     }
@@ -1735,6 +1749,7 @@ struct AppGroupData: Codable, Equatable {
         case historyRecordingEnabled
         case pendingItemWidgetSummary
         case isRefreshing
+        case discoveryWasIncomplete
         case appVersion
         case storageFormatVersion
     }
@@ -1781,6 +1796,7 @@ struct AppGroupData: Codable, Equatable {
             persistenceState: persistenceState,
             pendingItemWidgetSummary: pendingItemWidgetSummary,
             isRefreshing: isRefreshing,
+            discoveryWasIncomplete: discoveryWasIncomplete,
             appVersion: appVersion,
             storageFormatVersion: storageFormatVersion
         )
@@ -1802,6 +1818,7 @@ struct AppGroupData: Codable, Equatable {
             persistenceState: persistenceState,
             pendingItemWidgetSummary: pendingItemWidgetSummary,
             isRefreshing: isRefreshing,
+            discoveryWasIncomplete: discoveryWasIncomplete,
             appVersion: appVersion,
             storageFormatVersion: storageFormatVersion
         )
@@ -1823,6 +1840,29 @@ struct AppGroupData: Codable, Equatable {
             persistenceState: persistenceState,
             pendingItemWidgetSummary: pendingItemWidgetSummary,
             isRefreshing: isRefreshing,
+            discoveryWasIncomplete: discoveryWasIncomplete,
+            appVersion: appVersion,
+            storageFormatVersion: storageFormatVersion
+        )
+    }
+
+    func withDiscoveryWasIncomplete(_ incomplete: Bool?) -> AppGroupData {
+        AppGroupData(
+            schemaVersion: schemaVersion,
+            generatedAt: generatedAt,
+            writtenAt: writtenAt,
+            lastSuccessfulRefreshAt: lastSuccessfulRefreshAt,
+            historySchemaVersion: historySchemaVersion,
+            historyRecordingEnabled: historyRecordingEnabled,
+            scanSummary: scanSummary,
+            repositories: repositories,
+            recentActivityEvents: recentActivityEvents,
+            repositoryUnavailableSinceByPath: repositoryUnavailableSinceByPath,
+            storageRevision: storageRevision,
+            persistenceState: persistenceState,
+            pendingItemWidgetSummary: pendingItemWidgetSummary,
+            isRefreshing: isRefreshing,
+            discoveryWasIncomplete: incomplete,
             appVersion: appVersion,
             storageFormatVersion: storageFormatVersion
         )
@@ -1844,6 +1884,7 @@ struct AppGroupData: Codable, Equatable {
             persistenceState: persistenceState,
             pendingItemWidgetSummary: pendingItemWidgetSummary,
             isRefreshing: refreshing,
+            discoveryWasIncomplete: discoveryWasIncomplete,
             appVersion: appVersion,
             storageFormatVersion: storageFormatVersion
         )
@@ -1865,6 +1906,7 @@ struct AppGroupData: Codable, Equatable {
             persistenceState: persistenceState,
             pendingItemWidgetSummary: pendingItemWidgetSummary,
             isRefreshing: isRefreshing,
+            discoveryWasIncomplete: discoveryWasIncomplete,
             appVersion: appVersion,
             storageFormatVersion: storageFormatVersion
         )
@@ -1889,6 +1931,7 @@ struct AppGroupData: Codable, Equatable {
             persistenceState: persistenceState,
             pendingItemWidgetSummary: pendingItemWidgetSummary,
             isRefreshing: isRefreshing,
+            discoveryWasIncomplete: discoveryWasIncomplete,
             appVersion: appVersion,
             storageFormatVersion: storageFormatVersion
         )
@@ -1910,6 +1953,7 @@ struct AppGroupData: Codable, Equatable {
             persistenceState: persistenceState,
             pendingItemWidgetSummary: summary,
             isRefreshing: isRefreshing,
+            discoveryWasIncomplete: discoveryWasIncomplete,
             appVersion: appVersion,
             storageFormatVersion: storageFormatVersion
         )
@@ -1938,6 +1982,7 @@ struct AppGroupData: Codable, Equatable {
             persistenceState: persistenceState,
             pendingItemWidgetSummary: pendingItemWidgetSummary,
             isRefreshing: isRefreshing,
+            discoveryWasIncomplete: discoveryWasIncomplete,
             appVersion: RepositorySnapshotSchema.currentAppVersion,
             storageFormatVersion: RepositorySnapshotSchema.storageFormatVersion
         )
@@ -1979,6 +2024,7 @@ struct AppGroupData: Codable, Equatable {
             persistenceState: state,
             pendingItemWidgetSummary: nil,
             isRefreshing: isRefreshing,
+            discoveryWasIncomplete: discoveryWasIncomplete,
             appVersion: appVersion,
             storageFormatVersion: storageFormatVersion
         )
@@ -2037,6 +2083,7 @@ struct AppGroupData: Codable, Equatable {
             persistenceState: persistenceState,
             pendingItemWidgetSummary: nil,
             isRefreshing: isRefreshing,
+            discoveryWasIncomplete: discoveryWasIncomplete,
             appVersion: appVersion,
             storageFormatVersion: storageFormatVersion
         )
@@ -2210,6 +2257,15 @@ enum RefreshStatusFormatter {
                 now: now,
                 readError: readError,
                 missingReason: missingReason
+            )
+        }
+
+        if snapshot.discoveryWasIncomplete == true {
+            return SnapshotTrustAssessment(
+                state: .degraded,
+                title: "部分仓库待确认",
+                detail: "仓库发现不完整，已显示可确认的数据",
+                basis: "本次扫描未能完整发现所有仓库。"
             )
         }
 

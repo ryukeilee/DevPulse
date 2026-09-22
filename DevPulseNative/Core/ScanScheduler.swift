@@ -1755,6 +1755,7 @@ final class ScanScheduler: ObservableObject {
             persistenceState: refreshingData.persistenceState,
             pendingItemWidgetSummary: refreshingData.pendingItemWidgetSummary,
             isRefreshing: true,
+            discoveryWasIncomplete: refreshingData.discoveryWasIncomplete,
             appVersion: refreshingData.appVersion,
             storageFormatVersion: refreshingData.storageFormatVersion
         )
@@ -1839,6 +1840,7 @@ final class ScanScheduler: ObservableObject {
                     persistenceState: safeSnapshot.persistenceState,
                     pendingItemWidgetSummary: safeSnapshot.pendingItemWidgetSummary,
                     isRefreshing: false,
+                    discoveryWasIncomplete: safeSnapshot.discoveryWasIncomplete,
                     appVersion: safeSnapshot.appVersion,
                     storageFormatVersion: safeSnapshot.storageFormatVersion
                 )
@@ -1987,10 +1989,13 @@ final class ScanScheduler: ObservableObject {
                 }
 
                 let previous = self.lastResult
-                let pinned = self.applyPins(result.data)
+                let discoveryWasIncomplete = GitRepositoryScanner.discoveryWasIncomplete(result.warnings)
+                let pinned = self.applyPins(result.data).withDiscoveryWasIncomplete(
+                    discoveryWasIncomplete ? true : nil
+                )
                 let completedAt = DateFormatting.date(from: pinned.generatedAt)
                 let isDegraded = pinned.scanSummary.errorRepositories > 0
-                    || GitRepositoryScanner.discoveryWasIncomplete(result.warnings)
+                    || discoveryWasIncomplete
                 let trustedResult = pinned.withLastSuccessfulRefreshAt(
                     !isDegraded && completedAt != nil
                         ? pinned.generatedAt
@@ -2207,6 +2212,7 @@ final class ScanScheduler: ObservableObject {
                     } ? .committed : previousSnapshot.persistenceState,
                     pendingItemWidgetSummary: previousSnapshot.pendingItemWidgetSummary,
                     isRefreshing: previousSnapshot.isRefreshing,
+                    discoveryWasIncomplete: previousSnapshot.discoveryWasIncomplete,
                     appVersion: previousSnapshot.appVersion,
                     storageFormatVersion: previousSnapshot.storageFormatVersion
                 )
@@ -3048,6 +3054,7 @@ final class ScanScheduler: ObservableObject {
                     persistenceState: pinned.persistenceState,
                     pendingItemWidgetSummary: pinned.pendingItemWidgetSummary,
                     isRefreshing: nil,
+                    discoveryWasIncomplete: pinned.discoveryWasIncomplete,
                     appVersion: pinned.appVersion,
                     storageFormatVersion: pinned.storageFormatVersion
                 )
@@ -3511,6 +3518,7 @@ final class ScanScheduler: ObservableObject {
             persistenceState: retained.persistenceState,
             pendingItemWidgetSummary: retained.pendingItemWidgetSummary,
             isRefreshing: retained.isRefreshing,
+            discoveryWasIncomplete: retained.discoveryWasIncomplete,
             appVersion: retained.appVersion,
             storageFormatVersion: retained.storageFormatVersion
         )
@@ -3962,6 +3970,7 @@ final class ScanScheduler: ObservableObject {
             persistenceState: migration.snapshot.persistenceState,
             pendingItemWidgetSummary: migration.snapshot.pendingItemWidgetSummary,
             isRefreshing: migration.snapshot.isRefreshing,
+            discoveryWasIncomplete: migration.snapshot.discoveryWasIncomplete,
             appVersion: migration.snapshot.appVersion,
             storageFormatVersion: migration.snapshot.storageFormatVersion
         )
