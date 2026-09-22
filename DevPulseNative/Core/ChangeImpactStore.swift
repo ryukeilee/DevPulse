@@ -105,9 +105,7 @@ final class ChangeImpactStore: @unchecked Sendable {
     // MARK: - Initialization
 
     init(fileURL: URL? = nil, config: Configuration = .default) {
-        let url = fileURL ?? (FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: SharedSnapshotLocation.appGroupIdentifier
-        )?.appendingPathComponent(Self.fileName))
+        let url = fileURL ?? (SharedSnapshotLocation.containerURL?.appendingPathComponent(Self.fileName))
         ?? FileManager.default.temporaryDirectory.appendingPathComponent(Self.fileName)
 
         self.fileURL = url

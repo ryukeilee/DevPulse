@@ -961,9 +961,7 @@ actor LifecycleCoordinator {
         currentVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.2.0"
     ) async -> InstallState {
         // Check if App Group container exists and has a snapshot.
-        guard let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: appGroupIdentifier
-        ) else {
+        guard let containerURL = SharedSnapshotLocation.containerURL(forGroupIdentifier: appGroupIdentifier) else {
             return .firstInstall
         }
 
@@ -1067,9 +1065,7 @@ actor LifecycleCoordinator {
             logger.info("First install detected — no migration needed")
             // Create a minimal empty snapshot so the Widget can render
             // a first-launch state instead of showing a pure white placeholder.
-            if let containerURL = FileManager.default.containerURL(
-                forSecurityApplicationGroupIdentifier: SharedSnapshotLocation.appGroupIdentifier
-            ) {
+            if let containerURL = SharedSnapshotLocation.containerURL {
                 let store = SharedSnapshotStore(
                     directoryURL: containerURL,
                     fileName: SharedSnapshotLocation.fileName
@@ -1139,7 +1135,7 @@ actor WidgetRecoveryManager {
         // Restore last reload timestamp from UserDefaults so the throttle
         // survives app restart, crash, or upgrade, preventing a burst of
         // redundant timeline reloads immediately after launch.
-        if let saved = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+        if let saved = AppGroupStore.defaults?
             .object(forKey: Self.lastReloadUserDefaultsKey) as? Date {
             self.lastForcedReloadAt = saved
         }
@@ -1170,16 +1166,14 @@ actor WidgetRecoveryManager {
         lastForcedReloadAt = now
 
         // Persist timestamp so throttle survives app restart/crash.
-        UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+        AppGroupStore.defaults?
             .set(now, forKey: Self.lastReloadUserDefaultsKey)
     }
 
     /// Attempt to verify that the Widget can read the current snapshot.
     /// Returns a structured report of what the Widget would render.
     func verifyWidgetReadiness() async -> WidgetReadinessReport {
-        guard let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: SharedSnapshotLocation.appGroupIdentifier
-        ) else {
+        guard let containerURL = SharedSnapshotLocation.containerURL else {
             return WidgetReadinessReport(
                 canReadSnapshot: false,
                 error: "App Group container unavailable"
@@ -1524,9 +1518,7 @@ enum InstallUpgradeVerifier {
     }
 
     static func verifySharedSnapshot() -> VerificationCheck {
-        guard let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: SharedSnapshotLocation.appGroupIdentifier
-        ) else {
+        guard let containerURL = SharedSnapshotLocation.containerURL else {
             return VerificationCheck(
                 name: "sharedSnapshot",
                 passed: false,

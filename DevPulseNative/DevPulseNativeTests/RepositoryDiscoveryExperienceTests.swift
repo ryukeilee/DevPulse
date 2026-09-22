@@ -6,7 +6,7 @@ import Testing
 struct RepositoryDiscoveryExperienceTests {
     @MainActor
     @Test func legacyExplicitAllOffOverridesBuiltInDirectoryEntries() throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let keys = ["scan_config_json", "scan_directories_json", "scan_locations_v1_json"]
         let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, defaults.data(forKey: $0)) })
         defer { previous.forEach { restore($0.value, forKey: $0.key, in: defaults) } }
@@ -29,7 +29,7 @@ struct RepositoryDiscoveryExperienceTests {
     }
     @MainActor
     @Test func allDisabledLocationsExecuteEmptyRootsAndSurviveRebuild() async throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let key = "scan_locations_v1_json"
         let previous = defaults.data(forKey: key)
         defer { restore(previous, forKey: key, in: defaults) }
@@ -53,7 +53,7 @@ struct RepositoryDiscoveryExperienceTests {
     }
     @MainActor
     @Test func matchingRebuiltSchedulerDoesNotRepeatStartupDiscovery() async throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let root = try temporaryDirectory(named: "startup-match")
         defer { try? FileManager.default.removeItem(at: root) }
         let canonical = ScanLocationProvider.canonicalExistingFilePath(root.path)
@@ -86,7 +86,7 @@ struct RepositoryDiscoveryExperienceTests {
     }
     @MainActor
     @Test func schedulerRebuildMigratesLegacyPinsAndSharedSnapshotIdentity() throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let pinnedKey = "pinned_repo_ids"
         let previousPinned = defaults.stringArray(forKey: pinnedKey)
         let previousSnapshot = isolateSharedSnapshot()
@@ -158,7 +158,7 @@ struct RepositoryDiscoveryExperienceTests {
 
     @MainActor
     @Test func schedulerRebuildMigratesIgnoredPathsAndRewritesSharedSnapshotScope() throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let archiveKey = "ignored_repositories_v1_json"
         let legacyKey = "ignored_repository_paths"
         let previousArchive = defaults.data(forKey: archiveKey)
@@ -237,7 +237,7 @@ struct RepositoryDiscoveryExperienceTests {
 
     @MainActor
     @Test func restoringIgnoredRepositoryImmediatelyRequestsForcedDiscoveryWithExistingRoots() async throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let archiveKey = "ignored_repositories_v1_json"
         let locationsKey = "scan_locations_v1_json"
         let previousArchive = defaults.data(forKey: archiveKey)
@@ -280,7 +280,7 @@ struct RepositoryDiscoveryExperienceTests {
 
     @MainActor
     @Test func ignoringRepositoryImmediatelyFiltersAppAndSharedWidgetSnapshotAndForcesScopedScan() async throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let archiveKey = "ignored_repositories_v1_json"
         let legacyKey = "ignored_repository_paths"
         let locationsKey = "scan_locations_v1_json"
@@ -356,7 +356,7 @@ struct RepositoryDiscoveryExperienceTests {
 
     @MainActor
     @Test func failedScanUsesScannerScopeSoDeletedRepositoryIsNotReintroduced() async throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let archiveKey = "ignored_repositories_v1_json"
         let locationsKey = "scan_locations_v1_json"
         let discoveredKey = "last_discovered_repository_paths"
@@ -454,7 +454,7 @@ struct RepositoryDiscoveryExperienceTests {
 
     @MainActor
     @Test func forcedIncompleteDiscoveryKeepsKnownUnchangedScopeForTargetedRecovery() async throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let archiveKey = "ignored_repositories_v1_json"
         let locationsKey = "scan_locations_v1_json"
         let discoveredKey = "last_discovered_repository_paths"
@@ -522,7 +522,7 @@ struct RepositoryDiscoveryExperienceTests {
 
     @MainActor
     @Test func startupRootsMismatchForcesDiscoveryEvenWithFreshSnapshot() async throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let locationsKey = "scan_locations_v1_json"
         let discoveryKey = "last_repository_discovery_scan_roots"
         let previousLocations = defaults.data(forKey: locationsKey)
@@ -572,7 +572,7 @@ struct RepositoryDiscoveryExperienceTests {
     }
     @MainActor
     @Test func legacyMigrationUsesConfigBuiltInsAndDirectoriesBookmarksWithoutDuplicates() throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let keys = ["scan_config_json", "scan_directories_json", "scan_locations_v1_json"]
         let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, defaults.data(forKey: $0)) })
         defer { previous.forEach { restore($0.value, forKey: $0.key, in: defaults) } }
@@ -956,7 +956,7 @@ struct RepositoryDiscoveryExperienceTests {
 
     @MainActor
     @Test func scanExecutionUsesVersionedLocationConfigurationAsTheOnlyLocationSource() async throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let configKey = "scan_config_json"
         let locationsKey = "scan_locations_v1_json"
         let previousConfig = defaults.data(forKey: configKey)
@@ -1108,7 +1108,7 @@ struct RepositoryDiscoveryExperienceTests {
     }
     @MainActor
     @Test func freshInstallPersistsAllBuiltInsInVersionedLocationConfiguration() throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let keys = ["scan_config_json", "scan_directories_json", "scan_locations_v1_json"]
         let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, defaults.data(forKey: $0)) })
         defer { previous.forEach { restore($0.value, forKey: $0.key, in: defaults) } }
@@ -1124,7 +1124,7 @@ struct RepositoryDiscoveryExperienceTests {
 
     @MainActor
     @Test func versionedLocationsTakePrecedenceAndMutationsDoNotRewriteLegacyKeys() throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let keys = ["scan_config_json", "scan_directories_json", "scan_locations_v1_json"]
         let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, defaults.data(forKey: $0)) })
         defer { previous.forEach { restore($0.value, forKey: $0.key, in: defaults) } }
@@ -1206,7 +1206,7 @@ struct RepositoryDiscoveryExperienceTests {
 
     @MainActor
     @Test func persistedEmptyBuiltInSelectionStaysDisabledAfterSchedulerReload() throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let configKey = "scan_config_json"
         let scanDirectoriesKey = "scan_directories_json"
         let scanLocationsKey = "scan_locations_v1_json"
@@ -1242,7 +1242,7 @@ struct RepositoryDiscoveryExperienceTests {
 
     @MainActor
     @Test func legacyScanConfigMissingNewFieldsPreservesPathsAndExplicitDisabledBuiltIns() throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let keys = ["scan_config_json", "scan_directories_json", "scan_locations_v1_json"]
         let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, defaults.data(forKey: $0)) })
         defer { previous.forEach { restore($0.value, forKey: $0.key, in: defaults) } }
@@ -1276,7 +1276,7 @@ struct RepositoryDiscoveryExperienceTests {
 
     @MainActor
     @Test func legacyVersionedLocationsMissingVersionAndDirectoryFieldsPreserveDisabledSelection() throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let keys = ["scan_config_json", "scan_directories_json", "scan_locations_v1_json"]
         let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, defaults.data(forKey: $0)) })
         defer { previous.forEach { restore($0.value, forKey: $0.key, in: defaults) } }
@@ -1367,7 +1367,7 @@ struct RepositoryDiscoveryExperienceTests {
 
     @MainActor
     @Test func enablingBuiltInDirectoryPersistsAcrossSchedulerReload() throws {
-        let defaults = try #require(UserDefaults(suiteName: AppGroupStore.appGroupIdentifier))
+        let defaults = try #require(AppGroupStore.defaults)
         let configKey = "scan_config_json"
         let scanDirectoriesKey = "scan_directories_json"
         let scanLocationsKey = "scan_locations_v1_json"

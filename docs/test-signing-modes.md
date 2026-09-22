@@ -1,80 +1,75 @@
-# 测试入口的两种签名环境（signed / unsigned）
+# 测试与真实 App Group 的隔离（以及可选的签名环境）
 
-`./scripts/verify.sh` 的测试环境由两个模式控制：**signed**（开发签名，
-test host 带 `com.apple.security.application-groups` entitlement）与
-**unsigned**（历史行为，硬编码 `CODE_SIGNING_ALLOWED=NO
-CODE_SIGNING_REQUIRED=NO`，test host 没有任何 entitlement）。
+`./scripts/verify.sh` 的 `test` / `final` 会把测试进程指向一个**一次性的
+scratch 容器与偏好域**，因此无论 test host 是否签名，测试都不会读写用户真实
+的 App Group 数据。签名（`signed` 模式）仍然可用，但不再是测试通过的前提。
 
-## 为什么需要两种模式
+## 为什么必须隔离
 
 DevPulse 的 host app 在 `DevPulseNative/App/DevPulse.entitlements` 里声明了
-App Group `group.local.devpulse`。**经 LaunchServices 启动、但没有
-`com.apple.security.application-groups` 的 app bundle，其 App Group 容器路径
-仍然可以解析，但读写会被拒绝。** 于是一批依赖共享容器的测试在 unsigned 模式下
-必然失败——这是测试环境的假象，不是产品缺陷（成因与机制隔离实验见
-[`docs/main-test-baseline.md`](main-test-baseline.md)）。
+App Group `group.local.devpulse`；Widget 与多个 Core store 直接读写
+`~/Library/Group Containers/group.local.devpulse` 与偏好域
+`group.local.devpulse`。
 
-unsigned 模式下稳定失败的项（无条件复现）：
+历史上测试宿主直接使用这些真实位置：`ScanScheduler` 通过
+`UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)` 持久化扫描配置，
+各 store 通过
+`FileManager.default.containerURL(forSecurityApplicationGroupIdentifier:)`
+读写真实容器。于是 `RepositoryDiscoveryExperienceTests` 中调用
+`addCustomPath(...)` 的用例会把指向 `DevPulseTests-*` 临时目录的
+`scan_locations_v1_json` / `last_repository_discovery_scan_roots` 写进真实偏好
+域，使已安装的 App 扫描 0 个仓库。这是真实缺陷，已由本目录描述的隔离修复。
 
-- `RefreshCompletionTests.initialStateIsIdle()`
-- `RepositoryDiscoveryExperienceTests.schedulerRebuildMigratesLegacyPinsAndSharedSnapshotIdentity()`
-- `RepositoryDiscoveryExperienceTests.schedulerRebuildMigratesIgnoredPathsAndRewritesSharedSnapshotScope()`
-- `RepositoryDiscoveryExperienceTests.ignoringRepositoryImmediatelyFiltersAppAndSharedWidgetSnapshotAndForcesScopedScan()`
-- `RepositoryDiscoveryExperienceTests.repositoryRetryAfterBackupRecoveryCommitsAWidgetReadableSnapshot()`
+## 隔离机制
 
-另外 `SleepWakeLifecycleTests.suspendForSleepCancelsActiveScan()` 是**与签名
-无关的真实 flake**（测试用固定 `Task.sleep(100ms)` 等待取消传播），两种模式下
-都可能偶发失败，判定时必须与上面 5 项区分。
+`test` / `final` 设置两个环境变量；xcodebuild 会把 `TEST_RUNNER_<VAR>`
+去掉前缀后透传给 test host：
 
-## 选择模式
+| test host 侧环境变量 | 作用 |
+| --- | --- |
+| `DEVPULSE_APP_GROUP_CONTAINER_PATH` | `SharedSnapshotLocation.containerURL` 返回该临时目录；`AppGroupStore` 及所有 store 的容器读写都指向它 |
+| `DEVPULSE_APP_GROUP_DEFAULTS_SUITE` | `SharedSnapshotLocation.defaults` 改用该 suite，扫描配置/固定项/发现标记不再写入真实偏好域 |
 
-| 环境变量 | 取值 | 行为 |
-| --- | --- | --- |
-| `DEVPULSE_SIGNING_MODE` | `auto`（默认） | 能在本机解析出 Apple Development 身份时用 signed；否则回退 unsigned 并打印已知失败提示 |
-| | `signed` | 强制签名；解析不到身份时立即失败，不静默降级 |
-| | `unsigned` | 强制历史的无签名行为 |
-| `DEVELOPMENT_TEAM` | 任意 team id | 直接指定 team（等价于 signed） |
-| `CODE_SIGN_IDENTITY` | identity 名称 | 覆盖签名身份名称，默认 `Apple Development` |
+生产运行时不设置这两个变量，路径与行为与之前完全一致；只有真实 App Group
+identifier（`group.local.devpulse`）会被重定向，代码中刻意探测不存在 group 的
+场景仍然返回 `nil`。运行结束后 `verify.sh` 通过 EXIT trap 删除临时容器与临时
+suite。
 
-team 的解析顺序：
+## 结果
 
-1. 环境变量 `DEVELOPMENT_TEAM`；
-2. 本机 provisioning profile（先 host `local.devpulse.app`，再 widget
-   `local.devpulse.app.widget`，两者 TeamIdentifier 必须一致）；
-3. Xcode 首选项 `com.apple.dt.Xcode.plist` 的 `teamID`；
-4. Apple Development 证书主体的 `OU` 字段。
+- 5 项依赖共享容器读写语义的测试在 **unsigned** 模式下也全部通过：
+  `RefreshCompletionTests.initialStateIsIdle()` 与 4 项
+  `RepositoryDiscoveryExperienceTests`。它们断言的是注入的临时容器上真实落盘
+  的文件（`repositories.json` 等），而不是内存状态。
+- 全量测试不需要 provisioning profile，也不需要 Xcode 账号。
 
-> `security find-identity -v -p codesigning` 输出**括号里的值不是 team ID**
-> （那是证书标识符），脚本不会取它。本机三处一致的值是 `JYL9G28DP3`。
+## 模式
 
-`auto` 是默认值以保证**没有证书的机器（CI）行为不比以前更差**：无法解析身份时
-自动退回 unsigned，并明确提示这会触发上述 5 项 entitlement 假失败。
+| `DEVPULSE_SIGNING_MODE` | 行为 |
+| --- | --- |
+| `auto`（默认） | 本机存在同时匹配 app 与 widget bundle id 的本地 profile 时用 `signed`，否则 `unsigned` |
+| `signed` | 强制 profile 签名；解析不到 team/profile 时立即失败（不静默降级） |
+| `unsigned` | 无签名 test host（本机默认） |
 
-## 用法
+`DEVELOPMENT_TEAM` 显式设置时等价于 `signed`；`CODE_SIGN_IDENTITY` 覆盖签名
+身份名。
+
+## 命令
 
 ```sh
-# 本机（有 Apple Development 身份）—— 自动使用 signed
+# 默认（本机无匹配 profile 时自动 unsigned）：隔离 + 全量
 DERIVED_DATA_PATH=/tmp/devpulse-build ./scripts/verify.sh final
 
-# 强制签名（无身份即失败，适合验收）
-DEVPULSE_SIGNING_MODE=signed DERIVED_DATA_PATH=/tmp/devpulse-build ./scripts/verify.sh final
-
-# 强制无签名（对照 / CI）
+# 显式 unsigned
 DEVPULSE_SIGNING_MODE=unsigned DERIVED_DATA_PATH=/tmp/devpulse-build ./scripts/verify.sh final
 
-# 显式指定 team
-DEVELOPMENT_TEAM=JYL9G28DP3 DERIVED_DATA_PATH=/tmp/devpulse-build ./scripts/verify.sh final
+# 定向
+DERIVED_DATA_PATH=/tmp/devpulse-build ./scripts/verify.sh test DevPulseTests/ActivityEventTests
 ```
-
-构建设置与测试设置必须一致：`build-for-testing` 与 `test-without-building`
-共用同一个 `COMMON_ARGS`，因此同一模式下 `build` → `test` / `final` 复用同一份
-DerivedData，不会因为签名设置不同而重新编译。
 
 ## 约束
 
-- signed 模式依赖本机 provisioning profile 的有效期。profile 过期后
-  `DEVPULSE_SIGNING_MODE=signed` 会构建失败，不会退回 unsigned（这是刻意的：
-  静默降级会重新引入 5 项假失败）。此时请更新 profile，或显式用
-  `DEVPULSE_SIGNING_MODE=unsigned` 并预期 5 项失败。
 - 判定"是否引入新失败"必须比对**测试名 + 原始断言文本**，并始终使用独立的
   `DERIVED_DATA_PATH`（默认 `/tmp/devpulse-build` 是共享路径，并发跑会互相抢占）。
+- `verify.sh widgetkit` 会在同一个 DerivedData 里做无签名构建；`signed` 模式下
+  先跑 `test` 需要重新 `build`。

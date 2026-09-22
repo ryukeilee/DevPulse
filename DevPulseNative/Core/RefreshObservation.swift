@@ -183,9 +183,7 @@ final class RefreshObservationStore: @unchecked Sendable {
     init(fileURL: URL? = nil, writeObserver: (@Sendable (Int) -> Void)? = nil) {
         self.writeObserver = writeObserver
         let url = fileURL ?? (
-            FileManager.default.containerURL(
-                forSecurityApplicationGroupIdentifier: SharedSnapshotLocation.appGroupIdentifier
-            )?.appendingPathComponent("refresh-observations.json")
+            SharedSnapshotLocation.containerURL?.appendingPathComponent("refresh-observations.json")
             ?? {
                 let fallback = FileManager.default.temporaryDirectory.appendingPathComponent("refresh-observations.json")
                 Logger(subsystem: "local.devpulse.app", category: "ObservationStore")

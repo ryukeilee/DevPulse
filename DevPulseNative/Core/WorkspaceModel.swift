@@ -199,9 +199,7 @@ final class WorkspaceStore: @unchecked Sendable {
     private var lastLoadResult: Result<WorkspaceArchive, WorkspaceStoreError>?
 
     init(fileURL: URL? = nil) {
-        let url = fileURL ?? (FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: SharedSnapshotLocation.appGroupIdentifier
-        )?.appendingPathComponent(Self.fileName))
+        let url = fileURL ?? (SharedSnapshotLocation.containerURL?.appendingPathComponent(Self.fileName))
         ?? {
             let fallback = FileManager.default.temporaryDirectory.appendingPathComponent(Self.fileName)
             Logger(subsystem: "local.devpulse.app", category: "WorkspaceStore")
@@ -220,9 +218,7 @@ final class WorkspaceStore: @unchecked Sendable {
     }
 
     static func live() -> WorkspaceStore {
-        guard let container = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: SharedSnapshotLocation.appGroupIdentifier
-        ) else {
+        guard let container = SharedSnapshotLocation.containerURL else {
             return WorkspaceStore()
         }
         return WorkspaceStore(fileURL: container.appendingPathComponent(fileName))

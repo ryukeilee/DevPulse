@@ -1245,12 +1245,12 @@ final class ScanScheduler: ObservableObject {
 
     var pinnedRepoIDs: Set<String> {
         get {
-            let raw = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+            let raw = AppGroupStore.defaults?
                 .stringArray(forKey: pinnedKey) ?? []
             return Set(raw)
         }
         set {
-            UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+            AppGroupStore.defaults?
                 .set(newValue.sorted(), forKey: pinnedKey)
         }
     }
@@ -2694,7 +2694,7 @@ final class ScanScheduler: ObservableObject {
             consecutiveNoChanges: consecutiveNoChanges,
             powerState: powerState
         )
-        UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+        AppGroupStore.defaults?
             .set(scanIntervalSeconds, forKey: lastScanIntervalKey)
 
         // Re-schedule if timer is active
@@ -4067,7 +4067,7 @@ final class ScanScheduler: ObservableObject {
     }
 
     private func loadIgnoredRepositories() {
-        let defaults = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)
+        let defaults = AppGroupStore.defaults
         let archive: IgnoredRepositoryArchive
         if let data = defaults?.data(forKey: ignoredRepositoriesKey),
            let decoded = try? JSONDecoder().decode(IgnoredRepositoryArchive.self, from: data) {
@@ -4087,7 +4087,7 @@ final class ScanScheduler: ObservableObject {
     private func persistIgnoredRepositories() {
         let archive = IgnoredRepositoryArchive(paths: ignoredRepositories.map(\.path))
         guard let data = try? JSONEncoder().encode(archive) else { return }
-        UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+        AppGroupStore.defaults?
             .set(data, forKey: ignoredRepositoriesKey)
     }
 
@@ -4095,12 +4095,12 @@ final class ScanScheduler: ObservableObject {
 
     private func persistScanLocations() {
         guard let data = try? JSONEncoder().encode(scanLocationConfiguration) else { return }
-        UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+        AppGroupStore.defaults?
             .set(data, forKey: scanLocationsKey)
     }
 
     private func loadConfig() {
-        guard let data = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+        guard let data = AppGroupStore.defaults?
             .data(forKey: configKey),
               let decoded = try? JSONDecoder().decode(ScanConfig.self, from: data) else {
             configLoadedFromPersistence = false
@@ -4111,14 +4111,14 @@ final class ScanScheduler: ObservableObject {
         config = normalizeConfig(decoded)
 
         // Load last interval
-        if let saved = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+        if let saved = AppGroupStore.defaults?
             .double(forKey: lastScanIntervalKey), saved >= 300 {
             scanIntervalSeconds = saved
         }
     }
 
     private func loadScanDirectories() {
-        if let data = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?.data(forKey: scanLocationsKey),
+        if let data = AppGroupStore.defaults?.data(forKey: scanLocationsKey),
            let decoded = try? JSONDecoder().decode(ScanLocationConfiguration.self, from: data) {
             scanLocationConfiguration = ScanLocationConfiguration(
                 enabledBuiltInPaths: Set(decoded.enabledBuiltInPaths.map(ScanLocationProvider.normalizePersistedPath).filter(ScanLocationProvider.isBuiltInPath)),
@@ -4130,7 +4130,7 @@ final class ScanScheduler: ObservableObject {
         let configuredBuiltIns = config.enabledBuiltInPaths
             .map(ScanLocationProvider.normalizePersistedPath)
         let customDirectories: [CustomScanDirectory]
-        if let data = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+        if let data = AppGroupStore.defaults?
             .data(forKey: scanDirectoriesKey),
            let decoded = try? JSONDecoder().decode([CustomScanDirectory].self, from: data) {
             let sanitized = sanitizeScanDirectories(decoded)
@@ -4385,18 +4385,18 @@ final class ScanScheduler: ObservableObject {
 
     private var lastRepositoryDiscoveryAt: Date? {
         get {
-            UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+            AppGroupStore.defaults?
                 .object(forKey: lastRepositoryDiscoveryAtKey) as? Date
         }
         set {
-            UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+            AppGroupStore.defaults?
                 .set(newValue, forKey: lastRepositoryDiscoveryAtKey)
         }
     }
 
     private var lastDiscoveredRepositoryPaths: [String] {
         get {
-            let defaults = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)
+            let defaults = AppGroupStore.defaults
             let raw = defaults?.stringArray(forKey: lastDiscoveredRepositoryPathsKey) ?? []
             let normalized = Array(Set(raw.map(RepositoryIdentity.canonicalPath)))
                 .filter { !ignoredRepositoryPaths.contains($0) }
@@ -4410,18 +4410,18 @@ final class ScanScheduler: ObservableObject {
             let normalized = Array(Set(newValue.map(RepositoryIdentity.canonicalPath)))
                 .filter { !ignoredRepositoryPaths.contains($0) }
                 .sorted()
-            UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+            AppGroupStore.defaults?
                 .set(normalized, forKey: lastDiscoveredRepositoryPathsKey)
         }
     }
 
     private var lastRepositoryDiscoveryScanRootsSignature: String? {
         get {
-            UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+            AppGroupStore.defaults?
                 .string(forKey: lastRepositoryDiscoveryScanRootsKey)
         }
         set {
-            UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)?
+            AppGroupStore.defaults?
                 .set(newValue, forKey: lastRepositoryDiscoveryScanRootsKey)
         }
     }

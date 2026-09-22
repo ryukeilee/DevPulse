@@ -27,9 +27,14 @@ enum AppGroupStore {
 
     /// URL for the App Group container directory.
     static var containerURL: URL? {
-        FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: appGroupIdentifier
-        )
+        SharedSnapshotLocation.containerURL
+    }
+
+    /// Preferences domain that backs the App Group keys (scheduler config,
+    /// pins, discovery state). A test harness can redirect this away from the
+    /// real domain with `DEVPULSE_APP_GROUP_DEFAULTS_SUITE`.
+    static var defaults: UserDefaults? {
+        SharedSnapshotLocation.defaults
     }
 
     /// Full URL for the snapshot JSON file.

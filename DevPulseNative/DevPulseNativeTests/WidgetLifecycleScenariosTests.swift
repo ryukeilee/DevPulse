@@ -162,7 +162,7 @@ struct WidgetLifecycleScenariosTests {
         // Throttle 时间戳持久化到共享 UserDefaults（键与生产实现一致），
         // 可跨重启生效；测试据此观察真实节流行为。
         let key = "DevPulseWidgetLastForcedReloadAt"
-        let defaults = UserDefaults(suiteName: AppGroupStore.appGroupIdentifier)!
+        let defaults = AppGroupStore.defaults!
         let previous = defaults.object(forKey: key) as? Date
         defer {
             if let previous {

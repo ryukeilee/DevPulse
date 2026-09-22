@@ -7,13 +7,10 @@ import WidgetKit
 #endif
 
 private enum WidgetSnapshotStore {
-    static let appGroupIdentifier = SharedSnapshotLocation.appGroupIdentifier
     private static let snapshotFileName = SharedSnapshotLocation.fileName
 
     static func load() -> Result<AppGroupData, WidgetSnapshotLoadError> {
-        guard let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: appGroupIdentifier
-        ) else {
+        guard let containerURL = SharedSnapshotLocation.containerURL else {
             return .failure(.appGroupUnavailable)
         }
 
@@ -45,7 +42,7 @@ private enum WidgetSnapshotStore {
     }
 
     private static func ignoredRepositoryPaths() -> Set<String> {
-        let defaults = UserDefaults(suiteName: appGroupIdentifier)
+        let defaults = SharedSnapshotLocation.defaults
         if let data = defaults?.data(forKey: "ignored_repositories_v1_json"),
            let archive = try? JSONDecoder().decode(IgnoredRepositoryArchive.self, from: data) {
             return RepositoryScope.canonicalPathSet(archive.paths)

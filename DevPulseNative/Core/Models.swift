@@ -458,6 +458,47 @@ enum RepositoryScope {
 enum SharedSnapshotLocation {
     static let appGroupIdentifier = "group.local.devpulse"
     static let fileName = "repositories.json"
+
+    /// Environment variable used by the test harness to redirect all shared
+    /// storage into a scratch directory. Absent during normal app execution.
+    private static let containerPathOverrideKey = "DEVPULSE_APP_GROUP_CONTAINER_PATH"
+
+    /// App Group container directory for `identifier`. The real group lookup is
+    /// replaced by the override path only for the real App Group identifier, so
+    /// code that deliberately probes a non-existent group still sees `nil`.
+    static func containerURL(forGroupIdentifier identifier: String) -> URL? {
+        if identifier == appGroupIdentifier,
+           let path = ProcessInfo.processInfo.environment[containerPathOverrideKey],
+           !path.isEmpty {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        return FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: identifier
+        )
+    }
+
+    /// App Group container directory, or `nil` when the group is unavailable.
+    static var containerURL: URL? {
+        containerURL(forGroupIdentifier: appGroupIdentifier)
+    }
+
+    /// Environment variable used by the test harness to redirect the App Group
+    /// preferences domain into a scratch suite. Absent during normal execution.
+    private static let defaultsSuiteOverrideKey = "DEVPULSE_APP_GROUP_DEFAULTS_SUITE"
+
+    /// Preferences suite that backs the App Group keys.
+    static var defaultsSuiteName: String {
+        if let suite = ProcessInfo.processInfo.environment[defaultsSuiteOverrideKey],
+           !suite.isEmpty {
+            return suite
+        }
+        return appGroupIdentifier
+    }
+
+    /// Preferences domain shared between the app and the widget.
+    static var defaults: UserDefaults? {
+        UserDefaults(suiteName: defaultsSuiteName)
+    }
 }
 
 enum WidgetIdentity {

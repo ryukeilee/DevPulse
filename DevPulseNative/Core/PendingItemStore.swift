@@ -57,9 +57,7 @@ final class PendingItemStore: @unchecked Sendable {
     private var cacheTimestamp: Date?
 
     init(fileURL: URL? = nil) {
-        let url = fileURL ?? (FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: SharedSnapshotLocation.appGroupIdentifier
-        )?.appendingPathComponent(Self.fileName))
+        let url = fileURL ?? (SharedSnapshotLocation.containerURL?.appendingPathComponent(Self.fileName))
         ?? {
             let fallback = FileManager.default.temporaryDirectory.appendingPathComponent(Self.fileName)
             Logger(subsystem: "local.devpulse.app", category: "PendingItemStore")
@@ -78,9 +76,7 @@ final class PendingItemStore: @unchecked Sendable {
     }
 
     static func live() -> PendingItemStore {
-        guard let container = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: SharedSnapshotLocation.appGroupIdentifier
-        ) else {
+        guard let container = SharedSnapshotLocation.containerURL else {
             return PendingItemStore()
         }
         return PendingItemStore(fileURL: container.appendingPathComponent(fileName))

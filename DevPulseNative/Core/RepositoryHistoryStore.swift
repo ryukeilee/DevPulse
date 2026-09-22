@@ -74,9 +74,7 @@ final class RepositoryHistoryStore: @unchecked Sendable {
 
     init(fileURL: URL? = nil,
          config: Configuration = .default) {
-        let url = fileURL ?? (FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: SharedSnapshotLocation.appGroupIdentifier
-        )?.appendingPathComponent(Self.fileName))
+        let url = fileURL ?? (SharedSnapshotLocation.containerURL?.appendingPathComponent(Self.fileName))
         ?? FileManager.default.temporaryDirectory.appendingPathComponent(Self.fileName)
 
         self.fileURL = url
@@ -86,9 +84,7 @@ final class RepositoryHistoryStore: @unchecked Sendable {
     }
 
     static func live() -> RepositoryHistoryStore? {
-        guard let container = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: SharedSnapshotLocation.appGroupIdentifier
-        ) else { return nil }
+        guard let container = SharedSnapshotLocation.containerURL else { return nil }
         return RepositoryHistoryStore(fileURL: container.appendingPathComponent(fileName))
     }
 

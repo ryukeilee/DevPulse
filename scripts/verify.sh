@@ -18,13 +18,14 @@ set -euo pipefail
 #   ./scripts/verify.sh test DevPulseTests/ActivityEventTests
 #   ./scripts/verify.sh test "DevPulseTests/CommitReadinessEngineTests/testStartupRefresh…()"
 #
-# Test environment (signed vs unsigned):
+# Test environment (isolated scratch container):
 #   The DevPulse host app declares the App Group entitlement
-#   (com.apple.security.application-groups) in App/DevPulse.entitlements. Tests
-#   that exercise the shared snapshot container only keep that access when the
-#   test host is signed with a matching development identity; an unsigned /
-#   entitlement-less bundle is denied access by LaunchServices even though the
-#   container path still resolves. See docs/test-signing-modes.md.
+#   (com.apple.security.application-groups) in App/DevPulse.entitlements, and an
+#   *unsigned* test host has no entitlement, so LaunchServices denies it access
+#   to the real shared container. `test`/`final` therefore point the host at a
+#   throwaway container and preferences suite via TEST_RUNNER_… environment
+#   variables, so tests exercise the same read/write code without ever touching
+#   the user's real App Group data. See docs/test-signing-modes.md.
 #
 # Environment:
 #   DERIVED_DATA_PATH      Shared DerivedData path (default: /tmp/devpulse-build)
@@ -134,27 +135,32 @@ resolve_development_team() {
     printf '%s\n' "$team"
 }
 
-warn_unsigned_known_failures() {
-    warn "Running the test host WITHOUT the App Group entitlement (unsigned mode)."
-    warn "These tests access the shared container through LaunchServices and are"
-    warn "expected to fail here — they are environment artefacts, not regressions:"
-    warn "  RefreshCompletionTests.initialStateIsIdle()"
-    warn "  RepositoryDiscoveryExperienceTests.schedulerRebuildMigratesLegacyPinsAndSharedSnapshotIdentity()"
-    warn "  RepositoryDiscoveryExperienceTests.schedulerRebuildMigratesIgnoredPathsAndRewritesSharedSnapshotScope()"
-    warn "  RepositoryDiscoveryExperienceTests.ignoringRepositoryImmediatelyFiltersAppAndSharedWidgetSnapshotAndForcesScopedScan()"
-    warn "  RepositoryDiscoveryExperienceTests.repositoryRetryAfterBackupRecoveryCommitsAWidgetReadableSnapshot()"
-    warn "Run with DEVPULSE_SIGNING_MODE=signed (or DEVELOPMENT_TEAM=<team>) to exercise them."
+# Development team of local provisioning profiles matching BOTH bundle ids.
+# This is what profile-based ("signed") builds actually need; certificate-only
+# team resolution is not enough once the profile has expired.
+local_profile_team() {
+    local host_team widget_team
+    host_team="$(profile_team_for_bundle_id "$APP_BUNDLE_ID" || true)"
+    widget_team="$(profile_team_for_bundle_id "$WIDGET_BUNDLE_ID" || true)"
+    [ -n "$host_team" ] && [ "$host_team" = "$widget_team" ] || return 1
+    printf '%s\n' "$host_team"
 }
 
 # Decide the test environment and fold it into COMMON_ARGS.
-# Default (auto): sign when a development identity can be resolved, otherwise
-# keep the previous unsigned behaviour so machines without a certificate (CI)
-# are no worse off than before.
+#
+# Tests run against an isolated scratch container (see setup_test_isolation),
+# so signing is not required for them to pass. "auto" therefore uses
+# profile-based signing only when local profiles for both bundle ids exist —
+# certificate-only team resolution is not enough once a profile has expired —
+# and stays unsigned otherwise.
 SIGNING_MODE=""
 RESOLVED_TEAM=""
 case "$DEVPULSE_SIGNING_MODE" in
     auto)
-        if RESOLVED_TEAM="$(resolve_development_team)"; then
+        if [ -n "$DEVELOPMENT_TEAM" ]; then
+            RESOLVED_TEAM="$(resolve_development_team)"
+            SIGNING_MODE="signed"
+        elif RESOLVED_TEAM="$(local_profile_team)"; then
             SIGNING_MODE="signed"
         else
             SIGNING_MODE="unsigned"
@@ -181,6 +187,8 @@ if [ "$SIGNING_MODE" = "signed" ]; then
         CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:-Apple Development}"
     )
 else
+    # Unsigned test host. Tests are isolated from the real App Group (see
+    # setup_test_isolation), so the entitlement is not needed.
     COMMON_ARGS+=(
         CODE_SIGNING_ALLOWED=NO
         CODE_SIGNING_REQUIRED=NO
@@ -191,8 +199,7 @@ report_test_environment() {
     if [ "$SIGNING_MODE" = "signed" ]; then
         info "Test environment: signed (team $RESOLVED_TEAM, identity ${CODE_SIGN_IDENTITY:-Apple Development})"
     else
-        info "Test environment: unsigned (mode '$DEVPULSE_SIGNING_MODE')"
-        warn_unsigned_known_failures
+        info "Test environment: unsigned (test host writes to an isolated scratch container)"
     fi
 }
 
@@ -207,6 +214,34 @@ run_with_timeout() {
         info "timeout not found in PATH; running without timeout enforcement"
         "$@"
     fi
+}
+
+# ── test isolation ───────────────────────────────────────────────────
+#
+# Tests must never read or write the user's real App Group container or
+# preferences domain. The test host is launched by xcodebuild, which forwards
+# every TEST_RUNNER_<VAR> variable to the host as <VAR>; the app reads the two
+# overrides below through SharedSnapshotLocation / AppGroupStore.
+ISOLATION_CONTAINER_PATH=""
+ISOLATION_DEFAULTS_SUITE=""
+
+cleanup_test_isolation() {
+    if [ -n "$ISOLATION_DEFAULTS_SUITE" ]; then
+        defaults delete "$ISOLATION_DEFAULTS_SUITE" >/dev/null 2>&1 || true
+        rm -f "$HOME/Library/Preferences/$ISOLATION_DEFAULTS_SUITE.plist" 2>/dev/null || true
+    fi
+    if [ -n "$ISOLATION_CONTAINER_PATH" ]; then
+        rm -rf "$ISOLATION_CONTAINER_PATH" 2>/dev/null || true
+    fi
+}
+trap cleanup_test_isolation EXIT
+
+setup_test_isolation() {
+    ISOLATION_CONTAINER_PATH="$(mktemp -d "${TMPDIR:-/tmp}/devpulse-appgroup.XXXXXX")"
+    ISOLATION_DEFAULTS_SUITE="local.devpulse.app.tests.$(uuidgen | tr 'A-Z' 'a-z')"
+    export TEST_RUNNER_DEVPULSE_APP_GROUP_CONTAINER_PATH="$ISOLATION_CONTAINER_PATH"
+    export TEST_RUNNER_DEVPULSE_APP_GROUP_DEFAULTS_SUITE="$ISOLATION_DEFAULTS_SUITE"
+    info "Test isolation: container=$ISOLATION_CONTAINER_PATH defaults=$ISOLATION_DEFAULTS_SUITE"
 }
 
 # ── build-for-testing ────────────────────────────────────────────────
@@ -239,6 +274,7 @@ run_tests() {
     local label="${2:-tests}"
 
     report_test_environment
+    setup_test_isolation
 
     local test_args=("${COMMON_ARGS[@]}")
     if [ -n "$test_spec" ]; then
@@ -256,6 +292,8 @@ run_tests() {
         test-without-building \
         >"$log_file" 2>&1; then
         ok "$label passed"
+        # Surface the totals so a passing run stays auditable.
+        grep -E 'Test run with [0-9]+ tests? in [0-9]+ suites?|Executed [0-9]+ tests?, with [0-9]+ failures?' "$log_file" | tail -n 3 >&2 || true
         rm -f "$log_file"
     else
         echo "" >&2
@@ -303,29 +341,30 @@ Environment:
   BUILD_TIMEOUT          Build timeout in seconds  (default: 300)
   TEST_TIMEOUT           Test timeout in seconds   (default: 600)
   DEVPULSE_SIGNING_MODE  Test environment selector:
-                           auto      (default) sign when an Apple Development
-                                     identity can be resolved locally; otherwise
-                                     fall back to unsigned and warn about the
-                                     known App Group entitlement failures
-                           signed    require a development identity (fails fast
-                                     when none is resolvable)
-                           unsigned  force the entitlement-less environment
+                           auto      (default) use profile-based signing when
+                                     local profiles for both bundle ids exist;
+                                     otherwise unsigned (tests write to an
+                                     isolated scratch container either way)
+                           signed    profile-based signing; requires a local
+                                     development team/profile (fails fast)
+                           unsigned  unsigned test host (the default here)
   DEVELOPMENT_TEAM       Development team id; when set, signed mode is used
   CODE_SIGN_IDENTITY     Signing identity name (default: Apple Development)
 
-Signing:
-  The host app declares com.apple.security.application-groups. An unsigned
-  test host has no entitlements, so container access is denied even though the
-  path resolves — that is what makes a handful of shared-container tests fail.
-  Signed mode needs the team plus the local provisioning profiles; see
+Isolation:
+  An unsigned test host would be denied access to the real shared container
+  by LaunchServices, and tests must never modify the user's real App Group
+  data. 'test'/'final' therefore point the host at a throwaway container and
+  preferences suite (TEST_RUNNER_DEVPULSE_APP_GROUP_*), so the App Group tests
+  pass unsigned while exercising the same on-disk read/write code. 'signed'
+  mode remains available when local provisioning profiles are installed; see
   docs/test-signing-modes.md.
 
 Workflow:
   1. Run 'verify.sh build' after checkout or modifying sources.
   2. Run 'verify.sh test DevPulseTests/SomeTest' repeatedly while iterating.
   3. At final acceptance, run 'verify.sh final' to build + run the full suite.
-  4. On a machine without a signing identity the default 'auto' mode keeps
-     working exactly as before (unsigned) and prints the known-failure note.
+  4. The default 'auto' mode needs no signing identity or provisioning profile.
 
 HELP
         exit 0

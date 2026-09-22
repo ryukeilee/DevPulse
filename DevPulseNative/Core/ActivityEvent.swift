@@ -544,9 +544,7 @@ struct ActivityEventStore {
     }
 
     static func live() -> ActivityEventStore? {
-        guard let container = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: SharedSnapshotLocation.appGroupIdentifier
-        ) else { return nil }
+        guard let container = SharedSnapshotLocation.containerURL else { return nil }
         return ActivityEventStore(fileURL: container.appendingPathComponent(fileName))
     }
 
