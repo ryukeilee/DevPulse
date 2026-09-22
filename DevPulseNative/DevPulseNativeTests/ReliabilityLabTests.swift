@@ -758,6 +758,43 @@ final class StoreWriteCounter: @unchecked Sendable {
     }
 }
 
+private final class BlockingFirstActivityWrite: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isFirstWrite = true
+    private var hasEnteredFirstWrite = false
+    private let release = DispatchSemaphore(value: 0)
+    let counter: StoreWriteCounter
+
+    init(counter: StoreWriteCounter) {
+        self.counter = counter
+    }
+
+    func record(_ bytes: Int) {
+        counter.record(bytes)
+        let shouldBlock = lock.withLock {
+            defer { isFirstWrite = false }
+            return isFirstWrite
+        }
+        guard shouldBlock else { return }
+        lock.withLock {
+            hasEnteredFirstWrite = true
+        }
+        release.wait()
+    }
+
+    func waitForFirstWrite() async -> Bool {
+        let deadline = Date().addingTimeInterval(2)
+        while !lock.withLock({ hasEnteredFirstWrite }), Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return lock.withLock { hasEnteredFirstWrite }
+    }
+
+    func releaseFirstWrite() {
+        release.signal()
+    }
+}
+
 private final class ActivityArchiveBenchmarkFixture: @unchecked Sendable {
     let directory: URL
     let store: ActivityEventStore
@@ -893,6 +930,51 @@ private final class ActivityArchiveBenchmarkFixture: @unchecked Sendable {
         print("activity_idle_round_writes=\(observed)")
         #expect(observed == [0, 0, 0])
         #expect(try Data(contentsOf: archive) == archiveBeforeIdleRounds)
+    }
+
+    /// An older save may finish after a newer round has updated the in-memory
+    /// list. The newer archive must win both in memory and on disk.
+    @Test func newerActivityRoundCannotBeOverwrittenByOlderSave() async throws {
+        let dir = tempDir("activity-ordering")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let archive = dir.appendingPathComponent(ActivityEventStore.fileName)
+
+        let clean = snapshot(
+            repositories: (0..<Self.repositoryCount).map { repository(index: $0, changed: false) },
+            generatedAt: Self.timestamp
+        )
+        let changed = snapshot(
+            repositories: (0..<Self.repositoryCount).map { repository(index: $0, changed: true) },
+            generatedAt: Self.timestamp
+        )
+        let counter = StoreWriteCounter()
+        let gate = BlockingFirstActivityWrite(counter: counter)
+        let store = ActivityEventStore(fileURL: archive, writeObserver: gate.record)
+        let scheduler = ScanScheduler(commandMode: false, activityEventStore: store)
+        defer { scheduler.shutdown() }
+
+        // Queue an empty archive write and hold it before the file write.
+        _ = scheduler.recordActivityEvents(previous: clean, current: clean, observedAt: Self.timestamp)
+        #expect(await gate.waitForFirstWrite())
+
+        // This round has 300 events and must not be lost when the older write
+        // is released after it has been submitted.
+        _ = scheduler.recordActivityEvents(previous: clean, current: changed, observedAt: Self.timestamp)
+        gate.releaseFirstWrite()
+        let writesDeadline = Date().addingTimeInterval(2)
+        while counter.writes < 2, Date() < writesDeadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        let loaded = try store.load().get()
+        print(
+            "activity_ordering writes=\(counter.writes) bytes=\(counter.bytes) "
+                + "in_memory_events=\(scheduler.activityEvents.count) stored_events=\(loaded.events.count)"
+        )
+        #expect(counter.writes == 2)
+        #expect(scheduler.activityEvents.count == 300)
+        #expect(loaded.events.count == 300)
+        #expect(counter.bytes == 46 + 316184)
     }
 
     /// The first round must still materialize an empty archive. Once that

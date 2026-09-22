@@ -681,6 +681,17 @@ struct ScanSelfCheckReport {
     }
 }
 
+/// Serializes activity archive writes so an older asynchronous save cannot
+/// publish after a newer round and overwrite it with stale content.
+private actor ActivityEventSaveQueue {
+    func save(
+        _ events: [ActivityEvent],
+        using store: ActivityEventStore
+    ) -> Result<[ActivityEvent], ActivityEventStoreError> {
+        store.save(events)
+    }
+}
+
 /// Manages background scan scheduling with low-power safeguards.
 ///
 /// Key behaviors:
@@ -726,6 +737,7 @@ final class ScanScheduler: ObservableObject {
     /// `nil` means "no archive confirmed on disk" (missing archive, load
     /// failure, or a failed save).
     private var lastPersistedActivityEvents: [ActivityEvent]?
+    private let activityEventSaveQueue = ActivityEventSaveQueue()
     @Published private(set) var ignoredRepositories: [IgnoredRepository] = []
     @Published private(set) var retryingRepositoryIDs: Set<String> = []
     @Published private(set) var lastScanMetrics: ScanMetrics?
@@ -2928,12 +2940,21 @@ final class ScanScheduler: ObservableObject {
             // it again (when it is still the current marker), so the next round
             // retries instead of leaving the archive stale.
             lastPersistedActivityEvents = merged
-            Task.detached(priority: .utility) { @Sendable [weak self] in
-                switch eventStore.save(merged) {
+            let saveQueue = activityEventSaveQueue
+            Task.detached(priority: .utility) { @Sendable [weak self, saveQueue] in
+                // Save requests are serialized in submission order. Without
+                // this, an older empty/partial round can finish after a newer
+                // round and overwrite the archive with stale bytes.
+                switch await saveQueue.save(merged, using: eventStore) {
                 case .success(let saved):
                     await MainActor.run { @MainActor in
-                        self?.activityEvents = saved
-                        self?.lastPersistedActivityEvents = saved
+                        guard let self else { return }
+                        // The in-memory list is already authoritative. Never
+                        // replace it from an out-of-order completion; only
+                        // reaffirm the marker if this is still the current save.
+                        if self.lastPersistedActivityEvents == merged {
+                            self.lastPersistedActivityEvents = saved
+                        }
                     }
                 case .failure(let error):
                     let message = error.localizedDescription
