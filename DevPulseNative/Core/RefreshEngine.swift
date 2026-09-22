@@ -159,6 +159,7 @@ actor RefreshEngine {
         let isFastFirst = source == .manual || source == .configuration
 
         var warnings: [String] = []
+        let discoveryMetrics = ScanMetricsCollector()
 
         // Wrap git command runner with FaultInjector if enabled
         let wrappedRunner: GitCommandRunner = FaultInjector.isEnabled
@@ -179,6 +180,8 @@ actor RefreshEngine {
             forceRepositoryDiscovery: forceRepositoryDiscovery,
             previousSnapshot: previousSnapshot,
             overallDeadline: stage1Deadline,
+            metrics: discoveryMetrics,
+            gitCommandRunner: wrappedRunner,
             warnings: &warnings
         )
         let discoveryElapsed = ProcessInfo.processInfo.systemUptime - stage1Start
@@ -430,7 +433,7 @@ actor RefreshEngine {
                     mergeElapsed: mergeElapsed,
                     persistenceElapsed: persistElapsed,
                     widgetSyncElapsed: widgetElapsed,
-                    totalGitCalls: coreResult.gitStatusCount + extendedResult.completed,
+                    totalGitCalls: coreResult.gitStatusCount + extendedResult.completed + discoveryMetrics.snapshot().gitCommandCount,
                     totalGitTimeouts: coreResult.gitTimeoutCount,
                     totalGitCancellations: coreResult.gitCancelledCount,
                     totalGitFailures: coreResult.gitFailureCount,
@@ -548,6 +551,8 @@ extension RefreshEngine {
         forceRepositoryDiscovery: Bool,
         previousSnapshot: AppGroupData?,
         overallDeadline: TimeInterval,
+        metrics: ScanMetricsCollector,
+        gitCommandRunner: @escaping GitCommandRunner,
         warnings: inout [String]
     ) async -> DiscoveredRepositories {
         let result = await GitRepositoryScanner.discoverOnly(
@@ -559,7 +564,9 @@ extension RefreshEngine {
             previousSnapshot: previousSnapshot,
             overallDeadline: Date().addingTimeInterval(
                 max(0, overallDeadline - ProcessInfo.processInfo.systemUptime)
-            )
+            ),
+            metrics: metrics,
+            gitCommandRunner: gitCommandRunner
         )
 
         // Build workspace kinds map from the discovery result
