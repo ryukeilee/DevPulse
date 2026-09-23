@@ -57,6 +57,7 @@
 		71F546DE4356E96F6F620919 /* RestoreManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA5EEFEFD2B8A1D86CD5A217 /* RestoreManager.swift */; };
 		727379FE3DC69DFB2A8A52AE /* GitCommitLogParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD86A623CAC3519AC0C30562 /* GitCommitLogParser.swift */; };
 		729441BA73376C2E8FE802E0 /* PendingItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5D455DE534BFFF61045A382 /* PendingItem.swift */; };
+		74B136D22C6B453087C834FF /* EndToEndRefreshMeasurementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54AA6B12CE7C4293B9C318F8 /* EndToEndRefreshMeasurementTests.swift */; };
 		7683880DEDE034FE18B40AD7 /* ActivityEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4873AE6A2FD23DFD36A924A9 /* ActivityEvent.swift */; };
 		79689CEC5AB1653B7346E632 /* ScanConfigSanitizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 614D5381B3D42F946B92DF57 /* ScanConfigSanitizationTests.swift */; };
 		7E769276C743399A3F96EF79 /* SharedSnapshotStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50B10E2A750C19F9D6465579 /* SharedSnapshotStoreTests.swift */; };
@@ -214,6 +215,7 @@
 		50B10E2A750C19F9D6465579 /* SharedSnapshotStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedSnapshotStoreTests.swift; sourceTree = "<group>"; };
 		5372E9A7A4D214017A6A3E05 /* RepositoryListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryListView.swift; sourceTree = "<group>"; };
 		5466A47E7000C06E8F25116F /* AppGroupStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppGroupStore.swift; sourceTree = "<group>"; };
+		54AA6B12CE7C4293B9C318F8 /* EndToEndRefreshMeasurementTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EndToEndRefreshMeasurementTests.swift; sourceTree = "<group>"; };
 		54D8572255E924DBC19ED594 /* SnapshotStoreRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotStoreRecoveryTests.swift; sourceTree = "<group>"; };
 		55E2FDD7871BDFDB2CC8B06B /* GitRepositoryScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitRepositoryScanner.swift; sourceTree = "<group>"; };
 		576C6ADACA4040066B4CDA45 /* RepositoryHealthEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryHealthEngine.swift; sourceTree = "<group>"; };
@@ -475,6 +477,7 @@
 				2BB1A121BDF872845E028B42 /* CrossProcessPipelineTests.swift */,
 				A98FC43933C8DF73FD989C7F /* DailyDevelopmentSummaryTests.swift */,
 				5FD66E90A974075BC0D66016 /* DataFreshnessStateTests.swift */,
+				54AA6B12CE7C4293B9C318F8 /* EndToEndRefreshMeasurementTests.swift */,
 				CAB879833D061CF68A12B3FD /* FileCategoryClassifierTests.swift */,
 				D8015118F910E22CA99AAF4B /* ImpactPropagationEngineTests.swift */,
 				6905C32690CB29628B456791 /* LaunchAtLoginControllerTests.swift */,
@@ -674,6 +677,7 @@
 				D0FEF8C629D353E121F8924C /* DailyDevelopmentSummaryTests.swift in Sources */,
 				E75AC50DC06518A792C0474D /* DataFreshnessStateTests.swift in Sources */,
 				FD91F63465149AA13A9675BD /* DevPulseWidget.swift in Sources */,
+				74B136D22C6B453087C834FF /* EndToEndRefreshMeasurementTests.swift in Sources */,
 				FB29D9E09ED33D3ACE700E55 /* FileCategoryClassifierTests.swift in Sources */,
 				D6FFF17A0E20673152B93F1D /* ImpactPropagationEngineTests.swift in Sources */,
 				820E27DB980988D1A11D34BA /* LaunchAtLoginControllerTests.swift in Sources */,
