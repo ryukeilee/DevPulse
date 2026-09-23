@@ -1,17 +1,21 @@
 # 增量刷新性能改动：集成与终局验收核验
 
 本文档主体 §1–§9 是核验线程 `hp/devpulse/t-0009` 对当时 integration-verify 状态的历史记录，
-其原始范围截至当时的集成 tip；旧结论不得自动视为 `e221536` 或 C5 交付状态的当前事实。
-本次 t-0031 的终局复核与过时内容更正见 §10，且以 §10 为当前状态的权威结论。
+其原始范围截至当时的集成 tip；旧结论不得自动视为后续交付的当前事实。§10–§11 记录 t-0031
+对 commit `2db9218` 的终局复核，保留其当时事实与结论。t-0037 集成及最新端到端测量见 §12，测量适用
+commit `b35eebfff499976655a8d99b9b9444564304d60e`；§12 是当前性能结论的权威来源，并明确取代旧章节中
+「整次刷新端到端 wall clock 未测」的当前缺口说法，不改写历史记录。
 
 - t-0009 核验者立场为只核验、不修复；历史测量保留原样，不追溯改写。
-- t-0031 未改生产代码；除本轮唯一的 canonicalization 测试 fixture 隔离修正外，其余只新增本文档当前复核附录。原始输出保存在
-  `.herdr-project/devpulse-t-0031/library/raw-evidence/`（线程工作目录的忽略目录，不随本次 commit 提交）。
-- 操作者提供的 `PROJECT.md` 五条 Acceptance 原文及目标原文逐字收录于 §11；正式判定以 §11 为准。
+- t-0031 未改生产代码；除本轮唯一的 canonicalization 测试 fixture 隔离修正外，其余只新增本文档当时的复核附录。原始输出保存在
+  `.herdr-project/devpulse-t-0031/library/raw-evidence/`（线程工作目录的忽略目录，不随当时 commit 提交）。
+- 操作者提供的 `PROJECT.md` 五条 Acceptance 原文及目标原文逐字收录于 §11；§11 的状态判定仅适用于 t-0031 / `2db9218`，最新状态见 §12。
 
 ---
 
-## 0. 判定总览
+## 0. t-0031 历史判定总览（适用 commit `2db9218`）
+
+> 本表保留 t-0031 当时的判定，不代表 t-0037 集成后的当前状态。最新判定见 §12。
 
 | # | Acceptance 原文判定 | 当前状态 | 依据 |
 | --- | --- | --- | --- |
@@ -1195,7 +1199,9 @@ before-current paired deltas (ms): +1, +22, 0, -1, -9
 
 ## 11. Acceptance 原文的正式逐条判定（操作员 2026-09-23 提供）
 
-### 11.0 目标原文与判定摘要
+### 11.0 目标原文与判定摘要（仅适用于 t-0031 / `2db9218`）
+
+> 本节及 §11.3 中「整次刷新 elapsed 未测」的判定是 `2db9218` 当时的历史事实。t-0037 已运行完整 timer 刷新端到端测量；该缺口已关闭，当前标准 3 判定见 §12.5。
 
 > 在不改变现有功能和数据正确性的前提下，优化 DevPulse 当前 main 的日常增量刷新性能：基于现有基准定位最高实际开销并消除不必要的重复工作，使刷新耗时、Git 子进程或资源占用至少一项获得可复现改善且其他关键指标不明显回退，相关测试与验证通过。
 
@@ -1400,3 +1406,143 @@ private static let tableScratchPath = FileManager.default.temporaryDirectory
 ```
 
 同时移除 `prepareTableScratch()` 先删除固定路径的调用；测试结束仍用 `defer` 清理本次唯一的目录。这样每个测试 host 生成独立 scratch，不触碰其他运行的目录。改动后完整、无签名验证命令与原始输出见 §11.1；结果 **exit 0，917 tests / 91 suites / 0 failures**。`current/final-final.log` 为夹具及其注释修订后的最后一次执行的完整日志。
+
+---
+
+## 12. t-0037 集成与当前验收结论（2026-09-23）
+
+本节是最新当前事实，适用于三条分支集成后的测量候选 commit
+`b35eebfff499976655a8d99b9b9444564304d60e`（短 OID `b35eebf`）；其中测量原始文件保存在
+`.herdr-project/devpulse-t-0037/library/e2e-measurement-20260923-0858/`。§1–§11 的历史结论均保留，
+但早期「整次刷新端到端 wall clock 未测」只适用于其标明的旧 commit。
+
+### 12.1 集成及全量验收
+
+按 `t-0032` → `t-0035` → `t-0034` 顺序集成：`b1ad2c6`、`d2e7674`（含 `72c88fd`）、
+`eb8d492`。`.agent/history.md` 的冲突保留双方 Loop 38 记录，顺排为 Loop 38/39；
+`project.pbxproj` 冲突由 `project.yml` 经 `xcodegen generate` 重建解决，生成差异为 4 行纯新增，
+`DiscoveryGitCallAccountingTests.swift` 与 `EndToEndRefreshMeasurementTests.swift` 均出现在
+DevPulseTests 的 Sources 列表。两测试文件各自在对应源分支相对 `origin/main` 均为 `A`（纯新增）。
+
+集成候选上的全量验收命令与原始汇总：
+
+```text
+DEVPULSE_SIGNING_MODE=unsigned DERIVED_DATA_PATH=/tmp/devpulse-t0037-prepublish-final ./scripts/verify.sh final
+[verify] Building for testing (DerivedData: /tmp/devpulse-t0037-prepublish-final)…
+[verify] Test environment: unsigned (test host writes to an isolated scratch container)
+[verify] Build succeeded
+[verify] Test environment: unsigned (test host writes to an isolated scratch container)
+[verify] Running full test suite
+[verify] full test suite passed
+✔ Test run with 919 tests in 93 suites passed after 106.204 seconds.
+[verify] Final acceptance passed — all checks green
+exit_code=0; failedTests=0
+```
+
+### 12.2 整次刷新端到端 wall clock：历史缺口已关闭
+
+命令（基线 `7f29c0f`，当前候选 `b35eebf`；两版本各构建一次，随后每样本使用
+`test-without-building`；`RUNS=10` 为 10 组配对）：
+
+```sh
+RUNS=10 BASELINE_REV=7f29c0f \
+DERIVED_DATA_PATH=/tmp/devpulse-t0037-e2e-derived \
+OUTPUT_DIR=.herdr-project/devpulse-t-0037/library/e2e-measurement-20260923-0858 \
+./scripts/measure-end-to-end-refresh.sh
+```
+
+测量设施、样本边界、隔离方式和噪声规则详见 [`docs/refresh-end-to-end-measurement.md`](refresh-end-to-end-measurement.md)。
+奇数配对先 baseline、偶数配对先 current；每个样本使用新 workspace、4 个临时仓库、独立 App Group
+目录和 defaults suite。`scheduler_wall_ms` 覆盖 timer refresh 到 snapshot、activity archive 与 history
+archive 全部完成；初次 fixture / forced discovery 不在计时区间内。
+
+样本表（单位 ms；差值为 current − baseline）：
+
+| pair | 顺序 | baseline scheduler | current scheduler | 配对差 |
+|---:|---|---:|---:|---:|
+| 1 | baseline first | 294.135 | 216.117 | -78.018 |
+| 2 | current first | 308.640 | 220.854 | -87.786 |
+| 3 | baseline first | 284.696 | 214.836 | -69.860 |
+| 4 | current first | 304.456 | 214.763 | -89.693 |
+| 5 | baseline first | 303.938 | 224.827 | -79.111 |
+| 6 | current first | 311.263 | 236.609 | -74.654 |
+| 7 | baseline first | 272.904 | 205.370 | -67.534 |
+| 8 | current first | 289.461 | 221.089 | -68.372 |
+| 9 | baseline first | 303.710 | 235.715 | -67.995 |
+| 10 | current first | 293.112 | 222.514 | -70.598 |
+
+`summary.txt` 原始摘要（同一内容保存在该线程的 measurement artifact 目录）：
+
+```text
+metric	baseline_median	current_median	paired_median_delta(current-baseline)	paired_MAD	faster_pairs	slower_pairs	tied_pairs	two_sided_sign_p
+scheduler_wall_ms	298.923	220.971	-72.626	4.862	10/10	0/10	0/10	0.00195
+refresh_engine_ms	142.803	118.267	-23.757	10.170
+command_max_rss_bytes	179576832	179912704	106496	212992	4/10	6/10	0/10	0.75391
+command_peak_footprint_bytes	88728536	88835032	-24588	204776
+elapsed_group_summary	baseline_mean=296.632	baseline_population_sd=11.395	current_mean=221.269	current_population_sd=9.063	pairs=10
+elapsed_improvement_beyond_noise=yes
+elapsed_improved_pairs=10/10
+elapsed_paired_median_delta_ms=-72.626
+elapsed_paired_MAD_ms=4.862
+elapsed_exact_two_sided_sign_p=0.00195
+```
+
+**显式结论：scheduler 端到端刷新耗时改善超出本轮测量噪声。** 10/10 配对更快，配对中位差
+`-72.626 ms`，配对差 MAD `4.862 ms`，精确双侧 sign test `p=0.00195`；本结论依据配对方向
+检验及交替顺序，不使用“中位数差大于单组 MAD”的简单规则。当前中位数 220.971 ms，相对基线
+298.923 ms 约快 24.3%。故「整次刷新端到端 wall clock 未测」缺口已关闭，标准 3 的耗时条件成立。
+
+RSS 是整条 `xcodebuild test-without-building` 命令与 test host 的峰值，不是刷新进程独占内存；
+配对 RSS 差中位数 `+106,496 bytes`，`p=0.75391`，没有内存改善证据。peak footprint 差中位数
+`-24,588 bytes`，也不据此主张内存改善。Git 子进程数不由此 wall clock 推断。
+
+原始证据路径：`samples.tsv`、`summary.txt`、`samples.tsv.raw`、`raw/`、`system/` 及每个样本独立
+目录均在 `.herdr-project/devpulse-t-0037/library/e2e-measurement-20260923-0858/`；目录包含命令元数据、
+两版本构建日志、20 次测试原始日志、`/usr/bin/time -l` 输出和系统快照。
+
+### 12.3 机器状态、并发与测量可信度
+
+测量前 `2026-09-23T08:58:32+0800` 执行 `ps`、`uptime` 与精确进程名检查：load average
+`2.14 / 2.33 / 2.25`；`pgrep -x xcodebuild` / `pgrep -x xctest` 均无进程。可见常驻
+`xcodebuildmcp` helper（非实际构建）、Pi/Herdr、Chrome、Ghostty、Clash Verge，以及已运行的
+`/Applications/DevPulse.app` 和 Widget extension。测量脚本自身的初始快照记录 macOS 27.0、Xcode 27.0、
+Apple M2（Mac14,2，arm64，8 CPU，16 GiB）；build 前 load 为 `1.84 / 2.21 / 2.21`，两版本 build
+后、样本开始前为 `8.32 / 4.22 / 2.98`。各样本前后 1-min load 约 `4.83–9.25`，5-min
+`4.20–4.70`，15-min `2.98–3.22`；完整逐项快照均在上述 `system/` 目录。
+
+因此这是「无其他 xcodebuild/xctest 并发、但非完全空闲机器」上的受控配对测量；候选与基线交替执行，
+配对方向 10/10 一致且显著，但并发非测试进程和 build 后 load 抬升降低了严格隔离性。可信度结论：
+本轮有强方向性证据支持改善，仍建议未来在真正空闲机器复测一次作为独立复现，不把本轮表述成无负载实验室基准。
+
+### 12.4 Git 计数口径修正及确定性重复工作
+
+`RefreshEngine.buildDiagnostics` 旧实现曾以 `core + extended` 重新计算并覆盖汇总的
+`totalGitCalls`，漏掉 discovery 阶段已执行的 Git 调用；其中包括**每轮 discovery 的一次**
+`git worktree list --porcelain -z`。t-0035 `d2e7674` 起 diagnostics 保留 discovery collector 的
+调用数。真实主仓库 + linked worktree 的回归测试记录 discovery/core/extended 为 `1/2/2`，独立 ledger
+为 `5`，修复后 `totalGitCalls=5` 与 ledger 一致，旧覆盖值为 `4`。因此此前的 Git 总数必须按新口径解释；
+端到端脚本本身没有累计 Git spawn，不从耗时推断调用次数。
+
+t-0032 `b1ad2c6` 对 `ScanScheduler.applyPins` 的路径规范化作用域复用有独立确定性测试：20 仓库
+`computations 162→20`，lookups 不变，输出语义相同。它是本轮仍成立的确定性重复工作削减证据，不能与
+Git 子进程数混为一谈。稳态 snapshot 写入/同步结构计数则遵守旧结论：writes `3→2`、
+`F_FULLFSYNC 6→4`，non-identical recovery 仍为 `3/6`（适用 C1 `5cc516f`，非本轮三条分支的新改动）。
+
+### 12.5 当前 Acceptance 判定与仍未关闭的缺口
+
+- **标准 1：成立**——集成候选上的无签名全量验收 exit 0、919 tests / 93 suites、`failedTests=0`；
+  新增的两套测试均纳入工程。
+- **标准 2：成立**——基线 `7f29c0f` 与测量候选 `b35eebf` 在同机、同脚本、10 组交替配对；完整样本及原始
+  输出路径见 §12.2。
+- **标准 3：成立**——timer refresh 的端到端 wall clock 在本轮超出噪声改善；RSS / footprint 未证明改善，
+  Git spawn 未由本测量主张改善；确定性 `applyPins` 路径规范化计算仍为 `162→20`。
+- **标准 4：部分成立（仍有测量缺口）**——全量测试通过且本轮端到端资源指标未显示有意义的反向变化；但
+  没有针对所有 RegressionGate 场景作独立同口径 before/after 测量。`continuousManualRefresh` 仍无可运行入口，
+  UI 响应、真实用户目录扫描和 Widget reload latency 未测，不声称所有其它关键场景均已排除回退。
+- **标准 5：部分成立（全局最高开销仍未穷尽）**——`applyPins` 的路径规范化重复计算和 diagnostics 的 discovery
+  调用漏计均有文件/符号与独立计数证据；端到端样本证明总耗时改善，但未对每个 refresh stage 作 profile 排序，
+  不宣称已证明所有路径中最高实际耗时已完全定位。
+
+仍未关闭的缺口：真正空闲主机上的独立 e2e 复测；更多仓库规模与用户目录的安装态刷新；CPU/RSS 的刷新进程独占
+测量；所有 RegressionGate 场景的统一 before/after 与完整 `checkAll` 实际参数组合；`continuousManualRefresh`、
+UI 主线程 stall、Widget reload wall clock，以及刷新阶段最高实际开销的完整排序。

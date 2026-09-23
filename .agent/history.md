@@ -21,28 +21,6 @@
 
 ---
 
-## Loop 19 — 2026-08-12（签名安装运行新 app，合并提交推送 Loop 17+18 改动）
-
-- **问题**：无新的高价值代码问题（Observe/Evidence 阶段未发现新 Bug 证据，Decide 判定本轮无变更）。工作区有 Loop 17（注意力计数）与 Loop 18（显示链路可靠性）已完成并验证的改动共 14 个文件，用户要求执行 loop 后签名安装运行新 app，并把改动合并提交推送（明确授权 commit/push）。
-- **证据**：
-  - `git status --porcelain=v2 --branch` → main 与 origin/main 同步（HEAD `713de83`，ab +0 -0），14 个未提交文件（Loop 17 的 4 个 + Loop 18 的 10 个），无 untracked 生成物。
-  - `grep -rn -e TODO -e FIXME DevPulseNative/` → 无匹配；`git diff --check` → 通过。
-  - Loop 18 已全量验证：`verify.sh final`（Build succeeded + full test suite passed + Final acceptance passed）、`verify.sh widgetkit`（15 PASS, 0 FAIL）、11 个受影响测试类全过。
-  - 签名环境：keychain 有 `Apple Development: ryukei_li@hotmail.com (5BJ9GM7VZR)`；已安装 app 内含 host/widget 的 embedded.provisionprofile（可复用，Loop 14/16 已验证匹配 bundle）；Xcode 无登录账号。
-- **原因**：无新证据支持业务修改；最高价值动作是把已验证改动落地：签名安装运行（用户要求）并提交推送（用户授权）。
-- **修改**：无业务代码修改；追加 Loop 19 记录。
-- **验证**：
-  - 标准 `install-and-self-check.sh` 被环境阻塞（`No Xcode Apple account is configured on this Mac`，与 Loop 14/16 相同）。
-  - 手动签名路径（沿用 Loop 16 成功方案 + AGENTS.md re-sign 注意事项）：用 `/tmp/devpulse-build` 的 build-for-testing 产物复制、移除 `DevPulseTests.xctest`、放入 embedded.provisionprofile（host + widget 从已安装 app 复制）、`codesign --force --sign` host（`--entitlements App/DevPulse.entitlements`）与 widget（`--entitlements Widget/DevPulseWidgetExtension.entitlements`）。
-  - `codesign --verify --deep --strict` → valid on disk，satisfies Designated Requirement；host/widget entitlements 均含 `com.apple.security.application-groups`；无测试 bundle。
-  - 安装到 `/Applications/DevPulse.app`（旧版备份到 `/tmp/devpulse-install-loop19/DevPulse.app.bak`），`open -n` 启动，进程运行（PID 75431）。
-  - `--self-check`（签名后）→ `self_check.result=pass`、`refresh_phase=success`、`repository_count=3`、`validation=pass`、`lifecycle.widget_registration=active`、`lifecycle.self_heal=^pass`、exit=0。
-  - 共享快照（`~/Library/Group Containers/group.local.devpulse/repositories.json`）：`generatedAt=2026-08-12T11:13:05Z`、`writtenAt=11:13:07Z`、`lastSuccessfulRefreshAt=11:13:05Z` 为启动后新值；`storageRevision=6755`；`DevPulse status=changed` 与工作区 14 个未提交文件一致。
-  - 提交前：`scripts/secret-scan.sh staged`、`git diff --cached --check` 通过；push 到 `origin/main`。
-- **剩余风险**：无签名自动安装能力（需 Xcode 登录 Apple 账号）——手动签名路径已验证可用但每次需人工执行；Widget 在桌面上的实际渲染与交互、今日摘要降级文案与空态渲染仍需人工确认。
-
----
-
 ## Loop 20 — 2026-08-12（新增可达的「待收尾事项」集中入口）
 
 - **问题**：项目已有 `PendingItem` 自动评估、持久化和页面文件，但 `PendingCenterView` 没有接入 `ContentView` 的任何导航入口，用户无法集中查看扫描识别出的未提交改动、未推送提交和其他未完成状态；页面默认还混合显示已恢复/永久忽略记录，已有排序状态没有可操作控件。
