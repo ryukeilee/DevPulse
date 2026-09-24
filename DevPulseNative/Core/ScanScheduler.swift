@@ -101,6 +101,10 @@ typealias RepositoryRetryExecution = @Sendable (
     _ previousSnapshot: RepositorySnapshot
 ) async -> RepositorySnapshot?
 
+protocol RefreshMeasurementSink: Sendable {
+    func record(name: String, duration: TimeInterval, calls: Int)
+}
+
 private struct DeferredScanRefresh {
     let forceRepositoryDiscovery: Bool
     let source: ScanRefreshSource
@@ -824,6 +828,7 @@ final class ScanScheduler: ObservableObject {
     /// proceeding with a new scan regardless.
     private static let repositoryRetryDrainTimeout: TimeInterval = 2.0
     private let activityEventStore: ActivityEventStore?
+    private let measurementObserver: RefreshMeasurementSink?
     let historyStore: RepositoryHistoryStore?
     private var workspaceLoadingAttempted = false
     private var pendingItemsLoadingAttempted = false
@@ -1262,6 +1267,7 @@ final class ScanScheduler: ObservableObject {
     init(commandMode: Bool = false,
          activityEventStore: ActivityEventStore? = nil,
          historyStore: RepositoryHistoryStore? = nil,
+         measurementObserver: RefreshMeasurementSink? = nil,
          scanExecution: @escaping ScanExecution = { request in
         let engine = RefreshEngine()
 
@@ -1302,6 +1308,7 @@ final class ScanScheduler: ObservableObject {
             )
         }
         self.activityEventStore = commandMode ? nil : activityEventStore
+        self.measurementObserver = measurementObserver
         self.historyStore = commandMode ? nil : (historyStore ?? RepositoryHistoryStore.live())
         self.workspaceStore = commandMode ? WorkspaceStore(fileURL: URL(fileURLWithPath: "/dev/null")) : WorkspaceStore.live()
         self.pendingItemStore = commandMode ? PendingItemStore(fileURL: URL(fileURLWithPath: "/dev/null")) : PendingItemStore.live()
@@ -2002,9 +2009,11 @@ final class ScanScheduler: ObservableObject {
 
                 let previous = self.lastResult
                 let discoveryWasIncomplete = GitRepositoryScanner.discoveryWasIncomplete(result.warnings)
+                let applyPinsStartedAt = ProcessInfo.processInfo.systemUptime
                 let pinned = self.applyPins(result.data).withDiscoveryWasIncomplete(
                     discoveryWasIncomplete ? true : nil
                 )
+                self.measurementObserver?.record(name: "scheduler_apply_pins", duration: ProcessInfo.processInfo.systemUptime - applyPinsStartedAt, calls: 1)
                 let completedAt = DateFormatting.date(from: pinned.generatedAt)
                 let isDegraded = pinned.scanSummary.errorRepositories > 0
                     || discoveryWasIncomplete
@@ -2941,10 +2950,12 @@ final class ScanScheduler: ObservableObject {
             // retries instead of leaving the archive stale.
             lastPersistedActivityEvents = merged
             let saveQueue = activityEventSaveQueue
+            let measurementObserver = self.measurementObserver
             Task.detached(priority: .utility) { @Sendable [weak self, saveQueue] in
                 // Save requests are serialized in submission order. Without
                 // this, an older empty/partial round can finish after a newer
                 // round and overwrite the archive with stale bytes.
+                let archiveSaveStartedAt = ProcessInfo.processInfo.systemUptime
                 switch await saveQueue.save(merged, using: eventStore) {
                 case .success(let saved):
                     await MainActor.run { @MainActor in
@@ -2968,6 +2979,7 @@ final class ScanScheduler: ObservableObject {
                         }
                     }
                 }
+                measurementObserver?.record(name: "activity_archive_save_queue", duration: ProcessInfo.processInfo.systemUptime - archiveSaveStartedAt, calls: 1)
             }
         }
 
@@ -2983,9 +2995,11 @@ final class ScanScheduler: ObservableObject {
         guard let historyStore else { return }
         let recordedAt = snapshot.generatedAt
         let repositories = snapshot.repositories
+        let measurementObserver = self.measurementObserver
 
         Task.detached(priority: .utility) { @Sendable [weak self] in
             // Classification and read-merge-write share one locked archive load.
+            let archiveSaveStartedAt = ProcessInfo.processInfo.systemUptime
             switch historyStore.recordSnapshotStates(repositories: repositories, recordedAt: recordedAt) {
             case .success(let outcome):
                 if outcome.addedCount > 0 {
@@ -2999,6 +3013,7 @@ final class ScanScheduler: ObservableObject {
             case .failure:
                 break
             }
+            measurementObserver?.record(name: "repository_history_archive_update", duration: ProcessInfo.processInfo.systemUptime - archiveSaveStartedAt, calls: 1)
         }
     }
 
@@ -3199,7 +3214,10 @@ final class ScanScheduler: ObservableObject {
         let writtenAt = DateFormatting.nowISO()
         // Always clear isRefreshing before writing so the Widget never
         // sees a stale "refreshing" flag from a killed or crashed scan.
-        let snapshotToWrite = applyPins(snapshot)
+        let applyPinsStartedAt = ProcessInfo.processInfo.systemUptime
+        let pinnedSnapshot = applyPins(snapshot)
+        measurementObserver?.record(name: "snapshot_prepare_apply_pins", duration: ProcessInfo.processInfo.systemUptime - applyPinsStartedAt, calls: 1)
+        let snapshotToWrite = pinnedSnapshot
             .withWrittenAt(writtenAt)
             .withPendingItemWidgetSummary(
                 pendingItems.isEmpty ? nil : pendingItemWidgetSummary
@@ -3211,6 +3229,7 @@ final class ScanScheduler: ObservableObject {
         syncTaskGeneration &+= 1
         let currentGeneration = syncTaskGeneration
         let previousWrite = snapshotSyncTask
+        let measurementObserver = self.measurementObserver
 
         diagnostics.lastSnapshotStoreTrigger = reason
         diagnostics.lastSnapshotStoreState = .idle
@@ -3234,6 +3253,7 @@ final class ScanScheduler: ObservableObject {
             // This keeps the cross-process compare-and-swap guard meaningful
             // without making a newer chained write fail on our own revision.
             let observedStorageRevision: UInt64
+            let snapshotReadStartedAt = ProcessInfo.processInfo.systemUptime
             switch AppGroupStore.read() {
             case .success(let current):
                 observedStorageRevision = current.storageRevision
@@ -3242,6 +3262,7 @@ final class ScanScheduler: ObservableObject {
             case .failure:
                 observedStorageRevision = fallbackObservedRevision
             }
+            measurementObserver?.record(name: "snapshot_revision_read", duration: ProcessInfo.processInfo.systemUptime - snapshotReadStartedAt, calls: 1)
 
             let stillCurrent = await MainActor.run { [weak self] in
                 guard let self else { return false }
@@ -3249,10 +3270,12 @@ final class ScanScheduler: ObservableObject {
             }
             guard stillCurrent else { return }
 
+            let snapshotWriteStartedAt = ProcessInfo.processInfo.systemUptime
             let writeResult = AppGroupStore.write(
                 snapshotToWrite,
                 observedStorageRevision: observedStorageRevision
             )
+            measurementObserver?.record(name: "snapshot_commit_and_verify", duration: ProcessInfo.processInfo.systemUptime - snapshotWriteStartedAt, calls: 1)
             await MainActor.run { [weak self] in
                 guard let self,
                       !self.terminating,
@@ -3315,7 +3338,9 @@ final class ScanScheduler: ObservableObject {
         if reloadDecision.shouldRequest {
             diagnostics.lastReloadRequestedAt = Date()
             recordEvent(.widgetReloadRequested, "Widget reload requested (\(reason)): \(reloadDecision.detail)")
+            let widgetReloadStartedAt = ProcessInfo.processInfo.systemUptime
             AppGroupStore.reloadWidgets()
+            measurementObserver?.record(name: "widget_reload_request_api", duration: ProcessInfo.processInfo.systemUptime - widgetReloadStartedAt, calls: 1)
         } else {
             recordEvent(.widgetReloadSkipped, "Widget reload skipped (\(reason)): \(reloadDecision.detail)")
         }

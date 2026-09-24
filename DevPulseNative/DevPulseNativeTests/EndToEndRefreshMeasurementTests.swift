@@ -44,6 +44,7 @@ struct EndToEndRefreshMeasurementTests {
         defaults.synchronize()
 
         let executionRecorder = RefreshExecutionRecorder()
+        let phaseRecorder = RefreshPhaseRecorder()
         let scanExecution: ScanExecution = { request in
             let engine = RefreshEngine()
             let progressStream = await engine.progress
@@ -69,6 +70,9 @@ struct EndToEndRefreshMeasurementTests {
             progressTask?.cancel()
             await executionRecorder.record(
                 engineElapsed: result.diagnostics.overallElapsed,
+                stageDurations: result.stageDurations.mapValues { $0 },
+                stageGitCalls: Dictionary(uniqueKeysWithValues: result.diagnostics.stageDiagnostics.map { ($0.stage, $0.gitCommandCount) }),
+                totalGitCalls: result.diagnostics.totalGitCalls,
                 forcedDiscovery: request.forceRepositoryDiscovery,
                 knownRepositoryCount: request.knownRepositoryPaths.count,
                 repositoryCount: result.data.repositories.count
@@ -90,6 +94,7 @@ struct EndToEndRefreshMeasurementTests {
             commandMode: false,
             activityEventStore: activityStore,
             historyStore: historyStore,
+            measurementObserver: phaseRecorder,
             scanExecution: scanExecution
         )
         scheduler.stopBackgroundScanning()
@@ -132,7 +137,9 @@ struct EndToEndRefreshMeasurementTests {
             comparedTo: previousHistoryArchive
         )
         let refreshElapsed = ProcessInfo.processInfo.systemUptime - refreshStartedAt
+        try await Task.sleep(nanoseconds: 20_000_000)
         let execution = try #require(await executionRecorder.snapshot())
+        let schedulerPhases = phaseRecorder.snapshot()
 
         #expect(!execution.forcedDiscovery)
         #expect(execution.knownRepositoryCount == repositories.count)
@@ -147,6 +154,24 @@ struct EndToEndRefreshMeasurementTests {
             "e2e_refresh.sample=\(sample)",
             "scheduler_wall_ms=\(Self.format(refreshElapsed * 1_000))",
             "refresh_engine_ms=\(Self.format(execution.engineElapsed * 1_000))",
+            "discovery_ms=\(Self.format((execution.stageDurations[.discovery] ?? 0) * 1_000))",
+            "core_status_ms=\(Self.format((execution.stageDurations[.coreStatus] ?? 0) * 1_000))",
+            "extended_info_ms=\(Self.format((execution.stageDurations[.extendedInfo] ?? 0) * 1_000))",
+            "merge_ms=\(Self.format((execution.stageDurations[.merge] ?? 0) * 1_000))",
+            "engine_persistence_prepare_ms=\(Self.format((execution.stageDurations[.persistence] ?? 0) * 1_000))",
+            "engine_widget_deferred_ms=\(Self.format((execution.stageDurations[.widgetSync] ?? 0) * 1_000))",
+            "discovery_git_calls=\(execution.stageGitCalls[.discovery] ?? 0)",
+            "core_status_git_calls=\(execution.stageGitCalls[.coreStatus] ?? 0)",
+            "extended_info_git_calls=\(execution.stageGitCalls[.extendedInfo] ?? 0)",
+            "total_git_calls=\(execution.totalGitCalls)",
+            "scheduler_apply_pins_ms=\(Self.format((schedulerPhases["scheduler_apply_pins"]?.duration ?? 0) * 1_000))",
+            "snapshot_prepare_apply_pins_ms=\(Self.format((schedulerPhases["snapshot_prepare_apply_pins"]?.duration ?? 0) * 1_000))",
+            "snapshot_revision_read_ms=\(Self.format((schedulerPhases["snapshot_revision_read"]?.duration ?? 0) * 1_000))",
+            "snapshot_commit_and_verify_ms=\(Self.format((schedulerPhases["snapshot_commit_and_verify"]?.duration ?? 0) * 1_000))",
+            "activity_archive_save_queue_ms=\(Self.format((schedulerPhases["activity_archive_save_queue"]?.duration ?? 0) * 1_000))",
+            "repository_history_archive_update_ms=\(Self.format((schedulerPhases["repository_history_archive_update"]?.duration ?? 0) * 1_000))",
+            "widget_reload_request_api_ms=\(Self.format((schedulerPhases["widget_reload_request_api"]?.duration ?? 0) * 1_000))",
+            "widget_reload_request_calls=\(schedulerPhases["widget_reload_request_api"]?.calls ?? 0)",
             "repositories=\(execution.repositoryCount)",
             "known_repositories=\(execution.knownRepositoryCount)",
             "forced_discovery=\(execution.forcedDiscovery)",
@@ -254,6 +279,9 @@ struct EndToEndRefreshMeasurementTests {
 private actor RefreshExecutionRecorder {
     struct Observation: Sendable {
         let engineElapsed: TimeInterval
+        let stageDurations: [RefreshPipelineStage: TimeInterval]
+        let stageGitCalls: [RefreshPipelineStage: Int]
+        let totalGitCalls: Int
         let forcedDiscovery: Bool
         let knownRepositoryCount: Int
         let repositoryCount: Int
@@ -261,9 +289,12 @@ private actor RefreshExecutionRecorder {
 
     private var observation: Observation?
 
-    func record(engineElapsed: TimeInterval, forcedDiscovery: Bool, knownRepositoryCount: Int, repositoryCount: Int) {
+    func record(engineElapsed: TimeInterval, stageDurations: [RefreshPipelineStage: TimeInterval], stageGitCalls: [RefreshPipelineStage: Int], totalGitCalls: Int, forcedDiscovery: Bool, knownRepositoryCount: Int, repositoryCount: Int) {
         observation = Observation(
             engineElapsed: engineElapsed,
+            stageDurations: stageDurations,
+            stageGitCalls: stageGitCalls,
+            totalGitCalls: totalGitCalls,
             forcedDiscovery: forcedDiscovery,
             knownRepositoryCount: knownRepositoryCount,
             repositoryCount: repositoryCount
@@ -276,6 +307,31 @@ private actor RefreshExecutionRecorder {
 
     func snapshot() -> Observation? {
         observation
+    }
+}
+
+private final class RefreshPhaseRecorder: RefreshMeasurementSink, @unchecked Sendable {
+    struct Total: Sendable {
+        var duration: TimeInterval
+        var calls: Int
+    }
+
+    private let lock = NSLock()
+    private var totals: [String: Total] = [:]
+
+    func record(name: String, duration: TimeInterval, calls: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        var total = totals[name] ?? Total(duration: 0, calls: 0)
+        total.duration += duration
+        total.calls += calls
+        totals[name] = total
+    }
+
+    func snapshot() -> [String: Total] {
+        lock.lock()
+        defer { lock.unlock() }
+        return totals
     }
 }
 

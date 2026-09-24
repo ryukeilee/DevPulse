@@ -433,7 +433,7 @@ actor RefreshEngine {
                     mergeElapsed: mergeElapsed,
                     persistenceElapsed: persistElapsed,
                     widgetSyncElapsed: widgetElapsed,
-                    totalGitCalls: coreResult.gitStatusCount + extendedResult.completed + discoveryMetrics.snapshot().gitCommandCount,
+                    totalGitCalls: coreResult.gitStatusCount + extendedResult.gitCommandCount + discoveryMetrics.snapshot().gitCommandCount,
                     totalGitTimeouts: coreResult.gitTimeoutCount,
                     totalGitCancellations: coreResult.gitCancelledCount,
                     totalGitFailures: coreResult.gitFailureCount,
@@ -456,6 +456,7 @@ actor RefreshEngine {
             repositoryRetryCount: 0,
             coreMetrics: coreResult,
             extendedMetrics: extendedResult,
+            discoveryGitCallCount: discoveryMetrics.snapshot().gitCommandCount,
             timeBudgetExhaustedByStage: timeBudgetExhaustedByStage,
             persistError: nil,
             widgetSyncError: widgetReloadError
@@ -538,6 +539,24 @@ struct ExtendedReadResult: Sendable {
     let completed: Int
     let total: Int
     let reusedMetadataCount: Int
+    let gitCommandCount: Int
+}
+
+private final class GitInvocationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
 }
 
 // MARK: - Stage 1: Discovery
@@ -854,7 +873,13 @@ extension RefreshEngine {
         warnings: inout [String]
     ) async -> ExtendedReadResult {
         guard !coreResult.snapshots.isEmpty else {
-            return ExtendedReadResult(snapshots: [], completed: 0, total: 0, reusedMetadataCount: 0)
+            return ExtendedReadResult(snapshots: [], completed: 0, total: 0, reusedMetadataCount: 0, gitCommandCount: 0)
+        }
+
+        let invocationCounter = GitInvocationCounter()
+        let countedGitCommandRunner: GitCommandRunner = { arguments, workingDirectory, timeout, outputLimit, isCancelled in
+            invocationCounter.increment()
+            return gitCommandRunner(arguments, workingDirectory, timeout, outputLimit, isCancelled)
         }
 
         // Keep non-log results keyed by their original core-status index.
@@ -887,7 +912,8 @@ extension RefreshEngine {
         guard !needsLog.isEmpty else {
             let snapshots = coreResult.snapshots.indices.compactMap { baselineByIndex[$0] }
             return ExtendedReadResult(snapshots: snapshots, completed: snapshots.count,
-                                      total: coreResult.snapshots.count, reusedMetadataCount: reusedCount)
+                                      total: coreResult.snapshots.count, reusedMetadataCount: reusedCount,
+                                      gitCommandCount: invocationCounter.value)
         }
 
         let concurrency = min(config.maxConcurrentGitOps, needsLog.count)
@@ -910,7 +936,7 @@ extension RefreshEngine {
                     guard remaining > 0 else { return (origIdx, nil) }
                     let timeout = min(config.gitCommandTimeout, max(0.5, remaining))
 
-                    let logResult = gitCommandRunner(
+                    let logResult = countedGitCommandRunner(
                         ["log", "-1", "--pretty=%H%x00%cI%x00%s"],
                         snapshot.path, timeout,
                         ProcessRunner.defaultOutputLimit,
@@ -992,7 +1018,8 @@ extension RefreshEngine {
             snapshots: finalSnapshots,
             completed: logResults.count,
             total: coreResult.snapshots.count,
-            reusedMetadataCount: reusedCount
+            reusedMetadataCount: reusedCount,
+            gitCommandCount: invocationCounter.value
         )
     }
 }
@@ -1287,6 +1314,7 @@ extension RefreshEngine {
         repositoryRetryCount: Int,
         coreMetrics: CoreReadResult?,
         extendedMetrics: ExtendedReadResult?,
+        discoveryGitCallCount: Int = 0,
         timeBudgetExhaustedByStage: [RefreshPipelineStage: Bool] = [:],
         persistError: String? = nil,
         widgetSyncError: String? = nil
@@ -1300,8 +1328,9 @@ extension RefreshEngine {
             StageDiagnostics(
                 stage: stage,
                 elapsed: result.stageDurations[stage] ?? 0,
-                gitCommandCount: stage == .coreStatus ? (coreMetrics?.gitStatusCount ?? 0)
-                    : stage == .extendedInfo ? (extendedMetrics?.completed ?? 0) : 0,
+                gitCommandCount: stage == .discovery ? discoveryGitCallCount
+                    : stage == .coreStatus ? (coreMetrics?.gitStatusCount ?? 0)
+                    : stage == .extendedInfo ? (extendedMetrics?.gitCommandCount ?? 0) : 0,
                 gitTimeoutCount: stage == .coreStatus ? (coreMetrics?.gitTimeoutCount ?? 0) : 0,
                 gitCancellationCount: stage == .coreStatus ? (coreMetrics?.gitCancelledCount ?? 0) : 0,
                 gitFailureCount: stage == .coreStatus ? (coreMetrics?.gitFailureCount ?? 0) : 0,

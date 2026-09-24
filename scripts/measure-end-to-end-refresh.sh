@@ -146,12 +146,30 @@ run_sample() {
         exit 1
     fi
 
-    local elapsed engine_elapsed max_rss footprint
+    local elapsed engine_elapsed discovery core_status extended merge persist widget git_calls discovery_git_calls core_git_calls extended_git_calls apply_pins snapshot_pins snapshot_read snapshot_commit activity_save history_save widget_reload widget_reload_calls max_rss footprint
     elapsed="$(printf '%s\n' "$benchmark" | sed -n 's/.*scheduler_wall_ms=\([0-9.][0-9.]*\).*/\1/p')"
     engine_elapsed="$(printf '%s\n' "$benchmark" | sed -n 's/.*refresh_engine_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    discovery="$(printf '%s\n' "$benchmark" | sed -n 's/.*discovery_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    core_status="$(printf '%s\n' "$benchmark" | sed -n 's/.*core_status_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    extended="$(printf '%s\n' "$benchmark" | sed -n 's/.*extended_info_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    merge="$(printf '%s\n' "$benchmark" | sed -n 's/.*merge_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    persist="$(printf '%s\n' "$benchmark" | sed -n 's/.*engine_persistence_prepare_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    widget="$(printf '%s\n' "$benchmark" | sed -n 's/.*engine_widget_deferred_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    git_calls="$(printf '%s\n' "$benchmark" | sed -n 's/.*total_git_calls=\([0-9][0-9]*\).*/\1/p')"
+    discovery_git_calls="$(printf '%s\n' "$benchmark" | sed -n 's/.*discovery_git_calls=\([0-9][0-9]*\).*/\1/p')"
+    core_git_calls="$(printf '%s\n' "$benchmark" | sed -n 's/.*core_status_git_calls=\([0-9][0-9]*\).*/\1/p')"
+    extended_git_calls="$(printf '%s\n' "$benchmark" | sed -n 's/.*extended_info_git_calls=\([0-9][0-9]*\).*/\1/p')"
+    apply_pins="$(printf '%s\n' "$benchmark" | sed -n 's/.*scheduler_apply_pins_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    snapshot_pins="$(printf '%s\n' "$benchmark" | sed -n 's/.*snapshot_prepare_apply_pins_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    snapshot_read="$(printf '%s\n' "$benchmark" | sed -n 's/.*snapshot_revision_read_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    snapshot_commit="$(printf '%s\n' "$benchmark" | sed -n 's/.*snapshot_commit_and_verify_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    activity_save="$(printf '%s\n' "$benchmark" | sed -n 's/.*activity_archive_save_queue_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    history_save="$(printf '%s\n' "$benchmark" | sed -n 's/.*repository_history_archive_update_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    widget_reload="$(printf '%s\n' "$benchmark" | sed -n 's/.*widget_reload_request_api_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    widget_reload_calls="$(printf '%s\n' "$benchmark" | sed -n 's/.*widget_reload_request_calls=\([0-9][0-9]*\).*/\1/p')"
     max_rss="$(awk '/maximum resident set size/ { print $1; exit }' "$time_log")"
     footprint="$(awk '/peak memory footprint/ { print $1; exit }' "$time_log")"
-    if [[ -z "$elapsed" || -z "$engine_elapsed" || -z "$max_rss" || -z "$footprint" ]]; then
+    if [[ -z "$elapsed" || -z "$engine_elapsed" || -z "$discovery" || -z "$core_status" || -z "$extended" || -z "$merge" || -z "$persist" || -z "$widget" || -z "$git_calls" || -z "$discovery_git_calls" || -z "$core_git_calls" || -z "$extended_git_calls" || -z "$apply_pins" || -z "$snapshot_pins" || -z "$snapshot_read" || -z "$snapshot_commit" || -z "$activity_save" || -z "$history_save" || -z "$widget_reload" || -z "$widget_reload_calls" || -z "$max_rss" || -z "$footprint" ]]; then
         echo "sample $sample_id had incomplete measurement data; raw logs: $log, $time_log" >&2
         exit 1
     fi
@@ -159,8 +177,8 @@ run_sample() {
     defaults delete "$defaults_suite" >/dev/null 2>&1 || true
     rm -f "$HOME/Library/Preferences/$defaults_suite.plist" 2>/dev/null || true
     capture_system_state "$system_tag-after"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$pair" "$label" "$order" "$elapsed" "$engine_elapsed" "$max_rss" "$footprint" \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$pair" "$label" "$order" "$elapsed" "$engine_elapsed" "$discovery" "$core_status" "$extended" "$merge" "$persist" "$widget" "$git_calls" "$discovery_git_calls" "$core_git_calls" "$extended_git_calls" "$apply_pins" "$snapshot_pins" "$snapshot_read" "$snapshot_commit" "$activity_save" "$history_save" "$widget_reload" "$widget_reload_calls" "$max_rss" "$footprint" \
         | tee -a "$OUTPUT_DIR/samples.tsv"
     printf '%s\n' "$benchmark" >> "$OUTPUT_DIR/samples.tsv.raw"
 }
@@ -169,16 +187,20 @@ apply_baseline_isolation_shim() {
     local tree="$1"
     local models="$tree/DevPulseNative/Core/Models.swift"
 
-    # 7f29c0f predates the repository's TEST_RUNNER_* App Group isolation hook.
-    # Backport only that test harness seam into this throwaway archive: with no
-    # override set it resolves the exact same real group container and defaults
-    # suite as the baseline code. No baseline source in the checkout is changed.
-    perl -0pi -e 's#enum SharedSnapshotLocation \{\n    static let appGroupIdentifier = "group\.local\.devpulse"\n    static let fileName = "repositories\.json"\n\}#enum SharedSnapshotLocation {\n    static let appGroupIdentifier = "group.local.devpulse"\n    static let fileName = "repositories.json"\n    private static let containerOverrideKey = "DEVPULSE_APP_GROUP_CONTAINER_PATH"\n    private static let defaultsOverrideKey = "DEVPULSE_APP_GROUP_DEFAULTS_SUITE"\n\n    static func containerURL(forGroupIdentifier identifier: String) -> URL? {\n        if identifier == appGroupIdentifier,\n           let path = ProcessInfo.processInfo.environment[containerOverrideKey], !path.isEmpty {\n            return URL(fileURLWithPath: path, isDirectory: true)\n        }\n        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: identifier)\n    }\n\n    static var containerURL: URL? {\n        containerURL(forGroupIdentifier: appGroupIdentifier)\n    }\n\n    static var defaults: UserDefaults? {\n        let suite = ProcessInfo.processInfo.environment[defaultsOverrideKey] ?? appGroupIdentifier\n        return UserDefaults(suiteName: suite)\n    }\n}#s or die "Could not install baseline SharedSnapshotLocation isolation seam\n"' "$models"
+    # Older baselines predate App Group test isolation. Backport the existing
+    # harness seam only when absent; current baselines already contain it.
+    if ! grep -q 'containerPathOverrideKey' "$models"; then
+        perl -0pi -e 's#enum SharedSnapshotLocation \{\n    static let appGroupIdentifier = "group\.local\.devpulse"\n    static let fileName = "repositories\.json"\n\}#enum SharedSnapshotLocation {\n    static let appGroupIdentifier = "group.local.devpulse"\n    static let fileName = "repositories.json"\n    private static let containerPathOverrideKey = "DEVPULSE_APP_GROUP_CONTAINER_PATH"\n    private static let defaultsSuiteOverrideKey = "DEVPULSE_APP_GROUP_DEFAULTS_SUITE"\n    static func containerURL(forGroupIdentifier identifier: String) -> URL? {\n        if identifier == appGroupIdentifier, let path = ProcessInfo.processInfo.environment[containerPathOverrideKey], !path.isEmpty { return URL(fileURLWithPath: path, isDirectory: true) }\n        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: identifier)\n    }\n    static var containerURL: URL? { containerURL(forGroupIdentifier: appGroupIdentifier) }\n    static var defaults: UserDefaults? { UserDefaults(suiteName: ProcessInfo.processInfo.environment[defaultsSuiteOverrideKey] ?? appGroupIdentifier) }\n}#s or die "Could not install baseline SharedSnapshotLocation isolation seam\n"' "$models"
 
-    # Route baseline Core storage and preferences through the shim, including
-    # scheduler-owned settings and secondary files (workspace/pending/history).
-    find "$tree/DevPulseNative/Core" -name '*.swift' -exec perl -0pi -e \
-        's#FileManager\.default\.containerURL\(\s*forSecurityApplicationGroupIdentifier:\s*(?:SharedSnapshotLocation|AppGroupStore)\.appGroupIdentifier\s*\)#SharedSnapshotLocation.containerURL#sg; s#FileManager\.default\.containerURL\(\s*forSecurityApplicationGroupIdentifier:\s*appGroupIdentifier\s*\)#SharedSnapshotLocation.containerURL(forGroupIdentifier: appGroupIdentifier)#sg; s#UserDefaults\(suiteName:\s*AppGroupStore\.appGroupIdentifier\)#SharedSnapshotLocation.defaults#g' {} +
+        find "$tree/DevPulseNative/Core" -name '*.swift' -exec perl -0pi -e \
+            's#FileManager\.default\.containerURL\(\s*forSecurityApplicationGroupIdentifier:\s*(?:SharedSnapshotLocation|AppGroupStore)\.appGroupIdentifier\s*\)#SharedSnapshotLocation.containerURL#sg; s#FileManager\.default\.containerURL\(\s*forSecurityApplicationGroupIdentifier:\s*appGroupIdentifier\s*\)#SharedSnapshotLocation.containerURL(forGroupIdentifier: appGroupIdentifier)#sg; s#UserDefaults\(suiteName:\s*AppGroupStore\.appGroupIdentifier\)#SharedSnapshotLocation.defaults#g' {} +
+    fi
+
+    # The benchmark's scheduler probe is measurement-only instrumentation;
+    # apply that exact diff to the archived baseline so both variants expose
+    # the same observer without importing unrelated production changes.
+    git diff "$BASELINE_REV" -- DevPulseNative/Core/ScanScheduler.swift DevPulseNative/Core/RefreshEngine.swift \
+        | (cd "$tree" && git apply --directory=.)
 
     cp "$ROOT_DIR/$TEST_SOURCE" "$tree/$TEST_SOURCE"
     if grep -R -n -E 'FileManager\.default\.containerURL\(|UserDefaults\(suiteName: AppGroupStore\.appGroupIdentifier' \
@@ -188,7 +210,7 @@ apply_baseline_isolation_shim() {
     fi
 }
 
-printf 'pair\tversion\torder\tscheduler_wall_ms\trefresh_engine_ms\tcommand_max_rss_bytes\tcommand_peak_footprint_bytes\n' \
+printf 'pair\tversion\torder\tscheduler_wall_ms\trefresh_engine_ms\tdiscovery_ms\tcore_status_ms\textended_info_ms\tmerge_ms\tengine_persistence_prepare_ms\tengine_widget_deferred_ms\ttotal_git_calls\tdiscovery_git_calls\tcore_status_git_calls\textended_info_git_calls\tscheduler_apply_pins_ms\tsnapshot_prepare_apply_pins_ms\tsnapshot_revision_read_ms\tsnapshot_commit_and_verify_ms\tactivity_archive_save_queue_ms\trepository_history_archive_update_ms\twidget_reload_request_api_ms\twidget_reload_request_calls\tcommand_max_rss_bytes\tcommand_peak_footprint_bytes\n' \
     > "$OUTPUT_DIR/samples.tsv"
 : > "$OUTPUT_DIR/samples.tsv.raw"
 {
@@ -258,11 +280,47 @@ NR == 1 { next }
     version = $2
     elapsed = $4 + 0
     engineElapsed = $5 + 0
-    rss = $6 + 0
-    footprint = $7 + 0
+    discovery = $6 + 0
+    coreStatus = $7 + 0
+    extended = $8 + 0
+    merge = $9 + 0
+    persist = $10 + 0
+    widget = $11 + 0
+    gitCalls = $12 + 0
+    discoveryGitCalls = $13 + 0
+    coreGitCalls = $14 + 0
+    extendedGitCalls = $15 + 0
+    applyPins = $16 + 0
+    snapshotPins = $17 + 0
+    snapshotRead = $18 + 0
+    snapshotCommit = $19 + 0
+    activitySave = $20 + 0
+    historySave = $21 + 0
+    widgetReload = $22 + 0
+    widgetReloadCalls = $23 + 0
+    rss = $24 + 0
+    footprint = $25 + 0
     if (version == "baseline") {
         baselineElapsed[++baselineCount] = elapsed
         baselineEngineElapsed[baselineCount] = engineElapsed
+        baselineDiscovery[baselineCount] = discovery
+        baselineCoreStatus[baselineCount] = coreStatus
+        baselineExtended[baselineCount] = extended
+        baselineMerge[baselineCount] = merge
+        baselinePersist[baselineCount] = persist
+        baselineWidget[baselineCount] = widget
+        baselineGitCalls[baselineCount] = gitCalls
+        baselineDiscoveryGitCalls[baselineCount] = discoveryGitCalls
+        baselineCoreGitCalls[baselineCount] = coreGitCalls
+        baselineExtendedGitCalls[baselineCount] = extendedGitCalls
+        baselineApplyPins[baselineCount] = applyPins
+        baselineSnapshotPins[baselineCount] = snapshotPins
+        baselineSnapshotRead[baselineCount] = snapshotRead
+        baselineSnapshotCommit[baselineCount] = snapshotCommit
+        baselineActivitySave[baselineCount] = activitySave
+        baselineHistorySave[baselineCount] = historySave
+        baselineWidgetReload[baselineCount] = widgetReload
+        baselineWidgetReloadCalls[baselineCount] = widgetReloadCalls
         baselineRSS[baselineCount] = rss
         baselineFootprint[baselineCount] = footprint
         pairBaselineElapsed[pair] = elapsed
@@ -272,6 +330,24 @@ NR == 1 { next }
     } else {
         currentElapsed[++currentCount] = elapsed
         currentEngineElapsed[currentCount] = engineElapsed
+        currentDiscovery[currentCount] = discovery
+        currentCoreStatus[currentCount] = coreStatus
+        currentExtended[currentCount] = extended
+        currentMerge[currentCount] = merge
+        currentPersist[currentCount] = persist
+        currentWidget[currentCount] = widget
+        currentGitCalls[currentCount] = gitCalls
+        currentDiscoveryGitCalls[currentCount] = discoveryGitCalls
+        currentCoreGitCalls[currentCount] = coreGitCalls
+        currentExtendedGitCalls[currentCount] = extendedGitCalls
+        currentApplyPins[currentCount] = applyPins
+        currentSnapshotPins[currentCount] = snapshotPins
+        currentSnapshotRead[currentCount] = snapshotRead
+        currentSnapshotCommit[currentCount] = snapshotCommit
+        currentActivitySave[currentCount] = activitySave
+        currentHistorySave[currentCount] = historySave
+        currentWidgetReload[currentCount] = widgetReload
+        currentWidgetReloadCalls[currentCount] = widgetReloadCalls
         currentRSS[currentCount] = rss
         currentFootprint[currentCount] = footprint
         pairCurrentElapsed[pair] = elapsed
@@ -350,6 +426,25 @@ END {
     printf "metric\tbaseline_median\tcurrent_median\tpaired_median_delta(current-baseline)\tpaired_MAD\tfaster_pairs\tslower_pairs\ttied_pairs\ttwo_sided_sign_p\n"
     printf "scheduler_wall_ms\t%.3f\t%.3f\t%.3f\t%.3f\t%d/%d\t%d/%d\t%d/%d\t%.5f\n", median(baselineElapsed, baselineCount), median(currentElapsed, currentCount), elapsedMedianDelta, elapsedMAD, fasterElapsed, pairCount, slowerElapsed, pairCount, tiedElapsed, pairCount, elapsedSignP
     printf "refresh_engine_ms\t%.3f\t%.3f\t%.3f\t%.3f\n", median(baselineEngineElapsed, baselineCount), median(currentEngineElapsed, currentCount), engineMedianDelta, engineMAD
+    printf "stage_medians_ms\tbaseline/current\n"
+    printf "discovery\t%.3f\t%.3f\n", median(baselineDiscovery, baselineCount), median(currentDiscovery, currentCount)
+    printf "coreStatus\t%.3f\t%.3f\n", median(baselineCoreStatus, baselineCount), median(currentCoreStatus, currentCount)
+    printf "extendedInfo\t%.3f\t%.3f\n", median(baselineExtended, baselineCount), median(currentExtended, currentCount)
+    printf "merge\t%.3f\t%.3f\n", median(baselineMerge, baselineCount), median(currentMerge, currentCount)
+    printf "enginePersistencePreparation\t%.3f\t%.3f\n", median(baselinePersist, baselineCount), median(currentPersist, currentCount)
+    printf "engineWidgetDeferredPlaceholder\t%.3f\t%.3f\n", median(baselineWidget, baselineCount), median(currentWidget, currentCount)
+    printf "totalGitCalls\t%.0f\t%.0f\n", median(baselineGitCalls, baselineCount), median(currentGitCalls, currentCount)
+    printf "discoveryGitCalls\t%.0f\t%.0f\n", median(baselineDiscoveryGitCalls, baselineCount), median(currentDiscoveryGitCalls, currentCount)
+    printf "coreStatusGitCalls\t%.0f\t%.0f\n", median(baselineCoreGitCalls, baselineCount), median(currentCoreGitCalls, currentCount)
+    printf "extendedInfoGitCalls\t%.0f\t%.0f\n", median(baselineExtendedGitCalls, baselineCount), median(currentExtendedGitCalls, currentCount)
+    printf "schedulerApplyPins\t%.3f\t%.3f\n", median(baselineApplyPins, baselineCount), median(currentApplyPins, currentCount)
+    printf "snapshotPrepareApplyPins\t%.3f\t%.3f\n", median(baselineSnapshotPins, baselineCount), median(currentSnapshotPins, currentCount)
+    printf "snapshotRevisionRead\t%.3f\t%.3f\n", median(baselineSnapshotRead, baselineCount), median(currentSnapshotRead, currentCount)
+    printf "snapshotCommitAndVerify\t%.3f\t%.3f\n", median(baselineSnapshotCommit, baselineCount), median(currentSnapshotCommit, currentCount)
+    printf "activityArchiveSaveQueue\t%.3f\t%.3f\n", median(baselineActivitySave, baselineCount), median(currentActivitySave, currentCount)
+    printf "repositoryHistoryArchiveUpdate\t%.3f\t%.3f\n", median(baselineHistorySave, baselineCount), median(currentHistorySave, currentCount)
+    printf "widgetReloadRequestAPI\t%.3f\t%.3f\n", median(baselineWidgetReload, baselineCount), median(currentWidgetReload, currentCount)
+    printf "widgetReloadRequestCalls\t%.0f\t%.0f\n", median(baselineWidgetReloadCalls, baselineCount), median(currentWidgetReloadCalls, currentCount)
     printf "command_max_rss_bytes\t%.0f\t%.0f\t%.0f\t%.0f\t%d/%d\t%d/%d\t%d/%d\t%.5f\n", median(baselineRSS, baselineCount), median(currentRSS, currentCount), rssMedianDelta, rssMAD, fasterRSS, pairCount, slowerRSS, pairCount, tiedRSS, pairCount, rssSignP
     printf "command_peak_footprint_bytes\t%.0f\t%.0f\t%.0f\t%.0f\n", median(baselineFootprint, baselineCount), median(currentFootprint, currentCount), footprintMedianDelta, footprintMAD
     printf "elapsed_group_summary\tbaseline_mean=%.3f\tbaseline_population_sd=%.3f\tcurrent_mean=%.3f\tcurrent_population_sd=%.3f\tpairs=%d\n", baselineMean, baselineSD, currentMean, currentSD, pairCount

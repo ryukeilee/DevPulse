@@ -88,3 +88,43 @@ elapsed_exact_two_sided_sign_p=0.00195
 采样机器为 Apple M2（`Mac14,2`，arm64，8 个逻辑 CPU，16 GiB），macOS 27.0（build `26A428`），Xcode 27.0（build `27A266a`）。测量在同一进程环境连续完成：开始时 load average 为 `1.73 / 3.06 / 3.45`，build 后、样本前为 `3.91 / 3.47 / 3.58`，结束为 `2.20 / 3.00 / 3.39`（分别为 1/5/15 分钟）。单样本前后快照中未观察到并发 `xcodebuild` / `xctest`；空闲的 XcodeBuild MCP helper 持续存在。常驻 `DevPulse.app` 与 Widget extension 在测量开始前可见；它们使用真实容器，而测量使用隔离容器。它们仍可能带来少量系统资源噪声，因此保留了交替配对和每样本 load/进程快照。
 
 最终全量验收使用独立 DerivedData 执行 `DERIVED_DATA_PATH=/tmp/devpulse-t0034-e2e-final ./scripts/verify.sh final`：构建通过，`918 tests / 92 suites` 全部通过，退出码 0。端到端重复采样自身的 build 与 20 次定向 `test-without-building` 已由上述入口执行；常规 `verify.sh final` 中该测量测试因缺少样本环境而 no-op。安装态签名自检、真实用户目录扫描和 Widget reload 不属于此测量范围。提交 hash 与原始 Git 输出在工作线程报告 `report.md` 中记录。
+
+## 完整 refresh pipeline 分段 profiling（t-0053）
+
+新增测量输出覆盖 `RefreshEngine` 的 discovery/coreStatus/extendedInfo/merge/persistence preparation/deferred widgetSync；scheduler 的 result `applyPins`、final snapshot prepare/applyPins、snapshot revision read、snapshot commit + read-back verification、activity archive save queue、repository history archive update，以及 `WidgetCenter.reloadTimelines` API 请求耗时与调用数。所有计时都用 `ProcessInfo.systemUptime`。snapshot/archive 工作可并发执行，阶段耗时不可简单相加；`scheduler_wall_ms` 是真实 timer 增量刷新总墙钟。
+
+Git 分阶段调用计数现取自实际 runner 调用：`coreStatus` 使用 status 实际调用数，`extendedInfo` 单独计数真实 runner invocation（不再把“完成处理的仓库数/复用元数据仓库数”误当 git log 调用数），discovery 使用 scanner 的 `ScanMetrics` ledger。`DiscoveryGitCallAccountingTests` 增加真实 runner 账本对照及不变 HEAD 增量刷新覆盖。
+
+在 `2f0dc09` 基线与本线程 measurement-instrumented checkout 上运行 10 对交替配对样本，命令：
+
+```sh
+RUNS=10 BASELINE_REV=2f0dc09 \
+  DERIVED_DATA_PATH=/tmp/devpulse-t0053-profile-dd-final \
+  OUTPUT_DIR=/tmp/devpulse-t0053-profile-final \
+  ./scripts/measure-end-to-end-refresh.sh
+```
+
+fixture 是 4 个临时仓库、一个 README 工作树变更、`forceRepositoryDiscovery=false`。10 对结果的阶段中位数如下，按测得耗时降序（互相重叠的 I/O/调度计时不做相加）：
+
+| 阶段 | baseline 中位数 | instrumented 中位数 | 计数/含义 |
+|---|---:|---:|---|
+| RefreshEngine coreStatus | 209.658 ms | 208.514 ms | 4 次 status Git 调用 |
+| snapshot commit + read-back verify | 55.907 ms | 53.459 ms | scheduler 最终快照提交一次 |
+| activity archive save queue | 21.852 ms | 21.690 ms | 一次异步串行队列保存耗时（含排队） |
+| snapshot revision read | 15.309 ms | 15.201 ms | 一次 `AppGroupStore.read()` |
+| snapshot prepare `applyPins` | 14.477 ms | 14.325 ms | final snapshot prepare |
+| scheduler result `applyPins` | 11.876 ms | 12.038 ms | engine 返回后的一次 |
+| discovery | 4.249 ms | 4.596 ms | 本 fixture 已知仓库路径复用；0 Git 调用 |
+| history archive update | 1.900 ms | 1.840 ms | 一次 read/merge/write 更新 |
+| merge | 1.440 ms | 1.093 ms | RefreshEngine merge |
+| engine persistence preparation | 0.728 ms | 0.720 ms | 仅内存快照准备，不是磁盘持久化 |
+| extendedInfo | 0.103 ms | 0.091 ms | 0 次 Git log 调用 |
+| Widget reload request API | 0.038 ms | 0.042 ms | 每轮请求 1 次；不代表 Widget 已消费/重载完成 |
+
+调用账本每次均为 `totalGitCalls=4`：`discovery=0`、`coreStatus=4`、`extendedInfo=0`；activity archive/history/snapshot commit 均成功更新，Widget reload request 为 1。实际扫描 discovery 仍被计时，尽管此增量场景在已知仓库集合上没有 discovery Git spawn。
+
+整轮 `scheduler_wall_ms` baseline/current 中位数 `321.178 / 319.289 ms`，配对中位差 `-3.564 ms`、配对 MAD `8.674 ms`，方向为 6/10 更快，精确双侧 sign test `p=0.75391`：**无超噪声端到端改善证据**。本次是计量/diagnostics 校正，不是性能优化；不以小幅中位差声称收益。峰值 RSS/footprint 是 xcodebuild 测试命令级，不代表刷新进程独占值。
+
+测量环境为 Mac14,2 Apple M2 / 8 logical CPUs / macOS 27.0 / Xcode 27.0；metadata 与每样本前后 load/process 快照在附带证据中。测量前后未见并发 xcodebuild/xctest；常驻 Widget 扩展存在但测量用独立 App Group/suite。原始 TSV、summary、完整日志、系统快照和临时 fixture 已随工作线程交付物存于 `.herdr-project/devpulse-t-0053/library/refresh-profile-baseline-2f0dc09/`。
+
+WidgetKit API 的同步调用时间已测；Widget extension 实际何时唤起、何时读取并呈现快照不受本进程控制，仍需独立运行时观测。

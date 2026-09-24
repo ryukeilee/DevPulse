@@ -105,9 +105,42 @@ struct DiscoveryGitCallAccountingTests {
         print("DISCOVERY_GIT_ACCOUNTING_EVIDENCE \(String(decoding: data, as: UTF8.self))")
 
         #expect(result.diagnostics.totalGitCalls == calls.count)
+        #expect(result.diagnostics.stageDiagnostics.first(where: { $0.stage == .discovery })?.gitCommandCount == discoveryCalls)
+        #expect(result.diagnostics.stageDiagnostics.first(where: { $0.stage == .coreStatus })?.gitCommandCount == statusCalls)
+        #expect(result.diagnostics.stageDiagnostics.first(where: { $0.stage == .extendedInfo })?.gitCommandCount == logCalls)
         #expect(total == calls.count)
         #expect(discoveryCalls == 1)
         #expect(calls.contains { $0 == ["worktree", "list", "--porcelain", "-z"] })
         #expect(result.data.repositories.count == 2)
+
+        let incrementalLedger = GitCallLedger()
+        let incrementalRunner: RefreshEngine.GitCommandRunner = { arguments, directory, timeout, limit, cancelled in
+            incrementalLedger.record(arguments)
+            return GitRepositoryScanner.defaultGitCommandRunner(
+                arguments, directory, timeout, limit, cancelled
+            )
+        }
+        let incremental = await engine.execute(
+            config: ScanConfig(
+                enabledBuiltInPaths: [], customPaths: [], maxDepth: 2,
+                changedPreviewLimit: 5, maxConcurrentGitOps: 2,
+                gitCommandTimeout: 5, scanTimeout: 60,
+                slowReposkipSeconds: 60, activeRepoThreshold: 30
+            ),
+            scanRoots: [root.path],
+            knownRepositoryPaths: result.discoveredRepositoryPaths,
+            forceRepositoryDiscovery: false,
+            previousSnapshot: result.data,
+            gitCommandRunner: incrementalRunner
+        )
+        let incrementalCalls = incrementalLedger.calls
+        #expect(incrementalCalls.filter { $0.first == "status" }.count == 2)
+        #expect(!incrementalCalls.contains { $0.first == "log" })
+        #expect(incremental.diagnostics.totalGitCalls == incrementalCalls.count)
+        #expect(incremental.diagnostics.totalGitCalls == 3)
+        #expect(incremental.diagnostics.stageDiagnostics.first(where: { $0.stage == .discovery })?.gitCommandCount == 1)
+        #expect(incrementalCalls.contains { $0 == ["worktree", "list", "--porcelain", "-z"] })
+        #expect(incremental.diagnostics.stageDiagnostics.first(where: { $0.stage == .coreStatus })?.gitCommandCount == 2)
+        #expect(incremental.diagnostics.stageDiagnostics.first(where: { $0.stage == .extendedInfo })?.gitCommandCount == 0)
     }
 }
