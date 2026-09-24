@@ -1,6 +1,6 @@
 # 端到端增量刷新测量
 
-本入口补足 `scripts/measure-incremental-refresh.sh` 的扫描器级盲点：实际驱动 `ScanScheduler` 的 timer 刷新和 `RefreshEngine.execute`，等待共享快照提交及活动/历史档案更新。它是**测量设施**，不修改生产刷新逻辑。
+本入口补足 `scripts/measure-incremental-refresh.sh` 的扫描器级盲点：实际驱动 `ScanScheduler` 的 timer 刷新和 `RefreshEngine.execute`，等待共享快照提交，并验证活动/历史档案按刷新是否有变更而更新或保持不变。它是**测量设施**，不修改生产刷新逻辑。
 
 ## 可复跑命令
 
@@ -12,11 +12,13 @@ OUTPUT_DIR=/tmp/devpulse-refresh-e2e-results \
 ./scripts/measure-end-to-end-refresh.sh
 ```
 
+设置 `REAL_REPOSITORIES_FILE` 可在真实仓库集合上测量：值为换行分隔的仓库根目录列表文件。列表只在测量期间读取，不会复制进证据目录或打印路径；测试对这些路径执行生产扫描所需的只读 Git 查询，且使用隔离 App Group 和 UserDefaults suite。脚本记录 workload 类型和仓库数量，并由测试验证真实模式确实到达 test host，避免静默回退到合成 fixture。未设置时仍使用合成 fixture。
+
 `RUNS` 是配对数，最小为 5。脚本分别构建 `BASELINE_REV` 和运行时 `git log -1` 的当前版本；每个版本使用同一个 `DERIVED_DATA_PATH` 下的独立子目录，测量调用统一使用 `xcodebuild test-without-building`，避免把编译时间计入刷新时延。`OUTPUT_DIR` 必须不存在或为空，脚本不覆盖已有证据。需要 Xcode、XcodeGen、Git 和 macOS `/usr/bin/time -l`。
 
 输出目录包含：
 
-- `samples.tsv`：每条样本的配对序号、采样顺序、scheduler 墙钟、`RefreshEngine` 自报耗时、命令级 RSS 和 peak footprint。
+- `samples.tsv`：每条样本的配对序号、采样顺序、scheduler 墙钟、`RefreshEngine` 自报耗时、命令级 RSS 和 peak footprint，以及刷新窗口内 test host 与已退出子进程的 `getrusage` CPU user/system 增量（毫秒）。CPU 增量包含并行 Git 子进程，累计 CPU 时间可以超过墙钟时间。
 - `summary.txt`：配对中位差、MAD、方向计数、精确双侧 sign test，以及兼容 `PerformanceBaselineManager` 的噪声结论。
 - `performance-baselines.json`：`endToEndIncrementalRefresh` 的 mean/stddev/sampleCount，时间单位为秒。
 - `raw/`：两版本构建日志、每次测试的原始输出和 `/usr/bin/time -l` 输出。
@@ -27,14 +29,13 @@ OUTPUT_DIR=/tmp/devpulse-refresh-e2e-results \
 
 ## 场景与测量边界
 
-每条样本都创建新的 workspace、4 个临时 Git 仓库、临时 App Group 容器和唯一 UserDefaults suite。先通过 `ScanScheduler.scanNow(forceRepositoryDiscovery: true, source: .manual)` 建立完整已知仓库范围和初始快照；随后仅改动一个仓库中的 `README.md`，将计时起点设在 `scanNow(forceRepositoryDiscovery: false, source: .timer)` 调用前。测试等待：
+默认每条样本都创建新的 workspace、4 个临时 Git 仓库、临时 App Group 容器和唯一 UserDefaults suite。设置 `REAL_REPOSITORIES_FILE` 时改为使用列表中的既有仓库根目录作为 custom scan directories，不在这些仓库内创建、修改或复制文件；仍使用隔离 App Group 和唯一 UserDefaults suite。先通过 `ScanScheduler.scanNow(forceRepositoryDiscovery: true, source: .manual)` 建立完整已知仓库范围和初始快照。合成模式随后改动一个仓库中的 `README.md`；真实仓库模式保持工作树原样。之后将计时起点设在 `scanNow(forceRepositoryDiscovery: false, source: .timer)` 调用前。测试等待：
 
-1. `ScanScheduler` 进入 `.success`；
-2. 新的共享快照 revision 已提交、刷新标记关闭，4 个仓库中有工作树改动；
-3. 活动事件档案和仓库历史档案都已更新；
-4. 执行记录确认 `RefreshEngine` 实际运行、`forceRepositoryDiscovery == false`、已知仓库数和结果仓库数均为 4。
+1. `ScanScheduler` 进入 `.success`，新的共享快照 revision 已提交且刷新标记关闭；
+2. 合成模式确认 4 个仓库之一有工作树改动且活动/历史档案均更新；真实模式确认仓库数量与输入清单一致，活动/历史档案与刷新前字节完全相同；
+3. 执行记录确认 `RefreshEngine` 实际运行、`forceRepositoryDiscovery == false`、已知仓库数和结果仓库数都与当前 workload 数量一致。
 
-因此 `scheduler_wall_ms` 覆盖调度触发到快照及两个档案完成更新，`refresh_engine_ms` 是 `RefreshEngine` diagnostics 的内部总耗时。初次发现/fixture 创建不在被计时区间内。它不代表 UI 交互、Widget reload 完成时间或用户真实目录扫描。
+因此 `scheduler_wall_ms` 覆盖调度触发到快照提交及活动/历史档案更新或保持不变的检查，`refresh_engine_ms` 是 `RefreshEngine` diagnostics 的内部总耗时。初次发现/fixture 创建不在被计时区间内。CPU 计量在 timer 刷新前后采集 `RUSAGE_SELF` 与 `RUSAGE_CHILDREN`，包括 test host 和刷新所启动 Git 子进程，不包括 xcodebuild 编译阶段；其他同一 test host 子进程在该窗口内的 CPU 也会计入。它不代表 UI 交互或 Widget reload 完成时间。真实仓库模式可测实际仓库规模，但不会改写仓库文件或 Git 元数据。
 
 `7f29c0f` 尚无当前测试使用的 App Group 环境隔离 seam。测量脚本只在 `git archive` 导出的临时基线树内回补这个测试隔离 seam；未修改基线提交或当前生产代码。没有设置 override 时 shim 仍使用原 `group.local.devpulse` 容器/suite；实际样本则使用临时容器与唯一 suite。临时工作区和样本数据不触碰常驻 App/Widget 的真实 App Group 容器。
 
@@ -156,3 +157,25 @@ RUNS=10 BASELINE_REV=02310ae \
 ```
 
 全量原始结果在工作线程 library 的 `coreStatus-poll-1ms/` 目录（如本轮证据已归档）。
+
+## 真实仓库规模复测（Mac14,2）
+
+使用当前本地 App Group 仓库 registry 中的 7 个可用 Git 仓库根目录（仅输出数量，不记录或打印路径），在 Apple M2 / Mac14,2 / arm64 / 8 logical CPUs / 16 GiB、macOS 27.0、Xcode 27.0 上配对比较 `02310ae`（10 ms）与 `b6d6c5d`（1 ms）。运行 10 对，奇偶样本交替顺序；每个样本使用隔离 App Group/suite，timer 增量刷新走相同的 7 个实际仓库。每轮 `coreStatus` 7 次 Git 调用、discovery 2 次、总计 9 次；两版本哈希刷新结果签名相同，activity/history 档案在无变更刷新时均保持原样。未对真实仓库写入内容或 Git 元数据。
+
+| 指标 | 10 ms baseline | 1 ms candidate |
+|---|---:|---:|
+| scheduler wall 中位数 | 806.250 ms | 395.396 ms |
+| 配对 scheduler 差（current−baseline） | — | 中位数 -411.484 ms；MAD 41.676 ms；10/10 更快；双侧 sign `p=0.00195` |
+| discovery stage 中位数 | 415.300 ms | 135.057 ms |
+| coreStatus stage 中位数 | 214.849 ms | 97.249 ms |
+| 7 次 status runner 累计中位数 | 1,456.514 ms | 639.523 ms |
+| 刷新窗口 CPU user 中位数 | 674.601 ms | 348.496 ms |
+| 刷新窗口 CPU system 中位数 | 1,896.983 ms | 686.007 ms |
+| 每样本 user+system CPU 总量中位数 | 2,576.884 ms | 1,040.332 ms |
+| refresh result signature | 相同 | 相同 |
+
+配对 user+system CPU 总量中位差为 -1,536.515 ms，9/10 样本下降，精确双侧 sign `p=0.02148`。CPU 数值是 timer 窗口内 test host 的 `RUSAGE_SELF` 与已退出子进程 `RUSAGE_CHILDREN` 增量，含并行 Git 子进程；不是 DevPulse.app UI 进程的独立功耗指标。外层 xcodebuild 命令 user+sys 中位数仍约 0.97/0.96 秒（0.01 秒精度），不能用于替代刷新窗口 CPU。
+
+机器负载不是空闲恒定环境：20 个样本前快照的 1/5/15 分钟 load average 中位数为 6.23/4.28/3.71，1 分钟范围 4.75–9.37；样本间交替顺序，且未观察到并发 xcodebuild/xctest。故 wall-clock 配对方向证据强，但绝对延迟仍可能受机器负载与真实仓库状态影响。真实 timer 运行的 Widget reload decision 为 skip（API 调用 0），本轮没有验证 WidgetKit 实际唤起、读盘或呈现。
+
+可复跑时将 `REAL_REPOSITORIES_FILE` 指向本地 registry 导出的换行分隔路径列表；本轮列表未留存于输出。原始 TSV、summary、每样本日志和系统快照保存在 `/tmp/devpulse-t0053-real-seven/`（本机临时证据目录，不随仓库提交）。

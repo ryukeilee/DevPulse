@@ -1,3 +1,5 @@
+import CryptoKit
+import Darwin
 import Foundation
 import Testing
 @testable import DevPulse
@@ -28,17 +30,34 @@ struct EndToEndRefreshMeasurementTests {
 
         try FileManager.default.createDirectory(at: expectedContainer, withIntermediateDirectories: true)
         let defaults = try #require(UserDefaults(suiteName: expectedSuite))
-        let workspace = sampleRoot.appendingPathComponent("workspace", isDirectory: true)
-        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
-        let repositories = try (0..<4).map { index -> URL in
-            let repository = workspace.appendingPathComponent("repo-\(index)", isDirectory: true)
-            try createCommittedRepository(at: repository)
-            return repository
+        let realRepositoryListPath = environment["DEVPULSE_E2E_REAL_REPOSITORIES_FILE"]
+        let isRealRepositoryMode = realRepositoryListPath.map { !$0.isEmpty } ?? false
+        if environment["DEVPULSE_E2E_MODE"] == "real", !isRealRepositoryMode {
+            throw MeasurementError.invalidRealRepositoryList
+        }
+        let repositories: [URL]
+        if let realRepositoryListPath, !realRepositoryListPath.isEmpty {
+            let paths = try String(contentsOfFile: realRepositoryListPath, encoding: .utf8)
+                .split(whereSeparator: \.isNewline)
+                .map(String.init)
+            guard !paths.isEmpty,
+                  paths.allSatisfy({ FileManager.default.fileExists(atPath: $0) }) else {
+                throw MeasurementError.invalidRealRepositoryList
+            }
+            repositories = paths.map { URL(fileURLWithPath: $0, isDirectory: true) }
+        } else {
+            let workspace = sampleRoot.appendingPathComponent("workspace", isDirectory: true)
+            try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+            repositories = try (0..<4).map { index -> URL in
+                let repository = workspace.appendingPathComponent("repo-\(index)", isDirectory: true)
+                try createCommittedRepository(at: repository)
+                return repository
+            }
         }
 
         let locationConfiguration = ScanLocationConfiguration(
             enabledBuiltInPaths: [],
-            customDirectories: [CustomScanDirectory(path: workspace.path)]
+            customDirectories: repositories.map { CustomScanDirectory(path: $0.path) }
         )
         defaults.set(try JSONEncoder().encode(locationConfiguration), forKey: "scan_locations_v1_json")
         defaults.synchronize()
@@ -115,29 +134,42 @@ struct EndToEndRefreshMeasurementTests {
         let previousActivityArchive = try Data(contentsOf: activityStore.fileURL)
         let historyURL = historyStoreArchiveURL(in: expectedContainer)
         let previousHistoryArchive = try Data(contentsOf: historyURL)
-        let changedFile = repositories[0].appendingPathComponent("README.md")
-        try "daily incremental change\n".write(to: changedFile, atomically: true, encoding: .utf8)
+        if !isRealRepositoryMode {
+            let changedFile = repositories[0].appendingPathComponent("README.md")
+            try "daily incremental change\n".write(to: changedFile, atomically: true, encoding: .utf8)
+        }
         await executionRecorder.reset()
         phaseRecorder.reset()
 
         let revisionBeforeRefresh = initialSnapshot.storageRevision
+        let cpuBeforeRefresh = try Self.processCPUUsage()
         let refreshStartedAt = ProcessInfo.processInfo.systemUptime
         scheduler.scanNow(forceRepositoryDiscovery: false, source: .timer)
         let finalSnapshot = try await waitForCommittedSnapshot(
             scheduler: scheduler,
             afterRevision: revisionBeforeRefresh,
             repositoryCount: repositories.count,
-            requireWorkingTreeChanges: true
+            requireWorkingTreeChanges: !isRealRepositoryMode
         )
-        let updatedActivityArchive = try await waitForChangedArchive(
-            at: activityStore.fileURL,
-            comparedTo: previousActivityArchive
-        )
-        let updatedHistoryArchive = try await waitForChangedArchive(
-            at: historyURL,
-            comparedTo: previousHistoryArchive
-        )
+        let updatedActivityArchive: Data
+        let updatedHistoryArchive: Data
+        if isRealRepositoryMode {
+            updatedActivityArchive = try Data(contentsOf: activityStore.fileURL)
+            updatedHistoryArchive = try Data(contentsOf: historyURL)
+            #expect(updatedActivityArchive == previousActivityArchive)
+            #expect(updatedHistoryArchive == previousHistoryArchive)
+        } else {
+            updatedActivityArchive = try await waitForChangedArchive(
+                at: activityStore.fileURL,
+                comparedTo: previousActivityArchive
+            )
+            updatedHistoryArchive = try await waitForChangedArchive(
+                at: historyURL,
+                comparedTo: previousHistoryArchive
+            )
+        }
         let refreshElapsed = ProcessInfo.processInfo.systemUptime - refreshStartedAt
+        let cpuAfterRefresh = try Self.processCPUUsage()
         try await Task.sleep(nanoseconds: 20_000_000)
         let execution = try #require(await executionRecorder.snapshot())
         let schedulerPhases = phaseRecorder.snapshot()
@@ -150,7 +182,7 @@ struct EndToEndRefreshMeasurementTests {
         #expect(!updatedHistoryArchive.isEmpty)
         #expect(scheduler.refreshPhase == .success)
 
-        let resultSignature = finalSnapshot.repositories
+        let resultSignatureInput = finalSnapshot.repositories
             .sorted { $0.name < $1.name }
             .map { repository in
                 [
@@ -166,10 +198,16 @@ struct EndToEndRefreshMeasurementTests {
                 ].joined(separator: ":")
             }
             .joined(separator: ",")
+        let resultSignature = SHA256.hash(data: Data(resultSignatureInput.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
         let sample = try #require(environment["DEVPULSE_E2E_SAMPLE_ID"])
         let output = [
             "e2e_refresh.sample=\(sample)",
+            "workload=\(isRealRepositoryMode ? "real" : "synthetic")",
             "scheduler_wall_ms=\(Self.format(refreshElapsed * 1_000))",
+            "refresh_cpu_user_ms=\(Self.format(max(0, cpuAfterRefresh.user - cpuBeforeRefresh.user) * 1_000))",
+            "refresh_cpu_system_ms=\(Self.format(max(0, cpuAfterRefresh.system - cpuBeforeRefresh.system) * 1_000))",
             "refresh_engine_ms=\(Self.format(execution.engineElapsed * 1_000))",
             "discovery_ms=\(Self.format((execution.stageDurations[.discovery] ?? 0) * 1_000))",
             "core_status_ms=\(Self.format((execution.stageDurations[.coreStatus] ?? 0) * 1_000))",
@@ -198,7 +236,7 @@ struct EndToEndRefreshMeasurementTests {
             "forced_discovery=\(execution.forcedDiscovery)",
             "final_storage_revision=\(finalSnapshot.storageRevision)",
             "refresh_result_signature=\(resultSignature)",
-            "activity_and_history_archives=updated"
+            "activity_and_history_archives=\(isRealRepositoryMode ? "preserved_on_idle" : "updated")"
         ].joined(separator: " ")
         print(output)
     }
@@ -293,6 +331,20 @@ struct EndToEndRefreshMeasurementTests {
         }
     }
 
+    private static func processCPUUsage() throws -> (user: TimeInterval, system: TimeInterval) {
+        var selfUsage = rusage()
+        var childUsage = rusage()
+        guard getrusage(RUSAGE_SELF, &selfUsage) == 0,
+              getrusage(RUSAGE_CHILDREN, &childUsage) == 0 else {
+            throw MeasurementError.cpuMeasurementFailed
+        }
+        let selfUser = Double(selfUsage.ru_utime.tv_sec) + Double(selfUsage.ru_utime.tv_usec) / 1_000_000
+        let selfSystem = Double(selfUsage.ru_stime.tv_sec) + Double(selfUsage.ru_stime.tv_usec) / 1_000_000
+        let childUser = Double(childUsage.ru_utime.tv_sec) + Double(childUsage.ru_utime.tv_usec) / 1_000_000
+        let childSystem = Double(childUsage.ru_stime.tv_sec) + Double(childUsage.ru_stime.tv_usec) / 1_000_000
+        return (selfUser + childUser, selfSystem + childSystem)
+    }
+
     private static func format(_ value: Double) -> String {
         String(format: "%.3f", value)
     }
@@ -365,6 +417,8 @@ private final class RefreshPhaseRecorder: RefreshMeasurementSink, @unchecked Sen
 
 private enum MeasurementError: Error {
     case appGroupIsolationMismatch
+    case invalidRealRepositoryList
+    case cpuMeasurementFailed
     case refreshDidNotCommit
     case archiveWasNotWritten
     case archiveWasNotUpdated

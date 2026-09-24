@@ -22,6 +22,7 @@ DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-/tmp/devpulse-refresh-e2e}"
 BUILD_TIMEOUT="${BUILD_TIMEOUT:-600}"
 TEST_TIMEOUT="${TEST_TIMEOUT:-600}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
+REAL_REPOSITORIES_FILE="${REAL_REPOSITORIES_FILE:-}"
 TEST_SPEC='DevPulseTests/EndToEndRefreshMeasurementTests/scheduledIncrementalRefresh()'
 TEST_SOURCE='DevPulseNative/DevPulseNativeTests/EndToEndRefreshMeasurementTests.swift'
 BASELINE_TREE=""
@@ -33,6 +34,20 @@ fi
 if ! command -v xcodegen >/dev/null 2>&1; then
     echo "xcodegen is required to register the shared benchmark test in the baseline project" >&2
     exit 2
+fi
+
+if [[ -n "$REAL_REPOSITORIES_FILE" ]]; then
+    if [[ ! -r "$REAL_REPOSITORIES_FILE" ]] || ! grep -q . "$REAL_REPOSITORIES_FILE"; then
+        echo "REAL_REPOSITORIES_FILE must be a readable non-empty newline-separated repository list" >&2
+        exit 2
+    fi
+    while IFS= read -r repository_path; do
+        [[ -n "$repository_path" ]] || continue
+        if [[ ! -d "$repository_path" ]]; then
+            echo "A listed repository directory is unavailable" >&2
+            exit 2
+        fi
+    done < "$REAL_REPOSITORIES_FILE"
 fi
 
 if [[ -z "$OUTPUT_DIR" ]]; then
@@ -115,6 +130,8 @@ run_sample() {
     local log="$OUTPUT_DIR/raw/run-$pair-$order-$label.log"
     local time_log="$OUTPUT_DIR/raw/run-$pair-$order-$label.time.log"
     local system_tag="run-$pair-$order-$label"
+    local workload_mode=synthetic
+    [[ -n "$REAL_REPOSITORIES_FILE" ]] && workload_mode=real
 
     mkdir -p "$sample_root" "$container"
     capture_system_state "$system_tag-before"
@@ -124,6 +141,8 @@ run_sample() {
         "TEST_RUNNER_DEVPULSE_APP_GROUP_DEFAULTS_SUITE=$defaults_suite" \
         "TEST_RUNNER_DEVPULSE_E2E_SAMPLE_ROOT=$sample_root" \
         "TEST_RUNNER_DEVPULSE_E2E_SAMPLE_ID=$sample_id" \
+        "TEST_RUNNER_DEVPULSE_E2E_MODE=$workload_mode" \
+        "TEST_RUNNER_DEVPULSE_E2E_REAL_REPOSITORIES_FILE=$REAL_REPOSITORIES_FILE" \
         xcodebuild \
             -project "$project" \
             -scheme DevPulse \
@@ -146,7 +165,7 @@ run_sample() {
         exit 1
     fi
 
-    local elapsed engine_elapsed discovery core_status git_runner git_runner_calls snapshot_build snapshot_build_calls extended merge persist widget git_calls discovery_git_calls core_git_calls extended_git_calls apply_pins snapshot_pins snapshot_read snapshot_commit activity_save history_save widget_reload widget_reload_calls max_rss footprint cpu_seconds result_signature
+    local elapsed engine_elapsed discovery core_status git_runner git_runner_calls snapshot_build snapshot_build_calls extended merge persist widget git_calls discovery_git_calls core_git_calls extended_git_calls apply_pins snapshot_pins snapshot_read snapshot_commit activity_save history_save widget_reload widget_reload_calls max_rss footprint cpu_seconds result_signature cpu_user cpu_system reported_workload
     elapsed="$(printf '%s\n' "$benchmark" | sed -n 's/.*scheduler_wall_ms=\([0-9.][0-9.]*\).*/\1/p')"
     engine_elapsed="$(printf '%s\n' "$benchmark" | sed -n 's/.*refresh_engine_ms=\([0-9.][0-9.]*\).*/\1/p')"
     discovery="$(printf '%s\n' "$benchmark" | sed -n 's/.*discovery_ms=\([0-9.][0-9.]*\).*/\1/p')"
@@ -175,7 +194,14 @@ run_sample() {
     footprint="$(awk '/peak memory footprint/ { print $1; exit }' "$time_log")"
     cpu_seconds="$(awk '/ real / { print $3 + $5; exit }' "$time_log")"
     result_signature="$(printf '%s\n' "$benchmark" | sed -n 's/.*refresh_result_signature=\([^ ]*\).*/\1/p')"
-    if [[ -z "$elapsed" || -z "$engine_elapsed" || -z "$discovery" || -z "$core_status" || -z "$git_runner" || -z "$git_runner_calls" || -z "$snapshot_build" || -z "$snapshot_build_calls" || -z "$extended" || -z "$merge" || -z "$persist" || -z "$widget" || -z "$git_calls" || -z "$discovery_git_calls" || -z "$core_git_calls" || -z "$extended_git_calls" || -z "$apply_pins" || -z "$snapshot_pins" || -z "$snapshot_read" || -z "$snapshot_commit" || -z "$activity_save" || -z "$history_save" || -z "$widget_reload" || -z "$widget_reload_calls" || -z "$max_rss" || -z "$footprint" || -z "$cpu_seconds" || -z "$result_signature" ]]; then
+    cpu_user="$(printf '%s\n' "$benchmark" | sed -n 's/.*refresh_cpu_user_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    cpu_system="$(printf '%s\n' "$benchmark" | sed -n 's/.*refresh_cpu_system_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    reported_workload="$(printf '%s\n' "$benchmark" | sed -n 's/.*workload=\([^ ]*\).*/\1/p')"
+    if [[ "$reported_workload" != "$workload_mode" ]]; then
+        echo "sample workload mode did not match the requested workload" >&2
+        exit 1
+    fi
+    if [[ -z "$elapsed" || -z "$engine_elapsed" || -z "$discovery" || -z "$core_status" || -z "$git_runner" || -z "$git_runner_calls" || -z "$snapshot_build" || -z "$snapshot_build_calls" || -z "$extended" || -z "$merge" || -z "$persist" || -z "$widget" || -z "$git_calls" || -z "$discovery_git_calls" || -z "$core_git_calls" || -z "$extended_git_calls" || -z "$apply_pins" || -z "$snapshot_pins" || -z "$snapshot_read" || -z "$snapshot_commit" || -z "$activity_save" || -z "$history_save" || -z "$widget_reload" || -z "$widget_reload_calls" || -z "$max_rss" || -z "$footprint" || -z "$cpu_seconds" || -z "$result_signature" || -z "$cpu_user" || -z "$cpu_system" ]]; then
         echo "sample $sample_id had incomplete measurement data; raw logs: $log, $time_log" >&2
         exit 1
     fi
@@ -183,8 +209,8 @@ run_sample() {
     defaults delete "$defaults_suite" >/dev/null 2>&1 || true
     rm -f "$HOME/Library/Preferences/$defaults_suite.plist" 2>/dev/null || true
     capture_system_state "$system_tag-after"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$pair" "$label" "$order" "$elapsed" "$engine_elapsed" "$discovery" "$core_status" "$git_runner" "$git_runner_calls" "$snapshot_build" "$snapshot_build_calls" "$extended" "$merge" "$persist" "$widget" "$git_calls" "$discovery_git_calls" "$core_git_calls" "$extended_git_calls" "$apply_pins" "$snapshot_pins" "$snapshot_read" "$snapshot_commit" "$activity_save" "$history_save" "$widget_reload" "$widget_reload_calls" "$max_rss" "$footprint" "$cpu_seconds" "$result_signature" \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$pair" "$label" "$order" "$elapsed" "$engine_elapsed" "$discovery" "$core_status" "$git_runner" "$git_runner_calls" "$snapshot_build" "$snapshot_build_calls" "$extended" "$merge" "$persist" "$widget" "$git_calls" "$discovery_git_calls" "$core_git_calls" "$extended_git_calls" "$apply_pins" "$snapshot_pins" "$snapshot_read" "$snapshot_commit" "$activity_save" "$history_save" "$widget_reload" "$widget_reload_calls" "$max_rss" "$footprint" "$cpu_seconds" "$result_signature" "$cpu_user" "$cpu_system" \
         | tee -a "$OUTPUT_DIR/samples.tsv"
     printf '%s\n' "$benchmark" >> "$OUTPUT_DIR/samples.tsv.raw"
 }
@@ -216,7 +242,7 @@ apply_baseline_isolation_shim() {
     fi
 }
 
-printf 'pair\tversion\torder\tscheduler_wall_ms\trefresh_engine_ms\tdiscovery_ms\tcore_status_ms\tcore_status_git_runner_sum_ms\tcore_status_git_runner_calls\tcore_status_snapshot_build_sum_ms\tcore_status_snapshot_build_calls\textended_info_ms\tmerge_ms\tengine_persistence_prepare_ms\tengine_widget_deferred_ms\ttotal_git_calls\tdiscovery_git_calls\tcore_status_git_calls\textended_info_git_calls\tscheduler_apply_pins_ms\tsnapshot_prepare_apply_pins_ms\tsnapshot_revision_read_ms\tsnapshot_commit_and_verify_ms\tactivity_archive_save_queue_ms\trepository_history_archive_update_ms\twidget_reload_request_api_ms\twidget_reload_request_calls\tcommand_max_rss_bytes\tcommand_peak_footprint_bytes\tcommand_cpu_user_sys_seconds\trefresh_result_signature\n' \
+printf 'pair\tversion\torder\tscheduler_wall_ms\trefresh_engine_ms\tdiscovery_ms\tcore_status_ms\tcore_status_git_runner_sum_ms\tcore_status_git_runner_calls\tcore_status_snapshot_build_sum_ms\tcore_status_snapshot_build_calls\textended_info_ms\tmerge_ms\tengine_persistence_prepare_ms\tengine_widget_deferred_ms\ttotal_git_calls\tdiscovery_git_calls\tcore_status_git_calls\textended_info_git_calls\tscheduler_apply_pins_ms\tsnapshot_prepare_apply_pins_ms\tsnapshot_revision_read_ms\tsnapshot_commit_and_verify_ms\tactivity_archive_save_queue_ms\trepository_history_archive_update_ms\twidget_reload_request_api_ms\twidget_reload_request_calls\tcommand_max_rss_bytes\tcommand_peak_footprint_bytes\tcommand_cpu_user_sys_seconds\trefresh_result_signature\trefresh_cpu_user_ms\trefresh_cpu_system_ms\n' \
     > "$OUTPUT_DIR/samples.tsv"
 : > "$OUTPUT_DIR/samples.tsv.raw"
 {
@@ -224,6 +250,11 @@ printf 'pair\tversion\torder\tscheduler_wall_ms\trefresh_engine_ms\tdiscovery_ms
     printf 'candidate_revision='
     git log -1 --format='%H'
     printf 'runs_as_pairs=%s\ntest_spec=%s\n' "$RUNS" "$TEST_SPEC"
+    if [[ -n "$REAL_REPOSITORIES_FILE" ]]; then
+        printf 'workload=real-repository-list\nreal_repository_count=%s\n' "$(grep -c . "$REAL_REPOSITORIES_FILE")"
+    else
+        printf 'workload=synthetic-four-repository-change\n'
+    fi
     printf 'derived_data_root=%s\noutput_dir=%s\n' "$DERIVED_DATA_PATH" "$OUTPUT_DIR"
     printf '\n'
     sw_vers
@@ -312,6 +343,8 @@ NR == 1 { next }
     footprint = $29 + 0
     cpuSeconds = $30 + 0
     resultSignature = $31
+    cpuUser = $32 + 0
+    cpuSystem = $33 + 0
     if (version == "baseline") {
         baselineElapsed[++baselineCount] = elapsed
         baselineEngineElapsed[baselineCount] = engineElapsed
@@ -340,6 +373,8 @@ NR == 1 { next }
         baselineRSS[baselineCount] = rss
         baselineFootprint[baselineCount] = footprint
         baselineCPUSec[baselineCount] = cpuSeconds
+        baselineCPUUser[baselineCount] = cpuUser
+        baselineCPUSystem[baselineCount] = cpuSystem
         if (!baselineSignature) baselineSignature = resultSignature
         if (baselineSignature != resultSignature) signatureMismatch = 1
         pairBaselineElapsed[pair] = elapsed
@@ -374,6 +409,8 @@ NR == 1 { next }
         currentRSS[currentCount] = rss
         currentFootprint[currentCount] = footprint
         currentCPUSec[currentCount] = cpuSeconds
+        currentCPUUser[currentCount] = cpuUser
+        currentCPUSystem[currentCount] = cpuSystem
         if (!currentSignature) currentSignature = resultSignature
         if (currentSignature != resultSignature) signatureMismatch = 1
         pairCurrentElapsed[pair] = elapsed
@@ -478,6 +515,8 @@ END {
     printf "command_max_rss_bytes\t%.0f\t%.0f\t%.0f\t%.0f\t%d/%d\t%d/%d\t%d/%d\t%.5f\n", median(baselineRSS, baselineCount), median(currentRSS, currentCount), rssMedianDelta, rssMAD, fasterRSS, pairCount, slowerRSS, pairCount, tiedRSS, pairCount, rssSignP
     printf "command_peak_footprint_bytes\t%.0f\t%.0f\t%.0f\t%.0f\n", median(baselineFootprint, baselineCount), median(currentFootprint, currentCount), footprintMedianDelta, footprintMAD
     printf "command_cpu_user_sys_seconds\t%.3f\t%.3f\t%.3f\n", median(baselineCPUSec, baselineCount), median(currentCPUSec, currentCount), median(currentCPUSec, currentCount) - median(baselineCPUSec, baselineCount)
+    printf "refresh_cpu_user_ms\t%.3f\t%.3f\n", median(baselineCPUUser, baselineCount), median(currentCPUUser, currentCount)
+    printf "refresh_cpu_system_ms\t%.3f\t%.3f\n", median(baselineCPUSystem, baselineCount), median(currentCPUSystem, currentCount)
     printf "elapsed_group_summary\tbaseline_mean=%.3f\tbaseline_population_sd=%.3f\tcurrent_mean=%.3f\tcurrent_population_sd=%.3f\tpairs=%d\n", baselineMean, baselineSD, currentMean, currentSD, pairCount
     printf "refresh_result_equivalent=%s\n", (signatureMismatch || baselineSignature != currentSignature ? "no" : "yes")
     printf "baseline_result_signature=%s\ncurrent_result_signature=%s\n", baselineSignature, currentSignature
