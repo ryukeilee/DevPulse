@@ -48,9 +48,12 @@ actor RefreshEngine {
     /// deterministically against a temporary file. `nil` (the default) keeps
     /// the production store resolution unchanged.
     private let observationStoreOverride: RefreshObservationStore?
+    private let measurementObserver: RefreshMeasurementSink?
 
-    init(observationStoreOverride: RefreshObservationStore? = nil) {
+    init(observationStoreOverride: RefreshObservationStore? = nil,
+         measurementObserver: RefreshMeasurementSink? = nil) {
         self.observationStoreOverride = observationStoreOverride
+        self.measurementObserver = measurementObserver
         var continuation: AsyncStream<RefreshProgress>.Continuation!
         progress = AsyncStream { continuation = $0 }
         progressContinuation = continuation
@@ -225,6 +228,7 @@ actor RefreshEngine {
             overallDeadline: stage2Deadline,
             generation: currentGeneration,
             gitCommandRunner: wrappedRunner,
+            measurementObserver: measurementObserver,
             warnings: &warnings
         )
         let coreElapsed = ProcessInfo.processInfo.systemUptime - stage2Start
@@ -619,6 +623,7 @@ extension RefreshEngine {
         overallDeadline: TimeInterval,
         generation: GenerationIsolation.Token,
         gitCommandRunner: @escaping GitCommandRunner,
+        measurementObserver: RefreshMeasurementSink?,
         warnings: inout [String]
     ) async -> CoreReadResult {
         guard !paths.isEmpty else {
@@ -666,11 +671,17 @@ extension RefreshEngine {
                     let workspaceKind = workspaceKindsByPath[canonical] ?? previous?.workspaceKind
                     let timeout = min(config.gitCommandTimeout, max(0.5, remaining))
 
+                    let gitStartedAt = ProcessInfo.processInfo.systemUptime
                     let result = gitCommandRunner(
                         ["status", "--porcelain=v2", "--branch"],
                         canonical, timeout,
                         ProcessRunner.defaultOutputLimit,
                         { self.isCancelled || Task.isCancelled || stale }
+                    )
+                    measurementObserver?.record(
+                        name: "core_status_git_runner",
+                        duration: ProcessInfo.processInfo.systemUptime - gitStartedAt,
+                        calls: 1
                     )
 
                     return (idx, ProcessReadResult(
@@ -708,8 +719,14 @@ extension RefreshEngine {
                 if let read {
                     switch read.result {
                     case .success(let output):
+                        let snapshotBuildStartedAt = ProcessInfo.processInfo.systemUptime
                         let snapshot = buildSnapshot(output: output, read: read,
                                                       scannedAt: DateFormatting.nowISO())
+                        measurementObserver?.record(
+                            name: "core_status_snapshot_build",
+                            duration: ProcessInfo.processInfo.systemUptime - snapshotBuildStartedAt,
+                            calls: 1
+                        )
                         snapshotsByIndex[idx] = snapshot
                         counters.status += 1
 

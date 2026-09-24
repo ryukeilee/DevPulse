@@ -146,11 +146,15 @@ run_sample() {
         exit 1
     fi
 
-    local elapsed engine_elapsed discovery core_status extended merge persist widget git_calls discovery_git_calls core_git_calls extended_git_calls apply_pins snapshot_pins snapshot_read snapshot_commit activity_save history_save widget_reload widget_reload_calls max_rss footprint
+    local elapsed engine_elapsed discovery core_status git_runner git_runner_calls snapshot_build snapshot_build_calls extended merge persist widget git_calls discovery_git_calls core_git_calls extended_git_calls apply_pins snapshot_pins snapshot_read snapshot_commit activity_save history_save widget_reload widget_reload_calls max_rss footprint cpu_seconds result_signature
     elapsed="$(printf '%s\n' "$benchmark" | sed -n 's/.*scheduler_wall_ms=\([0-9.][0-9.]*\).*/\1/p')"
     engine_elapsed="$(printf '%s\n' "$benchmark" | sed -n 's/.*refresh_engine_ms=\([0-9.][0-9.]*\).*/\1/p')"
     discovery="$(printf '%s\n' "$benchmark" | sed -n 's/.*discovery_ms=\([0-9.][0-9.]*\).*/\1/p')"
     core_status="$(printf '%s\n' "$benchmark" | sed -n 's/.*core_status_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    git_runner="$(printf '%s\n' "$benchmark" | sed -n 's/.*core_status_git_runner_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    git_runner_calls="$(printf '%s\n' "$benchmark" | sed -n 's/.*core_status_git_runner_calls=\([0-9][0-9]*\).*/\1/p')"
+    snapshot_build="$(printf '%s\n' "$benchmark" | sed -n 's/.*core_status_snapshot_build_ms=\([0-9.][0-9.]*\).*/\1/p')"
+    snapshot_build_calls="$(printf '%s\n' "$benchmark" | sed -n 's/.*core_status_snapshot_build_calls=\([0-9][0-9]*\).*/\1/p')"
     extended="$(printf '%s\n' "$benchmark" | sed -n 's/.*extended_info_ms=\([0-9.][0-9.]*\).*/\1/p')"
     merge="$(printf '%s\n' "$benchmark" | sed -n 's/.*merge_ms=\([0-9.][0-9.]*\).*/\1/p')"
     persist="$(printf '%s\n' "$benchmark" | sed -n 's/.*engine_persistence_prepare_ms=\([0-9.][0-9.]*\).*/\1/p')"
@@ -169,7 +173,9 @@ run_sample() {
     widget_reload_calls="$(printf '%s\n' "$benchmark" | sed -n 's/.*widget_reload_request_calls=\([0-9][0-9]*\).*/\1/p')"
     max_rss="$(awk '/maximum resident set size/ { print $1; exit }' "$time_log")"
     footprint="$(awk '/peak memory footprint/ { print $1; exit }' "$time_log")"
-    if [[ -z "$elapsed" || -z "$engine_elapsed" || -z "$discovery" || -z "$core_status" || -z "$extended" || -z "$merge" || -z "$persist" || -z "$widget" || -z "$git_calls" || -z "$discovery_git_calls" || -z "$core_git_calls" || -z "$extended_git_calls" || -z "$apply_pins" || -z "$snapshot_pins" || -z "$snapshot_read" || -z "$snapshot_commit" || -z "$activity_save" || -z "$history_save" || -z "$widget_reload" || -z "$widget_reload_calls" || -z "$max_rss" || -z "$footprint" ]]; then
+    cpu_seconds="$(awk '/ real / { print $3 + $5; exit }' "$time_log")"
+    result_signature="$(printf '%s\n' "$benchmark" | sed -n 's/.*refresh_result_signature=\([^ ]*\).*/\1/p')"
+    if [[ -z "$elapsed" || -z "$engine_elapsed" || -z "$discovery" || -z "$core_status" || -z "$git_runner" || -z "$git_runner_calls" || -z "$snapshot_build" || -z "$snapshot_build_calls" || -z "$extended" || -z "$merge" || -z "$persist" || -z "$widget" || -z "$git_calls" || -z "$discovery_git_calls" || -z "$core_git_calls" || -z "$extended_git_calls" || -z "$apply_pins" || -z "$snapshot_pins" || -z "$snapshot_read" || -z "$snapshot_commit" || -z "$activity_save" || -z "$history_save" || -z "$widget_reload" || -z "$widget_reload_calls" || -z "$max_rss" || -z "$footprint" || -z "$cpu_seconds" || -z "$result_signature" ]]; then
         echo "sample $sample_id had incomplete measurement data; raw logs: $log, $time_log" >&2
         exit 1
     fi
@@ -177,8 +183,8 @@ run_sample() {
     defaults delete "$defaults_suite" >/dev/null 2>&1 || true
     rm -f "$HOME/Library/Preferences/$defaults_suite.plist" 2>/dev/null || true
     capture_system_state "$system_tag-after"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$pair" "$label" "$order" "$elapsed" "$engine_elapsed" "$discovery" "$core_status" "$extended" "$merge" "$persist" "$widget" "$git_calls" "$discovery_git_calls" "$core_git_calls" "$extended_git_calls" "$apply_pins" "$snapshot_pins" "$snapshot_read" "$snapshot_commit" "$activity_save" "$history_save" "$widget_reload" "$widget_reload_calls" "$max_rss" "$footprint" \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$pair" "$label" "$order" "$elapsed" "$engine_elapsed" "$discovery" "$core_status" "$git_runner" "$git_runner_calls" "$snapshot_build" "$snapshot_build_calls" "$extended" "$merge" "$persist" "$widget" "$git_calls" "$discovery_git_calls" "$core_git_calls" "$extended_git_calls" "$apply_pins" "$snapshot_pins" "$snapshot_read" "$snapshot_commit" "$activity_save" "$history_save" "$widget_reload" "$widget_reload_calls" "$max_rss" "$footprint" "$cpu_seconds" "$result_signature" \
         | tee -a "$OUTPUT_DIR/samples.tsv"
     printf '%s\n' "$benchmark" >> "$OUTPUT_DIR/samples.tsv.raw"
 }
@@ -210,7 +216,7 @@ apply_baseline_isolation_shim() {
     fi
 }
 
-printf 'pair\tversion\torder\tscheduler_wall_ms\trefresh_engine_ms\tdiscovery_ms\tcore_status_ms\textended_info_ms\tmerge_ms\tengine_persistence_prepare_ms\tengine_widget_deferred_ms\ttotal_git_calls\tdiscovery_git_calls\tcore_status_git_calls\textended_info_git_calls\tscheduler_apply_pins_ms\tsnapshot_prepare_apply_pins_ms\tsnapshot_revision_read_ms\tsnapshot_commit_and_verify_ms\tactivity_archive_save_queue_ms\trepository_history_archive_update_ms\twidget_reload_request_api_ms\twidget_reload_request_calls\tcommand_max_rss_bytes\tcommand_peak_footprint_bytes\n' \
+printf 'pair\tversion\torder\tscheduler_wall_ms\trefresh_engine_ms\tdiscovery_ms\tcore_status_ms\tcore_status_git_runner_sum_ms\tcore_status_git_runner_calls\tcore_status_snapshot_build_sum_ms\tcore_status_snapshot_build_calls\textended_info_ms\tmerge_ms\tengine_persistence_prepare_ms\tengine_widget_deferred_ms\ttotal_git_calls\tdiscovery_git_calls\tcore_status_git_calls\textended_info_git_calls\tscheduler_apply_pins_ms\tsnapshot_prepare_apply_pins_ms\tsnapshot_revision_read_ms\tsnapshot_commit_and_verify_ms\tactivity_archive_save_queue_ms\trepository_history_archive_update_ms\twidget_reload_request_api_ms\twidget_reload_request_calls\tcommand_max_rss_bytes\tcommand_peak_footprint_bytes\tcommand_cpu_user_sys_seconds\trefresh_result_signature\n' \
     > "$OUTPUT_DIR/samples.tsv"
 : > "$OUTPUT_DIR/samples.tsv.raw"
 {
@@ -282,29 +288,39 @@ NR == 1 { next }
     engineElapsed = $5 + 0
     discovery = $6 + 0
     coreStatus = $7 + 0
-    extended = $8 + 0
-    merge = $9 + 0
-    persist = $10 + 0
-    widget = $11 + 0
-    gitCalls = $12 + 0
-    discoveryGitCalls = $13 + 0
-    coreGitCalls = $14 + 0
-    extendedGitCalls = $15 + 0
-    applyPins = $16 + 0
-    snapshotPins = $17 + 0
-    snapshotRead = $18 + 0
-    snapshotCommit = $19 + 0
-    activitySave = $20 + 0
-    historySave = $21 + 0
-    widgetReload = $22 + 0
-    widgetReloadCalls = $23 + 0
-    rss = $24 + 0
-    footprint = $25 + 0
+    gitRunner = $8 + 0
+    gitRunnerCalls = $9 + 0
+    snapshotBuild = $10 + 0
+    snapshotBuildCalls = $11 + 0
+    extended = $12 + 0
+    merge = $13 + 0
+    persist = $14 + 0
+    widget = $15 + 0
+    gitCalls = $16 + 0
+    discoveryGitCalls = $17 + 0
+    coreGitCalls = $18 + 0
+    extendedGitCalls = $19 + 0
+    applyPins = $20 + 0
+    snapshotPins = $21 + 0
+    snapshotRead = $22 + 0
+    snapshotCommit = $23 + 0
+    activitySave = $24 + 0
+    historySave = $25 + 0
+    widgetReload = $26 + 0
+    widgetReloadCalls = $27 + 0
+    rss = $28 + 0
+    footprint = $29 + 0
+    cpuSeconds = $30 + 0
+    resultSignature = $31
     if (version == "baseline") {
         baselineElapsed[++baselineCount] = elapsed
         baselineEngineElapsed[baselineCount] = engineElapsed
         baselineDiscovery[baselineCount] = discovery
         baselineCoreStatus[baselineCount] = coreStatus
+        baselineGitRunner[baselineCount] = gitRunner
+        baselineGitRunnerCalls[baselineCount] = gitRunnerCalls
+        baselineSnapshotBuild[baselineCount] = snapshotBuild
+        baselineSnapshotBuildCalls[baselineCount] = snapshotBuildCalls
         baselineExtended[baselineCount] = extended
         baselineMerge[baselineCount] = merge
         baselinePersist[baselineCount] = persist
@@ -323,6 +339,9 @@ NR == 1 { next }
         baselineWidgetReloadCalls[baselineCount] = widgetReloadCalls
         baselineRSS[baselineCount] = rss
         baselineFootprint[baselineCount] = footprint
+        baselineCPUSec[baselineCount] = cpuSeconds
+        if (!baselineSignature) baselineSignature = resultSignature
+        if (baselineSignature != resultSignature) signatureMismatch = 1
         pairBaselineElapsed[pair] = elapsed
         pairBaselineEngineElapsed[pair] = engineElapsed
         pairBaselineRSS[pair] = rss
@@ -332,6 +351,10 @@ NR == 1 { next }
         currentEngineElapsed[currentCount] = engineElapsed
         currentDiscovery[currentCount] = discovery
         currentCoreStatus[currentCount] = coreStatus
+        currentGitRunner[currentCount] = gitRunner
+        currentGitRunnerCalls[currentCount] = gitRunnerCalls
+        currentSnapshotBuild[currentCount] = snapshotBuild
+        currentSnapshotBuildCalls[currentCount] = snapshotBuildCalls
         currentExtended[currentCount] = extended
         currentMerge[currentCount] = merge
         currentPersist[currentCount] = persist
@@ -350,6 +373,9 @@ NR == 1 { next }
         currentWidgetReloadCalls[currentCount] = widgetReloadCalls
         currentRSS[currentCount] = rss
         currentFootprint[currentCount] = footprint
+        currentCPUSec[currentCount] = cpuSeconds
+        if (!currentSignature) currentSignature = resultSignature
+        if (currentSignature != resultSignature) signatureMismatch = 1
         pairCurrentElapsed[pair] = elapsed
         pairCurrentEngineElapsed[pair] = engineElapsed
         pairCurrentRSS[pair] = rss
@@ -429,6 +455,10 @@ END {
     printf "stage_medians_ms\tbaseline/current\n"
     printf "discovery\t%.3f\t%.3f\n", median(baselineDiscovery, baselineCount), median(currentDiscovery, currentCount)
     printf "coreStatus\t%.3f\t%.3f\n", median(baselineCoreStatus, baselineCount), median(currentCoreStatus, currentCount)
+    printf "coreStatusGitRunner_sum_ms\t%.3f\t%.3f\n", median(baselineGitRunner, baselineCount), median(currentGitRunner, currentCount)
+    printf "coreStatusGitRunner_calls\t%.0f\t%.0f\n", median(baselineGitRunnerCalls, baselineCount), median(currentGitRunnerCalls, currentCount)
+    printf "coreStatusSnapshotBuild_sum_ms\t%.3f\t%.3f\n", median(baselineSnapshotBuild, baselineCount), median(currentSnapshotBuild, currentCount)
+    printf "coreStatusSnapshotBuild_calls\t%.0f\t%.0f\n", median(baselineSnapshotBuildCalls, baselineCount), median(currentSnapshotBuildCalls, currentCount)
     printf "extendedInfo\t%.3f\t%.3f\n", median(baselineExtended, baselineCount), median(currentExtended, currentCount)
     printf "merge\t%.3f\t%.3f\n", median(baselineMerge, baselineCount), median(currentMerge, currentCount)
     printf "enginePersistencePreparation\t%.3f\t%.3f\n", median(baselinePersist, baselineCount), median(currentPersist, currentCount)
@@ -447,7 +477,11 @@ END {
     printf "widgetReloadRequestCalls\t%.0f\t%.0f\n", median(baselineWidgetReloadCalls, baselineCount), median(currentWidgetReloadCalls, currentCount)
     printf "command_max_rss_bytes\t%.0f\t%.0f\t%.0f\t%.0f\t%d/%d\t%d/%d\t%d/%d\t%.5f\n", median(baselineRSS, baselineCount), median(currentRSS, currentCount), rssMedianDelta, rssMAD, fasterRSS, pairCount, slowerRSS, pairCount, tiedRSS, pairCount, rssSignP
     printf "command_peak_footprint_bytes\t%.0f\t%.0f\t%.0f\t%.0f\n", median(baselineFootprint, baselineCount), median(currentFootprint, currentCount), footprintMedianDelta, footprintMAD
+    printf "command_cpu_user_sys_seconds\t%.3f\t%.3f\t%.3f\n", median(baselineCPUSec, baselineCount), median(currentCPUSec, currentCount), median(currentCPUSec, currentCount) - median(baselineCPUSec, baselineCount)
     printf "elapsed_group_summary\tbaseline_mean=%.3f\tbaseline_population_sd=%.3f\tcurrent_mean=%.3f\tcurrent_population_sd=%.3f\tpairs=%d\n", baselineMean, baselineSD, currentMean, currentSD, pairCount
+    printf "refresh_result_equivalent=%s\n", (signatureMismatch || baselineSignature != currentSignature ? "no" : "yes")
+    printf "baseline_result_signature=%s\ncurrent_result_signature=%s\n", baselineSignature, currentSignature
+    if (signatureMismatch || baselineSignature != currentSignature) exit 1
     printf "elapsed_improvement_beyond_noise=%s\n", (elapsedMedianDelta < 0 && elapsedSignP < 0.05 ? "yes" : "no")
     printf "elapsed_improved_pairs=%d/%d\n", fasterElapsed, pairCount
     printf "elapsed_paired_median_delta_ms=%.3f\nelapsed_paired_MAD_ms=%.3f\nelapsed_exact_two_sided_sign_p=%.5f\n", elapsedMedianDelta, elapsedMAD, elapsedSignP

@@ -264,7 +264,7 @@ enum ProcessRunner {
         "/opt/homebrew/bin/git",
         "/usr/local/bin/git"
     ]
-    private static let pollInterval: TimeInterval = 0.01
+    private static let pollInterval: TimeInterval = 0.001
     private static let terminationGrace: TimeInterval = 0.20
     private static let killObservationGrace: TimeInterval = 0.20
     private static let outputDrainGrace: TimeInterval = 0.25

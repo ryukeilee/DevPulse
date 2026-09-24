@@ -46,7 +46,7 @@ struct EndToEndRefreshMeasurementTests {
         let executionRecorder = RefreshExecutionRecorder()
         let phaseRecorder = RefreshPhaseRecorder()
         let scanExecution: ScanExecution = { request in
-            let engine = RefreshEngine()
+            let engine = RefreshEngine(measurementObserver: phaseRecorder)
             let progressStream = await engine.progress
             var progressTask: Task<Void, Never>?
             if let handler = request.progressHandler {
@@ -118,6 +118,7 @@ struct EndToEndRefreshMeasurementTests {
         let changedFile = repositories[0].appendingPathComponent("README.md")
         try "daily incremental change\n".write(to: changedFile, atomically: true, encoding: .utf8)
         await executionRecorder.reset()
+        phaseRecorder.reset()
 
         let revisionBeforeRefresh = initialSnapshot.storageRevision
         let refreshStartedAt = ProcessInfo.processInfo.systemUptime
@@ -149,6 +150,22 @@ struct EndToEndRefreshMeasurementTests {
         #expect(!updatedHistoryArchive.isEmpty)
         #expect(scheduler.refreshPhase == .success)
 
+        let resultSignature = finalSnapshot.repositories
+            .sorted { $0.name < $1.name }
+            .map { repository in
+                [
+                    repository.name,
+                    repository.branch,
+                    repository.status.rawValue,
+                    String(repository.modifiedFileCount),
+                    String(repository.addedFileCount),
+                    String(repository.deletedFileCount),
+                    String(repository.untrackedFileCount),
+                    String(repository.changedFileCount),
+                    String(repository.isPinned)
+                ].joined(separator: ":")
+            }
+            .joined(separator: ",")
         let sample = try #require(environment["DEVPULSE_E2E_SAMPLE_ID"])
         let output = [
             "e2e_refresh.sample=\(sample)",
@@ -164,6 +181,10 @@ struct EndToEndRefreshMeasurementTests {
             "core_status_git_calls=\(execution.stageGitCalls[.coreStatus] ?? 0)",
             "extended_info_git_calls=\(execution.stageGitCalls[.extendedInfo] ?? 0)",
             "total_git_calls=\(execution.totalGitCalls)",
+            "core_status_git_runner_ms=\(Self.format((schedulerPhases["core_status_git_runner"]?.duration ?? 0) * 1_000))",
+            "core_status_git_runner_calls=\(schedulerPhases["core_status_git_runner"]?.calls ?? 0)",
+            "core_status_snapshot_build_ms=\(Self.format((schedulerPhases["core_status_snapshot_build"]?.duration ?? 0) * 1_000))",
+            "core_status_snapshot_build_calls=\(schedulerPhases["core_status_snapshot_build"]?.calls ?? 0)",
             "scheduler_apply_pins_ms=\(Self.format((schedulerPhases["scheduler_apply_pins"]?.duration ?? 0) * 1_000))",
             "snapshot_prepare_apply_pins_ms=\(Self.format((schedulerPhases["snapshot_prepare_apply_pins"]?.duration ?? 0) * 1_000))",
             "snapshot_revision_read_ms=\(Self.format((schedulerPhases["snapshot_revision_read"]?.duration ?? 0) * 1_000))",
@@ -176,6 +197,7 @@ struct EndToEndRefreshMeasurementTests {
             "known_repositories=\(execution.knownRepositoryCount)",
             "forced_discovery=\(execution.forcedDiscovery)",
             "final_storage_revision=\(finalSnapshot.storageRevision)",
+            "refresh_result_signature=\(resultSignature)",
             "activity_and_history_archives=updated"
         ].joined(separator: " ")
         print(output)
@@ -326,6 +348,12 @@ private final class RefreshPhaseRecorder: RefreshMeasurementSink, @unchecked Sen
         total.duration += duration
         total.calls += calls
         totals[name] = total
+    }
+
+    func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        totals.removeAll()
     }
 
     func snapshot() -> [String: Total] {

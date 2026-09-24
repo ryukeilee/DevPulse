@@ -108,23 +108,51 @@ fixture 是 4 个临时仓库、一个 README 工作树变更、`forceRepository
 
 | 阶段 | baseline 中位数 | instrumented 中位数 | 计数/含义 |
 |---|---:|---:|---|
-| RefreshEngine coreStatus | 209.658 ms | 208.514 ms | 4 次 status Git 调用 |
-| snapshot commit + read-back verify | 55.907 ms | 53.459 ms | scheduler 最终快照提交一次 |
-| activity archive save queue | 21.852 ms | 21.690 ms | 一次异步串行队列保存耗时（含排队） |
-| snapshot revision read | 15.309 ms | 15.201 ms | 一次 `AppGroupStore.read()` |
-| snapshot prepare `applyPins` | 14.477 ms | 14.325 ms | final snapshot prepare |
-| scheduler result `applyPins` | 11.876 ms | 12.038 ms | engine 返回后的一次 |
-| discovery | 4.249 ms | 4.596 ms | 本 fixture 已知仓库路径复用；0 Git 调用 |
-| history archive update | 1.900 ms | 1.840 ms | 一次 read/merge/write 更新 |
-| merge | 1.440 ms | 1.093 ms | RefreshEngine merge |
-| engine persistence preparation | 0.728 ms | 0.720 ms | 仅内存快照准备，不是磁盘持久化 |
-| extendedInfo | 0.103 ms | 0.091 ms | 0 次 Git log 调用 |
-| Widget reload request API | 0.038 ms | 0.042 ms | 每轮请求 1 次；不代表 Widget 已消费/重载完成 |
+| RefreshEngine coreStatus | 210.300 ms | 210.139 ms | 4 次 status Git 调用 |
+| snapshot commit + read-back verify | 28.679 ms | 27.409 ms | scheduler 最终快照提交一次 |
+| activity archive save queue | 11.537 ms | 11.534 ms | 一次异步串行队列保存耗时（含排队） |
+| snapshot revision read | 12.287 ms | 12.227 ms | 一次 `AppGroupStore.read()` |
+| snapshot prepare `applyPins` | 8.463 ms | 8.974 ms | final snapshot prepare |
+| scheduler result `applyPins` | 4.418 ms | 4.351 ms | engine 返回后的一次 |
+| discovery | 4.642 ms | 4.578 ms | 本 fixture 已知仓库路径复用；0 Git 调用 |
+| history archive update | 1.026 ms | 1.023 ms | 一次 read/merge/write 更新 |
+| merge | 1.957 ms | 1.399 ms | RefreshEngine merge |
+| engine persistence preparation | 0.714 ms | 0.724 ms | 仅内存快照准备，不是磁盘持久化 |
+| extendedInfo | 0.065 ms | 0.088 ms | 0 次 Git log 调用 |
+| Widget reload request API | 0 ms | 0 ms | timer 刷新判定为 skip；未请求 reload |
 
-调用账本每次均为 `totalGitCalls=4`：`discovery=0`、`coreStatus=4`、`extendedInfo=0`；activity archive/history/snapshot commit 均成功更新，Widget reload request 为 1。实际扫描 discovery 仍被计时，尽管此增量场景在已知仓库集合上没有 discovery Git spawn。
+调用账本每次均为 `totalGitCalls=4`：`discovery=0`、`coreStatus=4`、`extendedInfo=0`；activity archive/history/snapshot commit 均成功更新，Widget reload decision 为 skip、reload API 调用 0。实际扫描 discovery 仍被计时，尽管此增量场景在已知仓库集合上没有 discovery Git spawn。
 
 整轮 `scheduler_wall_ms` baseline/current 中位数 `321.178 / 319.289 ms`，配对中位差 `-3.564 ms`、配对 MAD `8.674 ms`，方向为 6/10 更快，精确双侧 sign test `p=0.75391`：**无超噪声端到端改善证据**。本次是计量/diagnostics 校正，不是性能优化；不以小幅中位差声称收益。峰值 RSS/footprint 是 xcodebuild 测试命令级，不代表刷新进程独占值。
 
 测量环境为 Mac14,2 Apple M2 / 8 logical CPUs / macOS 27.0 / Xcode 27.0；metadata 与每样本前后 load/process 快照在附带证据中。测量前后未见并发 xcodebuild/xctest；常驻 Widget 扩展存在但测量用独立 App Group/suite。原始 TSV、summary、完整日志、系统快照和临时 fixture 已随工作线程交付物存于 `.herdr-project/devpulse-t-0053/library/refresh-profile-baseline-2f0dc09/`。
 
-WidgetKit API 的同步调用时间已测；Widget extension 实际何时唤起、何时读取并呈现快照不受本进程控制，仍需独立运行时观测。
+WidgetKit API 的同步调用时间已测；在这组**真正计时的 timer 刷新**中 reload decision 为 skip（`widget_reload_request_calls=0`），因此不把启动初次 refresh 时的请求混算进增量刷新。Widget extension 实际何时唤起、何时读取并呈现快照不受本进程控制，仍需独立运行时观测。
+
+## coreStatus 安全候选验证（t-0053 后续）
+
+`coreStatus` 子阶段计量将 stage 拆为 status runner 调用耗时总和（并行单调用时间的和，不应与 stage wall-clock 相加）和解析/buildSnapshot 时间总和。真实 workload 4 个仓库的 runner 累计中位耗时约 795 ms，而解析/buildSnapshot 约 2.6 ms；4 个必需 `git status` 调用未减少。此前已证明 timestamp 跳过不安全（工作树变化不必触动 HEAD/index），且 parser 候选无收益，不再复试。
+
+安全候选：将 `ProcessRunner` 监视子进程退出、取消和输出 EOF 的轮询间隔由 10 ms 缩至 1 ms。只改变父进程观察已发生事件的频率，不改变 Git 参数、结果解析、持久化或错误状态；更快观察取消/超时并发事件，潜在代价是增加轮询 CPU。用 `02310ae`（10 ms）和候选当前代码（1 ms）交替配对 10 次，每次独立 fixture；两侧注入相同的计量探针。
+
+| 指标 | 10 ms baseline | 1 ms candidate | 配对结果 |
+|---|---:|---:|---|
+| scheduler wall | 315.139 ms | 175.361 ms | median delta -137.685 ms；10/10 更快；p=0.00195 |
+| coreStatus wall | 206.428 ms | 64.948 ms | -141.480 ms |
+| 4 次 status runner 累计时间 | 795.326 ms | 209.981 ms | -585.345 ms |
+| 4 次 snapshot build 累计时间 | 2.580 ms | 2.752 ms | +0.172 ms |
+| 总 Git 调用 | 4 | 4 | discovery 0 / status 4 / log 0，不变 |
+| xcodebuild 命令 CPU（user+sys） | 0.930 s | 0.930 s | 无可分辨变化（time 输出精度 0.01 s） |
+
+端到端 scheduler 墙钟中位数降低约 43.7%；配对 MAD 16.924 ms，精确双侧 sign test `p=0.00195`，大于噪声且 10/10 方向一致。刷新结果签名 baseline/candidate 逐轮完全一致（`repo-0` changed 1 file，其余 3 仓库 clean），档案更新断言通过；Git 调用数和关键 snapshot commit/archive 指标未见明显回退。CPU 比较只到 xcodebuild 测试命令精度；高分辨率 process/thread CPU 及外部真实目录场景仍未测。
+
+可复跑命令：
+
+```sh
+RUNS=10 BASELINE_REV=02310ae \
+  DERIVED_DATA_PATH=/tmp/devpulse-t0053-core-poll-dd2 \
+  OUTPUT_DIR=/tmp/devpulse-t0053-core-poll-1ms-final \
+  ./scripts/measure-end-to-end-refresh.sh
+```
+
+全量原始结果在工作线程 library 的 `coreStatus-poll-1ms/` 目录（如本轮证据已归档）。
