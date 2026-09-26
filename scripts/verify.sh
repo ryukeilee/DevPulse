@@ -10,12 +10,14 @@ set -euo pipefail
 #
 # Usage:
 #   ./scripts/verify.sh build                    # Compile once
-#   ./scripts/verify.sh test [TestClass]         # Run tests (pre-built bundle)
+#   ./scripts/verify.sh test [TestClass ...]      # Run tests (pre-built bundle)
 #   ./scripts/verify.sh final                    # Build + full test suite
 #   ./scripts/verify.sh widgetkit                # WidgetKit wiring check
 #
 # Examples:
 #   ./scripts/verify.sh test DevPulseTests/ActivityEventTests
+#   ./scripts/verify.sh test DevPulseTests/RefreshEngineIntegrationTests \\
+#       DevPulseTests/RefreshCompletionTests
 #   ./scripts/verify.sh test "DevPulseTests/CommitReadinessEngineTests/testStartupRefresh…()"
 #
 # Test environment (isolated scratch container):
@@ -270,16 +272,21 @@ build_for_testing() {
 # ── test-without-building ────────────────────────────────────────────
 
 run_tests() {
-    local test_spec="${1:-}"
-    local label="${2:-tests}"
+    local label="$1"
+    shift
+    local -a test_specs=("$@")
 
     report_test_environment
     setup_test_isolation
 
     local test_args=("${COMMON_ARGS[@]}")
-    if [ -n "$test_spec" ]; then
-        test_args+=(-only-testing:"$test_spec")
-        info "Running targeted test: $test_spec"
+    if [ "${#test_specs[@]}" -gt 0 ]; then
+        local test_spec
+        for test_spec in "${test_specs[@]}"; do
+            [ -n "$test_spec" ] || fail "Test selectors must not be empty."
+            test_args+=(-only-testing:"$test_spec")
+            info "Running targeted test: $test_spec"
+        done
     else
         info "Running full test suite"
     fi
@@ -311,11 +318,12 @@ case "${1:-help}" in
         build_for_testing
         ;;
     test)
-        run_tests "${2:-}"
+        shift
+        run_tests "tests" "$@"
         ;;
     final)
         build_for_testing
-        run_tests "" "full test suite"
+        run_tests "full test suite"
         ok "Final acceptance passed — all checks green"
         ;;
     widgetkit)
@@ -327,12 +335,14 @@ Usage: ./scripts/verify.sh <command> [options]
 
 Commands:
   build                  Build for testing (compile once).
-  test [TestClass]       Run tests against the pre-built bundle.
-                         Omit TestClass to run the full suite.
+  test [TestClass ...]  Run selected tests against the pre-built bundle.
+                         Multiple selectors run in one isolated xcodebuild invocation.
+                         Omit selectors to run the full suite.
                          Examples:
                            test DevPulseTests/ActivityEventTests
+                           test DevPulseTests/RepositoryHealthOverviewTests \\
+                             DevPulseTests/RepositoryActivityConsistencyTests
                            test DevPulseTests/CommitReadinessEngineTests
-                           test DevPulseTests/SharedSnapshotStoreTests
   final                  Full acceptance gate: build + full test suite.
   widgetkit              WidgetKit wiring check (delegates to verify-widgetkit.sh).
 

@@ -21,27 +21,6 @@
 
 ---
 
-## Loop 20 — 2026-08-12（新增可达的「待收尾事项」集中入口）
-
-- **问题**：项目已有 `PendingItem` 自动评估、持久化和页面文件，但 `PendingCenterView` 没有接入 `ContentView` 的任何导航入口，用户无法集中查看扫描识别出的未提交改动、未推送提交和其他未完成状态；页面默认还混合显示已恢复/永久忽略记录，已有排序状态没有可操作控件。
-- **证据**：用户明确要求新增「待收尾事项」功能；`rg "PendingCenterView" DevPulseNative/App` 只命中视图定义、不命中消费点；`AppTab` 与 `AppSectionBar` 均无 pending case/按钮；`PendingItemEvaluator` 已有 `.dirtyWorkspace`、`.unpushedCommits`、`.mergeConflict` 等规则并在每次扫描完成后由 `ScanScheduler.refreshPendingItems` 调用。
-- **原因**：自动识别链路已经存在，最高价值且最小的修改是接通可见入口并把现有数据整理成可操作的当前/历史视图，而不是复制扫描或评估逻辑。
-- **修改**：
-  - `Core/Models.swift`、`App/ContentView.swift`：新增 `.pending` App tab 与「待收尾」入口，接入 `PendingCenterView`。
-  - `App/PendingCenterView.swift`：页面改名「待收尾事项」；默认只展示当前事项，新增当前/已完成/全部范围、搜索与排序控件、项目/来源/状态元信息和按场景说明的空态。
-  - `App/PendingItemDetailView.swift`：详情标题、时间、状态和处理动作统一为中文。
-  - `Core/PendingItemEvaluator.swift`：新发现的未提交/未推送事项不再显示误导性的「持续 0 分钟」，有历史持续时间时才展示时长。
-  - `DevPulseNativeTests/PendingItemStaleLifecycleTests.swift`：新增当前 Git 状态立即生成未提交、未推送事项以及合并冲突状态的覆盖。
-  - 按 20 条保留规则，将 Loop 0 剪切归档到 `.agent/archive/history-2026-08-09-loop0-0.md`。
-- **验证**：
-  - `rtk bash ./scripts/verify.sh build` → Build succeeded。
-  - `rtk bash ./scripts/verify.sh test DevPulseTests/PendingItemStaleLifecycleTests` → 15 个测试通过；首次运行暴露新增断言把既有 merge conflict 严重级别误写为 `.critical`，按现有规则修正为 `.high` 后通过。
-  - `rtk bash ./scripts/verify.sh final` → Build succeeded、full test suite passed、Final acceptance passed — all checks green。
-  - `git diff --check` → 通过。
-- **剩余风险**：CLI 构建与测试无法证明 600px 最小窗口下新增导航项、筛选栏和详情弹窗的最终视觉布局；未执行签名安装或运行时 GUI 人工确认。未改变 Git 只读扫描、共享 snapshot、Widget、App Group、签名或项目配置。
-
----
-
 ## Loop 21 — 2026-08-12（签名安装运行并提交推送「待收尾事项」）
 
 - **问题**：无新增业务问题；Loop 20 功能已通过完整验收，用户明确要求将新版 App 在本机签名安装运行，并直接合并提交推送。
@@ -384,3 +363,14 @@
 - **修改**：builder 改为保留 `result.diagnostics.totalGitCalls`；新增真实 Git worktree 计数回归测试；XcodeGen 登记新增测试。
 - **验证**：HEAD^ pristine archive 同场景 diagnostics=4；HEAD 改动前独立 runner 计数=5、diagnostics=4；修复后 diagnostics=5 与 runner=5 一致。`verify.sh final` → 918 tests / 92 suites 全过。测量负载：load average 4.93/4.09/3.55，多个 pi 进程和 Chrome/系统进程并发。
 - **剩余风险**：未运行签名安装或 GUI 验证；本轮仅涉及计数诊断与回归测试，不改扫描语义或快照行为。
+
+---
+
+## Loop 40 — 2026-09-26（合并定向测试 selectors，减少重复 xcodebuild 启动）
+
+- **问题**：`verify.sh test` 原先只接收一个测试 selector；同一日常回归需分别运行多个相关 suite，每次都重新启动 `xcodebuild` 和测试隔离环境。
+- **证据**：以 `RepositoryHealthOverviewTests` + `RepositoryActivityConsistencyTests`、`RefreshEngineIntegrationTests` + `RefreshCompletionTests`、`WidgetDegradedRenderingTests` + `WidgetLifecycleScenariosTests` 三组真实套件各做 5 对交替测量；基线两次单 suite 调用，候选一次多 selector 调用。每组每次测试总数相同，全部命令退出码 0；配对中位耗时分别改善 2247、2225、2165 ms，候选分别 5/5、4/5、5/5 对更快。完整命令、15 对原始时延和机器环境见 `docs/developer-feedback-cycle.md`。
+- **原因**：两次验证合为一次后，测试断言与套件覆盖均保留，可稳定省去一次 `xcodebuild` / 测试宿主启动，是广于单个可选检查的重复工作。
+- **修改**：`scripts/verify.sh` 的 `test` 接受多个 selectors 并逐一传入同一 `test-without-building`；新增工作流与实测记录 `docs/developer-feedback-cycle.md`。按 20 条保留规则将 Loop 20 剪切归档到 `.agent/archive/history-2026-09-26-loop20-20.md`。
+- **验证**：`bash -n scripts/verify.sh`、兼容单 suite 与三组多 suite 定向测试通过；`verify.sh widgetkit` 为 16 PASS / 0 FAIL；`bash scripts/verify-build-consistency.sh` 为 20 pass / 0 fail / 1 skip；`verify.sh final` 构建通过，919 tests / 93 suites 全通过。最终还会在本候选 commit 上重跑 `verify.sh final`。
+- **剩余风险**：机器负载较高；Refresh 组一对较慢，未剔除并记录在文档中；收益仅适用于调用者明确选择多个 suite 的定向测试。未安装或启动真实 App/Widget。
