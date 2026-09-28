@@ -21,25 +21,6 @@
 
 ---
 
-## Loop 21 — 2026-08-12（签名安装运行并提交推送「待收尾事项」）
-
-- **问题**：无新增业务问题；Loop 20 功能已通过完整验收，用户明确要求将新版 App 在本机签名安装运行，并直接合并提交推送。
-- **证据**：工作区仅包含 Loop 20 的 6 个业务/测试文件、Maintenance Loop 记录和归档文件；`main` 与 `origin/main` 同步；`verify.sh final` 已在同一源码状态通过。
-- **原因**：本轮不扩大功能范围，只完成用户授权的本机落地和 Git 发布终态。
-- **修改**：无新增业务代码；按 20 条保留规则将 Loop 1 剪切归档到 `.agent/archive/history-2026-08-09-loop1-1.md`，追加本记录。
-- **验证**：
-  - 标准 `scripts/install-and-self-check.sh` 被既有环境问题阻塞：`No Xcode Apple account is configured on this Mac`。
-  - 钥匙串存在有效 `Apple Development: ryukei_li@hotmail.com (5BJ9GM7VZR)` 身份；复用当前已安装 host/widget 的匹配 provisioning profiles。
-  - 使用独立 DerivedData 执行普通 `xcodebuild ... build`，避免 `build-for-testing` 产物中的 XCTest frameworks；分别使用项目 entitlements 重签 widget 和 host。
-  - `codesign --verify --deep --strict` 通过；host/widget 均为 Team `JYL9G28DP3` 且保留 `group.local.devpulse`，widget 额外保留 App Sandbox；安装包不含 `DevPulseTests.xctest`。
-  - `/Applications/DevPulse.app` 已运行（PID 11120，进程路径匹配）；安装后主二进制与临时已签名产物 SHA-256 一致；旧 App 保存在 `/tmp/devpulse-install-loop21.b8ivbt/DevPulse.app.previous`，可恢复。
-  - `--self-check` → `self_check.result=pass`、`refresh_phase=success`、`validation=pass`、`lifecycle.widget_registration=active`、`lifecycle.self_heal=^pass`；`pluginkit` 确认 widget 注册到新安装路径。
-  - 共享快照中 DevPulse 为 `status=changed`、`changedFileCount=8`，与提交前工作区一致。
-  - 提交前执行 staged secret scan 与 diff check，随后直接提交到 `main` 并推送 `origin/main`。
-- **剩余风险**：Xcode 仍未登录 Apple 账号，标准自动签名安装流程不可用；本次本机开发签名安装、运行、自检和 Widget 注册均已验证。导航与筛选栏的最小窗口视觉布局仍需人工目视确认。
-
----
-
 ## Loop 22 — 2026-08-12（项目健康评分现有终态核对与回归复验）
 
 - **问题**：用户要求新增“项目健康评分”；当前 `main` 已包含同一功能，需要确认现有实现是否完整满足要求，避免重复建设评分、扫描或 UI 链路。
@@ -374,3 +355,14 @@
 - **修改**：`scripts/verify.sh` 的 `test` 接受多个 selectors 并逐一传入同一 `test-without-building`；新增工作流与实测记录 `docs/developer-feedback-cycle.md`。按 20 条保留规则将 Loop 20 剪切归档到 `.agent/archive/history-2026-09-26-loop20-20.md`。
 - **验证**：`bash -n scripts/verify.sh`、兼容单 suite 与三组多 suite 定向测试通过；`verify.sh widgetkit` 为 16 PASS / 0 FAIL；`bash scripts/verify-build-consistency.sh` 为 20 pass / 0 fail / 1 skip；`verify.sh final` 构建通过，919 tests / 93 suites 全通过。最终还会在本候选 commit 上重跑 `verify.sh final`。
 - **剩余风险**：机器负载较高；Refresh 组一对较慢，未剔除并记录在文档中；收益仅适用于调用者明确选择多个 suite 的定向测试。未安装或启动真实 App/Widget。
+
+---
+
+## Loop 41 — 2026-09-29（复用 Git worktree topology 发现结果）
+
+- **问题**：稳态增量刷新每轮重复启动 `git worktree list --porcelain -z`，即使工作树拓扑未改变。
+- **证据**：完整 `ScanScheduler` timer 刷新配对测量（基线 `8adad08cdce399525d11a0983796a67b23ded7c7`，单一真实 DevPulse worktree workload，10 对）：`totalGitCalls` 2→1、`discoveryGitCalls` 1→0；刷新结果签名两侧逐轮一致。
+- **原因**：发现路径集合缓存已有 TTL，但 linked-worktree topology 查询每轮照常执行；真实测量中 discovery median 为 53.392 ms，主要由该额外 Git 子进程路径构成。
+- **修改**：`GitRepositoryScanner` 按 common Git directory 缓存 topology 输出，用 `.git` 指针、`commondir`、配置元数据及 worktree registrations 构成指纹；新增/移除/移动注册后重新查询，指纹读取有 50 ms 上限且失效时回退原 Git 路径。`DiscoveryGitCallAccountingTests` 覆盖稳定拓扑复用和新增 linked worktree 立即发现。
+- **验证**：10 对同机交替测量，scheduler median 169.668→127.734 ms，配对中位差 -39.797 ms、MAD 10.931 ms、10/10 更快、双侧 sign `p=0.00195`；population-SD 2 倍阈值为 35.018 ms。load average 1 分钟范围 4.74–6.85，未观察到并发 xcodebuild/xctest；RSS/footprint 无显著回退。`verify.sh final` → 919 tests / 93 suites 全通过，`git diff --check` 通过。原始测量见 `.herdr-project/devpulse-t-0084/library/candidate-worktree-topology-cache-final/`。
+- **剩余风险**：端到端计时基于 1 个真实仓库和 timer 路径，未运行签名安装或观测 Widget 实际渲染；现有全量行为测试通过，新 worktree 注册即时可见已由真实 Git 临时 fixture 验证。

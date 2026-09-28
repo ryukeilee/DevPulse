@@ -137,10 +137,43 @@ struct DiscoveryGitCallAccountingTests {
         #expect(incrementalCalls.filter { $0.first == "status" }.count == 2)
         #expect(!incrementalCalls.contains { $0.first == "log" })
         #expect(incremental.diagnostics.totalGitCalls == incrementalCalls.count)
-        #expect(incremental.diagnostics.totalGitCalls == 3)
-        #expect(incremental.diagnostics.stageDiagnostics.first(where: { $0.stage == .discovery })?.gitCommandCount == 1)
-        #expect(incrementalCalls.contains { $0 == ["worktree", "list", "--porcelain", "-z"] })
+        #expect(incremental.diagnostics.totalGitCalls == 2)
+        #expect(incremental.diagnostics.stageDiagnostics.first(where: { $0.stage == .discovery })?.gitCommandCount == 0)
+        #expect(!incrementalCalls.contains { $0 == ["worktree", "list", "--porcelain", "-z"] })
         #expect(incremental.diagnostics.stageDiagnostics.first(where: { $0.stage == .coreStatus })?.gitCommandCount == 2)
         #expect(incremental.diagnostics.stageDiagnostics.first(where: { $0.stage == .extendedInfo })?.gitCommandCount == 0)
+
+        let addedLinked = root.appendingPathComponent("linked-second")
+        try git(["worktree", "add", "-q", "-b", "second-linked-branch", addedLinked.path], in: main)
+
+        let changedTopologyLedger = GitCallLedger()
+        let changedTopologyRunner: RefreshEngine.GitCommandRunner = { arguments, directory, timeout, limit, cancelled in
+            changedTopologyLedger.record(arguments)
+            return GitRepositoryScanner.defaultGitCommandRunner(
+                arguments, directory, timeout, limit, cancelled
+            )
+        }
+        let changedTopology = await engine.execute(
+            config: ScanConfig(
+                enabledBuiltInPaths: [], customPaths: [], maxDepth: 2,
+                changedPreviewLimit: 5, maxConcurrentGitOps: 2,
+                gitCommandTimeout: 5, scanTimeout: 60,
+                slowReposkipSeconds: 60, activeRepoThreshold: 30
+            ),
+            scanRoots: [root.path],
+            knownRepositoryPaths: incremental.discoveredRepositoryPaths,
+            forceRepositoryDiscovery: false,
+            previousSnapshot: incremental.data,
+            gitCommandRunner: changedTopologyRunner
+        )
+        let changedTopologyCalls = changedTopologyLedger.calls
+        #expect(changedTopology.data.repositories.count == 3)
+        #expect(changedTopology.data.repositories.contains {
+            $0.path == RepositoryIdentity.canonicalPath(addedLinked.path)
+                && $0.workspaceKind == .linkedWorktree
+        })
+        #expect(changedTopology.diagnostics.totalGitCalls == changedTopologyCalls.count)
+        #expect(changedTopology.diagnostics.stageDiagnostics.first(where: { $0.stage == .discovery })?.gitCommandCount == 1)
+        #expect(changedTopologyCalls.contains { $0 == ["worktree", "list", "--porcelain", "-z"] })
     }
 }

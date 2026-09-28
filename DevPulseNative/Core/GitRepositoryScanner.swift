@@ -168,6 +168,50 @@ private actor RepositoryDiscoveryCache {
     }
 }
 
+private struct WorktreeRegistrationFingerprint: Equatable, Sendable {
+    let name: String
+    let gitDirectoryPointer: String
+}
+
+private struct WorktreeTopologyFingerprint: Equatable, Sendable {
+    let gitDirectoryPointer: String?
+    let commonDirectoryPointer: String?
+    let commonConfigMetadata: String
+    let hasWorktreesDirectory: Bool
+    let registrations: [WorktreeRegistrationFingerprint]
+}
+
+private struct WorktreeTopologyCacheLocation: Sendable {
+    let key: String
+    let fingerprint: WorktreeTopologyFingerprint
+}
+
+private actor GitWorktreeTopologyCache {
+    private struct Entry {
+        let fingerprint: WorktreeTopologyFingerprint
+        let output: String
+    }
+
+    private var entries: [String: Entry] = [:]
+
+    func cachedOutput(for key: String, fingerprint: WorktreeTopologyFingerprint) -> String? {
+        guard let entry = entries[key] else { return nil }
+        guard entry.fingerprint == fingerprint else {
+            entries.removeValue(forKey: key)
+            return nil
+        }
+        return entry.output
+    }
+
+    func store(output: String, for key: String, fingerprint: WorktreeTopologyFingerprint) {
+        entries[key] = Entry(fingerprint: fingerprint, output: output)
+    }
+
+    func removeValue(for key: String) {
+        entries.removeValue(forKey: key)
+    }
+}
+
 private enum RepositoryPathAvailability: Equatable {
     case repository
     case missing
@@ -364,6 +408,7 @@ enum GitRepositoryScanner {
     ) -> ProcessRunResult
 
     private static let discoveryCache = RepositoryDiscoveryCache()
+    private static let worktreeTopologyCache = GitWorktreeTopologyCache()
     private static let discoveryCacheTTL: TimeInterval = 10 * 60
     private static let discoveryRulesVersion = 3
     private static let maximumWorktreeDiscoveryBudget: TimeInterval = 5
@@ -1007,17 +1052,57 @@ enum GitRepositoryScanner {
                 break
             }
 
-            let result = runGitCommand(
-                arguments: ["worktree", "list", "--porcelain", "-z"],
-                workingDirectory: seed,
-                timeout: remaining,
-                kind: .other,
-                metrics: metrics,
-                gitCommandRunner: gitCommandRunner,
-                isCancelled: { Task.isCancelled }
+            let fingerprintBudget = min(0.05, max(0, topologyDeadline.timeIntervalSinceNow))
+            let cacheLocation = await runWithTimeout(
+                timeout: fingerprintBudget,
+                operation: { worktreeTopologyCacheLocation(for: seed) },
+                timeoutValue: nil
             )
-            guard case .success(let output) = result,
-                  let topology = parsedWorktreeTopology(output, containing: seed) else {
+            var topology: (kindsByPath: [String: RepositoryWorkspaceKind], mainPath: String?)?
+            if let cacheLocation,
+               let cachedOutput = await worktreeTopologyCache.cachedOutput(
+                    for: cacheLocation.key,
+                    fingerprint: cacheLocation.fingerprint
+               ) {
+                topology = parsedWorktreeTopology(cachedOutput, containing: seed)
+                if topology == nil {
+                    await worktreeTopologyCache.removeValue(for: cacheLocation.key)
+                }
+            }
+
+            if topology == nil {
+                let commandRemaining = min(
+                    config.gitCommandTimeout,
+                    max(0, topologyDeadline.timeIntervalSinceNow)
+                )
+                guard commandRemaining > 0 else {
+                    topologyIncomplete = true
+                    break
+                }
+                let result = runGitCommand(
+                    arguments: ["worktree", "list", "--porcelain", "-z"],
+                    workingDirectory: seed,
+                    timeout: commandRemaining,
+                    kind: .other,
+                    metrics: metrics,
+                    gitCommandRunner: gitCommandRunner,
+                    isCancelled: { Task.isCancelled }
+                )
+                guard case .success(let output) = result,
+                      let parsed = parsedWorktreeTopology(output, containing: seed) else {
+                    topologyIncomplete = true
+                    continue
+                }
+                topology = parsed
+                if let cacheLocation {
+                    await worktreeTopologyCache.store(
+                        output: output,
+                        for: cacheLocation.key,
+                        fingerprint: cacheLocation.fingerprint
+                    )
+                }
+            }
+            guard let topology else {
                 topologyIncomplete = true
                 continue
             }
@@ -1075,6 +1160,130 @@ enum GitRepositoryScanner {
             }
         } catch {
             return true
+        }
+    }
+
+    /// Key topology output by its shared Git directory and the metadata that
+    /// determines the path list. Worktree add/remove/move operations change
+    /// either the registrations or a `gitdir` pointer; those changes invalidate
+    /// the cache before the next refresh can reuse it.
+    private static func worktreeTopologyCacheLocation(
+        for repositoryPath: String
+    ) -> WorktreeTopologyCacheLocation? {
+        let fileManager = FileManager.default
+        let gitPath = (repositoryPath as NSString).appendingPathComponent(".git")
+        let gitAttributes: [FileAttributeKey: Any]
+        do {
+            gitAttributes = try fileManager.attributesOfItem(atPath: gitPath)
+        } catch {
+            return nil
+        }
+
+        let gitDirectoryPath: String
+        let gitDirectoryPointer: String?
+        switch gitAttributes[.type] as? FileAttributeType {
+        case .typeDirectory:
+            gitDirectoryPath = RepositoryIdentity.canonicalPath(gitPath)
+            gitDirectoryPointer = nil
+        case .typeRegular:
+            guard let pointer = readGitMetadataFile(at: gitPath),
+                  pointer.hasPrefix("gitdir: ") else { return nil }
+            gitDirectoryPointer = pointer
+            gitDirectoryPath = resolveGitMetadataPath(
+                String(pointer.dropFirst("gitdir: ".count)),
+                relativeTo: repositoryPath
+            )
+        default:
+            return nil
+        }
+
+        let commonDirectoryFile = (gitDirectoryPath as NSString).appendingPathComponent("commondir")
+        guard let commonDirectory = optionalGitMetadataFile(at: commonDirectoryFile) else { return nil }
+        let commonGitDirectoryPath = commonDirectory.exists
+            ? resolveGitMetadataPath(commonDirectory.contents, relativeTo: gitDirectoryPath)
+            : gitDirectoryPath
+        let commonGitDirectory = RepositoryIdentity.canonicalPath(commonGitDirectoryPath)
+        guard let commonConfigMetadata = metadataFileSignature(
+            at: (commonGitDirectory as NSString).appendingPathComponent("config")
+        ) else { return nil }
+
+        let registrationsPath = (commonGitDirectory as NSString).appendingPathComponent("worktrees")
+        let registrationState: (directoryExists: Bool, names: [String])
+        do {
+            let attributes = try fileManager.attributesOfItem(atPath: registrationsPath)
+            guard attributes[.type] as? FileAttributeType == .typeDirectory else { return nil }
+            registrationState = (
+                true,
+                try fileManager.contentsOfDirectory(atPath: registrationsPath).sorted()
+            )
+        } catch {
+            guard isMissingFileError(error) else { return nil }
+            registrationState = (false, [])
+        }
+
+        var registrations: [WorktreeRegistrationFingerprint] = []
+        registrations.reserveCapacity(registrationState.names.count)
+        for name in registrationState.names {
+            let worktreeGitDirectory = (registrationsPath as NSString).appendingPathComponent(name)
+            do {
+                let attributes = try fileManager.attributesOfItem(atPath: worktreeGitDirectory)
+                guard attributes[.type] as? FileAttributeType == .typeDirectory,
+                      let pointer = readGitMetadataFile(
+                        at: (worktreeGitDirectory as NSString).appendingPathComponent("gitdir")
+                      ) else { return nil }
+                registrations.append(WorktreeRegistrationFingerprint(
+                    name: name,
+                    gitDirectoryPointer: pointer
+                ))
+            } catch {
+                return nil
+            }
+        }
+
+        return WorktreeTopologyCacheLocation(
+            key: commonGitDirectory,
+            fingerprint: WorktreeTopologyFingerprint(
+                gitDirectoryPointer: gitDirectoryPointer,
+                commonDirectoryPointer: commonDirectory.exists ? commonDirectory.contents : nil,
+                commonConfigMetadata: commonConfigMetadata,
+                hasWorktreesDirectory: registrationState.directoryExists,
+                registrations: registrations
+            )
+        )
+    }
+
+    private static func optionalGitMetadataFile(at path: String) -> (exists: Bool, contents: String)? {
+        do {
+            let contents = try String(contentsOfFile: path, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return (true, contents)
+        } catch {
+            return isMissingFileError(error) ? (false, "") : nil
+        }
+    }
+
+    private static func readGitMetadataFile(at path: String) -> String? {
+        guard let file = optionalGitMetadataFile(at: path), file.exists else { return nil }
+        return file.contents
+    }
+
+    private static func resolveGitMetadataPath(_ path: String, relativeTo directory: String) -> String {
+        let resolvedPath = (path as NSString).isAbsolutePath
+            ? path
+            : (directory as NSString).appendingPathComponent(path)
+        return RepositoryIdentity.canonicalPath(resolvedPath)
+    }
+
+    private static func metadataFileSignature(at path: String) -> String? {
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: path)
+            guard attributes[.type] as? FileAttributeType == .typeRegular,
+                  let modificationDate = attributes[.modificationDate] as? Date,
+                  let fileSize = attributes[.size] as? NSNumber,
+                  let fileNumber = attributes[.systemFileNumber] as? NSNumber else { return nil }
+            return "\(modificationDate.timeIntervalSince1970.bitPattern):\(fileSize.uint64Value):\(fileNumber.uint64Value)"
+        } catch {
+            return isMissingFileError(error) ? "missing" : nil
         }
     }
 
