@@ -4,6 +4,7 @@ struct PendingItemDetailView: View {
     let item: PendingItem
     @EnvironmentObject var scheduler: ScanScheduler
     @Environment(\.dismiss) var dismiss
+    @State private var showRelatedItem: PendingItem?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -13,6 +14,7 @@ struct PendingItemDetailView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     severitySection
                     overviewSection
+                    workspacePendingItemsSection
                     evidenceSection
                     statusSection
                     actionsSection
@@ -28,6 +30,9 @@ struct PendingItemDetailView: View {
         }
         .frame(width: 460, height: 500)
         .background(Color(nsColor: .windowBackgroundColor))
+        .sheet(item: $showRelatedItem) { relatedItem in
+            PendingItemDetailView(item: relatedItem).environmentObject(scheduler)
+        }
     }
 
     private var detailHeader: some View {
@@ -69,6 +74,67 @@ struct PendingItemDetailView: View {
                 Text("首次发现：" + relativeTime(item.firstDetectedAt)).font(.caption)
                 Text("最近确认：" + relativeTime(item.lastConfirmedAt)).font(.caption)
             }.foregroundStyle(.tertiary)
+        }
+    }
+
+    @ViewBuilder
+    private var workspacePendingItemsSection: some View {
+        if item.source == .workspaceDegraded {
+            let relatedItems = WorkspacePendingItemDrilldown.relatedItems(
+                for: item,
+                workspaces: scheduler.workspaces,
+                pendingItems: scheduler.pendingItems
+            )
+            card(title: "成员仓库待处理事项（\(relatedItems.count)）") {
+                if relatedItems.isEmpty {
+                    Text("成员仓库当前没有待处理或已恢复提醒的事项。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(spacing: 4) {
+                        ForEach(relatedItems) { relatedItem in
+                            Button {
+                                showRelatedItem = relatedItem
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: relatedItem.source.systemImage)
+                                        .foregroundStyle(severityColor(for: relatedItem.severity))
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(relatedItem.title)
+                                            .font(.callout.weight(.medium))
+                                            .lineLimit(1)
+                                        Text("\(relatedItem.repositoryName ?? "未知仓库") · \(relatedItem.severity.displayName) · \(relatedItem.status.displayName)")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer(minLength: 4)
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel(WorkspacePendingItemDrilldown.accessibilityLabel(for: relatedItem))
+                            .accessibilityHint(WorkspacePendingItemDrilldown.accessibilityHint(for: relatedItem))
+                            .accessibilityIdentifier(WorkspacePendingItemDrilldown.accessibilityIdentifier(for: relatedItem))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func severityColor(for severity: PendingItemSeverity) -> Color {
+        switch severity {
+        case .tip: return .secondary
+        case .low: return .blue
+        case .medium: return .orange
+        case .high: return .red
+        case .critical: return Color(red: 0.5, green: 0.0, blue: 0.0)
         }
     }
 

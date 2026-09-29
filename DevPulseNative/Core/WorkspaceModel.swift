@@ -91,6 +91,68 @@ struct Workspace: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+// MARK: - Workspace pending-item drilldown
+
+enum WorkspacePendingItemDrilldown {
+    /// Shows only currently actionable repository items belonging to the workspace.
+    /// Membership comes from the workspace archive so stale repositories can still
+    /// be surfaced even when they are absent from the latest repository snapshot.
+    static func relatedItems(
+        for workspaceItem: PendingItem,
+        workspaces: [Workspace],
+        pendingItems: [PendingItem]
+    ) -> [PendingItem] {
+        guard workspaceItem.source == .workspaceDegraded,
+              let workspaceID = workspaceItem.workspaceID,
+              let workspace = workspaces.first(where: {
+                  $0.id == workspaceID && $0.autoSuggestConfirmed
+              }) else {
+            return []
+        }
+
+        let memberIDs = Set(workspace.repositoryIDs)
+        guard !memberIDs.isEmpty else { return [] }
+
+        return pendingItems
+            .filter { item in
+                guard !isWorkspaceLevel(item.source),
+                      let repositoryID = item.repositoryID,
+                      memberIDs.contains(repositoryID) else {
+                    return false
+                }
+                return item.status == .active || item.status == .restored
+            }
+            .sorted {
+                if $0.severity != $1.severity { return $0.severity > $1.severity }
+                if $0.lastConfirmedAt != $1.lastConfirmedAt {
+                    return $0.lastConfirmedAt > $1.lastConfirmedAt
+                }
+                return $0.id < $1.id
+            }
+    }
+
+    static func accessibilityLabel(for item: PendingItem) -> String {
+        "\(item.repositoryName ?? "未知仓库")，\(item.title)，严重程度 \(item.severity.displayName)，状态 \(item.status.displayName)"
+    }
+
+    static func accessibilityHint(for item: PendingItem) -> String {
+        "打开\(item.repositoryName ?? "未知仓库")的事项详情和处理选项"
+    }
+
+    static func accessibilityIdentifier(for item: PendingItem) -> String {
+        "pending-center.related-item.\(item.id)"
+    }
+
+    private static func isWorkspaceLevel(_ source: PendingItemSource) -> Bool {
+        switch source {
+        case .workspaceDegraded, .workspaceConflicts, .workspaceAggregation:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
 // MARK: - Workspace archive
 
 struct WorkspaceArchive: Codable, Equatable {
