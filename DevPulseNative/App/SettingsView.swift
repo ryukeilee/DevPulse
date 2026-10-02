@@ -6,6 +6,7 @@ struct SettingsView: View {
     @EnvironmentObject var launchAtLoginController: LaunchAtLoginController
     @Binding var scrollTarget: SettingsScrollTarget?
     @State private var newCustomPath: String = ""
+    @State private var customPathError: String?
     @State private var expandedDefaultScanPaths: Set<String> = []
     @State private var pendingIgnoreRepository: RepositorySnapshot?
 
@@ -123,34 +124,41 @@ struct SettingsView: View {
                 .settingsInnerSurface()
             }
 
-            HStack(spacing: 8) {
-                TextField("输入仓库根目录路径", text: $newCustomPath)
-                    .font(.caption)
-                    .textFieldStyle(.plain)
-                    .padding(.horizontal, 10)
-                    .frame(height: 30)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(DevPulseVisualStyle.strongerSurface)
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(DevPulseVisualStyle.separator, lineWidth: 0.5)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    TextField("输入仓库根目录路径", text: $newCustomPath)
+                        .font(.caption)
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, 10)
+                        .frame(height: 30)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(DevPulseVisualStyle.strongerSurface)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(DevPulseVisualStyle.separator, lineWidth: 0.5)
+                        }
+                    Button("添加") {
+                        addCustomDirectory(newCustomPath.trimmingCharacters(in: .whitespaces))
                     }
-                Button("添加") {
-                    let trimmed = newCustomPath.trimmingCharacters(in: .whitespaces)
-                    guard !trimmed.isEmpty else { return }
-                    scheduler.addCustomPath(trimmed)
-                    newCustomPath = ""
-                }
-                .buttonStyle(SettingsCompactButtonStyle())
-                .disabled(newCustomPath.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .buttonStyle(SettingsCompactButtonStyle())
+                    .disabled(newCustomPath.trimmingCharacters(in: .whitespaces).isEmpty)
 
-                Button("选择…") {
-                    chooseDirectory()
+                    Button("选择…") {
+                        chooseDirectory()
+                    }
+                    .buttonStyle(SettingsCompactButtonStyle())
                 }
-                .buttonStyle(SettingsCompactButtonStyle())
+
+                if let customPathError {
+                    Label(customPathError, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
+            .onChange(of: newCustomPath) { _, _ in customPathError = nil }
         }
         .settingsSectionSurface()
     }
@@ -1582,8 +1590,7 @@ struct SettingsView: View {
         panel.prompt = "选择"
 
         if panel.runModal() == .OK, let url = panel.url {
-            scheduler.addCustomPath(url.path)
-            newCustomPath = ""
+            addCustomDirectory(url.path)
         }
     }
 
@@ -1596,8 +1603,7 @@ struct SettingsView: View {
         panel.prompt = "选择"
 
         if panel.runModal() == .OK, let url = panel.url {
-            addScanDirectoryAndRefresh(url.path)
-            newCustomPath = ""
+            addCustomDirectory(url.path)
         }
     }
 
@@ -1611,9 +1617,14 @@ struct SettingsView: View {
         scheduler.toggleBuiltIn(path: normalized, enabled: enabled)
     }
 
-    private func addScanDirectoryAndRefresh(_ path: String) {
-        let normalized = ScanLocationProvider.normalizePersistedPath(path)
-        scheduler.addCustomPath(normalized)
+    private func addCustomDirectory(_ path: String) {
+        if scheduler.addCustomPath(path) {
+            newCustomPath = ""
+            customPathError = nil
+        } else {
+            customPathError = scheduler.scanRootAccessWarning
+                ?? "无法添加该扫描目录，请选择可访问的文件夹。"
+        }
     }
 
     private func createBuiltInDirectoryAndEnable(_ path: String) {
@@ -1624,7 +1635,7 @@ struct SettingsView: View {
                 at: URL(fileURLWithPath: normalized),
                 withIntermediateDirectories: true
             )
-            addScanDirectoryAndRefresh(normalized)
+            addCustomDirectory(normalized)
         } catch {
             scheduler.scanRootAccessWarning = "无法创建目录：\(compactHomeRelativePath(normalized))。"
         }

@@ -327,7 +327,8 @@ struct RepositoryListView: View {
             refreshPhase: scheduler.refreshPhase,
             scanRoots: scheduler.diagnostics.scanRoots,
             accessWarning: scheduler.scanRootAccessWarning,
-            refreshFailureMessage: scheduler.refreshFailureMessage
+            refreshFailureMessage: scheduler.refreshFailureMessage,
+            persistenceState: scheduler.lastResult.persistenceState
         )
 
         return VStack(spacing: 12) {

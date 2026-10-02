@@ -229,10 +229,35 @@ struct DataFreshnessStateTests {
             repositories: repos,
             isRefreshing: false
         )
-        guard case .degraded = state else {
+        guard case .degraded(let reason) = state else {
             Issue.record("Expected .degraded, got \(state)")
             return
         }
+        #expect(reason == "恢复数据待重新扫描确认")
+    }
+
+    @Test("recovered snapshot trust copy asks for a confirming rescan without assuming backup source")
+    func recoveredSnapshotTrustCopy() {
+        let now = Date(timeIntervalSince1970: 1_782_000_000)
+        let timestamp = ISO8601DateFormatter().string(from: now)
+        let snapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: timestamp,
+            writtenAt: timestamp,
+            scanSummary: ScanSummary(
+                totalRepositories: 0,
+                changedRepositories: 0,
+                totalChangedFiles: 0,
+                errorRepositories: 0
+            ),
+            repositories: [],
+            persistenceState: .recovered
+        )
+
+        let assessment = RefreshStatusFormatter.snapshotAssessment(snapshot: snapshot, now: now)
+
+        #expect(assessment.detail == "恢复快照待重新扫描确认")
+        #expect(!assessment.basis.contains("备份"))
     }
 
     // ── Failure ──
@@ -898,6 +923,89 @@ struct DataFreshnessStateTests {
 
         #expect(state.title == "未发现 Git 仓库")
         #expect(state.systemImage == "tray")
+    }
+
+    @Test("empty recovered snapshot waits for a confirming scan")
+    func emptyStateBuilderRecoveredAwaitsRescan() {
+        let state = RepositoryEmptyStateBuilder.build(
+            lastScanAt: Date(timeIntervalSince1970: 1_718_000_000),
+            refreshPhase: .idle,
+            scanRoots: ["/tmp"],
+            accessWarning: nil,
+            refreshFailureMessage: nil,
+            persistenceState: .recovered
+        )
+
+        #expect(state.title == "仓库状态待重新确认")
+        #expect(state.detail.contains("重新扫描确认仓库范围"))
+        #expect(!state.detail.contains("没有已确认的仓库扫描结果"))
+        #expect(state.detail.contains("Rescan Now"))
+        #expect(state.title != "未发现 Git 仓库")
+    }
+
+    @Test("recovered empty state preserves missing-root, failure, and partial-scan priority")
+    func emptyStateBuilderRecoveredPreservesHigherPriorityStates() {
+        let noRoots = RepositoryEmptyStateBuilder.build(
+            lastScanAt: Date(),
+            refreshPhase: .idle,
+            scanRoots: [],
+            accessWarning: nil,
+            refreshFailureMessage: nil,
+            persistenceState: .recovered
+        )
+        let failed = RepositoryEmptyStateBuilder.build(
+            lastScanAt: Date(),
+            refreshPhase: .failure,
+            scanRoots: ["/tmp"],
+            accessWarning: nil,
+            refreshFailureMessage: "测试失败",
+            persistenceState: .recovered
+        )
+        let partial = RepositoryEmptyStateBuilder.build(
+            lastScanAt: Date(),
+            refreshPhase: .degraded,
+            scanRoots: ["/tmp"],
+            accessWarning: nil,
+            refreshFailureMessage: nil,
+            persistenceState: .recovered
+        )
+
+        #expect(noRoots.title == "没有可用的扫描目录")
+        #expect(failed.title == "扫描未完成")
+        #expect(partial.title == "扫描部分完成")
+    }
+
+    @Test("startup restore copy distinguishes rebuild, migration, backup, and persisted recovery")
+    func startupRestoreDetailUsesReadSourceAndPersistenceState() {
+        let rebuilt = StartupRestoreDetailBuilder.build(
+            source: .migratedPrimary,
+            persistenceState: .recovered,
+            repositoryCount: 0
+        )
+        let migrated = StartupRestoreDetailBuilder.build(
+            source: .migratedPrimary,
+            persistenceState: .migrated,
+            repositoryCount: 2
+        )
+        let backup = StartupRestoreDetailBuilder.build(
+            source: .backup,
+            persistenceState: .recovered,
+            repositoryCount: 2
+        )
+        let persistedRecovery = StartupRestoreDetailBuilder.build(
+            source: .primary,
+            persistenceState: .recovered,
+            repositoryCount: 0
+        )
+
+        #expect(rebuilt.contains("原共享快照不可用"))
+        #expect(rebuilt.contains("重建空白恢复快照"))
+        #expect(rebuilt.contains("等待重新扫描确认"))
+        #expect(!rebuilt.contains("迁移旧版"))
+        #expect(migrated.contains("迁移旧版共享快照"))
+        #expect(backup.contains("最后验证备份"))
+        #expect(backup.contains("等待重新扫描确认"))
+        #expect(persistedRecovery == "启动时已读取恢复快照，仓库状态待重新扫描确认。")
     }
 }
 

@@ -696,6 +696,29 @@ private actor ActivityEventSaveQueue {
     }
 }
 
+enum StartupRestoreDetailBuilder {
+    static func build(
+        source: SharedSnapshotReadSource,
+        persistenceState: SharedSnapshotPersistenceState,
+        repositoryCount: Int
+    ) -> String {
+        switch (source, persistenceState) {
+        case (.primary, .committed):
+            return "启动时已恢复 \(repositoryCount) 个仓库的共享快照。"
+        case (.migratedPrimary, .migrated):
+            return "启动时已迁移旧版共享快照，并保守恢复 \(repositoryCount) 个仓库。"
+        case (.migratedPrimary, .recovered):
+            return "原共享快照不可用，启动时已重建空白恢复快照，等待重新扫描确认。"
+        case (.backup, .recovered):
+            return "主快照不可用，启动时已从最后验证备份恢复 \(repositoryCount) 个仓库；等待重新扫描确认。"
+        case (.primary, .recovered):
+            return "启动时已读取恢复快照，仓库状态待重新扫描确认。"
+        default:
+            return "启动时已读取共享快照，仓库状态待重新扫描确认。"
+        }
+    }
+}
+
 /// Manages background scan scheduling with low-power safeguards.
 ///
 /// Key behaviors:
@@ -3115,8 +3138,9 @@ final class ScanScheduler: ObservableObject {
             diagnostics.lastSnapshotStoreTrigger = "startup"
             diagnostics.lastSnapshotStoreState = startupWriteError == nil ? .restored : .failed
             diagnostics.lastSnapshotStoreDetail = startupWriteError
-                ?? startupRestoreDetail(
+                ?? StartupRestoreDetailBuilder.build(
                     source: storedRead.source,
+                    persistenceState: storedRead.snapshot.persistenceState,
                     repositoryCount: restoredSnapshot.repositories.count
                 )
             diagnostics.sharedDataSnapshot = sharedSnapshot
@@ -3179,20 +3203,6 @@ final class ScanScheduler: ObservableObject {
             refreshFailureMessage = "读取共享快照失败"
             sharedSnapshotSyncFailureMessage = nil
             recordEvent(.sharedDataReadFailed, "Shared snapshot read failed at startup: \(error.localizedDescription)")
-        }
-    }
-
-    private func startupRestoreDetail(
-        source: SharedSnapshotReadSource,
-        repositoryCount: Int
-    ) -> String {
-        switch source {
-        case .primary:
-            return "启动时已恢复 \(repositoryCount) 个仓库的共享快照。"
-        case .migratedPrimary:
-            return "启动时已迁移旧版共享快照，并保守恢复 \(repositoryCount) 个仓库。"
-        case .backup:
-            return "主快照不可用，启动时已从最后验证备份恢复 \(repositoryCount) 个仓库。"
         }
     }
 
@@ -4212,20 +4222,25 @@ final class ScanScheduler: ObservableObject {
         requestLocationRefresh()
     }
 
-    func addCustomPath(_ path: String) {
+    @discardableResult
+    func addCustomPath(_ path: String) -> Bool {
+        guard !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            scanRootAccessWarning = "请输入有效的扫描目录路径。"
+            return false
+        }
+
         let expanded = ScanLocationProvider.canonicalExistingFilePath(path)
-        guard !expanded.isEmpty else { return }
         guard !ScanLocationProvider.isBuiltInPath(expanded) else {
             toggleBuiltIn(path: expanded, enabled: true)
-            return
+            return true
         }
         guard !isAppContainerPath(expanded) else {
             scanRootAccessWarning = "不能把 DevPulse 自己的沙盒容器当作扫描目录，请选择真实的用户目录。"
-            return
+            return false
         }
         guard isAccessibleScanRoot(expanded) else {
-            scanRootAccessWarning = "部分目录权限失效，请在 Settings 重新授权。"
-            return
+            scanRootAccessWarning = "所选路径不存在、不是文件夹或当前无法访问，请选择可访问的目录。"
+            return false
         }
         if let existingIndex = scanLocationConfiguration.customDirectories.firstIndex(where: { $0.path == expanded }) {
             if scanLocationConfiguration.customDirectories[existingIndex].bookmarkData == nil,
@@ -4239,7 +4254,7 @@ final class ScanScheduler: ObservableObject {
                 requestLocationRefresh()
             }
             scanRootAccessWarning = nil
-            return
+            return true
         }
 
         let bookmarkData = bookmarkData(for: URL(fileURLWithPath: expanded))
@@ -4252,6 +4267,7 @@ final class ScanScheduler: ObservableObject {
         scanRootAccessWarning = nil
         persistScanLocations()
         requestLocationRefresh()
+        return true
     }
 
     func removeCustomPath(_ path: String) {

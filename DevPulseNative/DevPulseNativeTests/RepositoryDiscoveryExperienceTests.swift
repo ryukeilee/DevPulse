@@ -51,6 +51,57 @@ struct RepositoryDiscoveryExperienceTests {
         #expect(rebuilt.scanLocationConfiguration.enabledBuiltInPaths.isEmpty)
         #expect(rebuilt.scanDirectories.isEmpty)
     }
+
+    @MainActor
+    @Test func addingCustomScanPathReportsAcceptanceAndRefreshesConfiguredRoots() async throws {
+        let defaults = try #require(AppGroupStore.defaults)
+        let locationsKey = "scan_locations_v1_json"
+        let previousLocations = defaults.data(forKey: locationsKey)
+        let previousSnapshot = isolateSharedSnapshot()
+        defer {
+            restore(previousLocations, forKey: locationsKey, in: defaults)
+            restoreSharedSnapshot(previousSnapshot)
+        }
+
+        let emptyConfiguration = ScanLocationConfiguration(
+            enabledBuiltInPaths: [],
+            customDirectories: []
+        )
+        defaults.set(try JSONEncoder().encode(emptyConfiguration), forKey: locationsKey)
+
+        let fixture = try temporaryDirectory(named: "custom-path-result")
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let missingDirectory = fixture.appendingPathComponent("missing")
+        let regularFile = fixture.appendingPathComponent("not-a-directory")
+        try Data("fixture".utf8).write(to: regularFile)
+        let acceptedDirectory = fixture.appendingPathComponent("accepted")
+        try FileManager.default.createDirectory(at: acceptedDirectory, withIntermediateDirectories: true)
+
+        let recorder = ScanRequestRecorder()
+        let scheduler = ScanScheduler(commandMode: true, scanExecution: { request in
+            await recorder.record(request)
+            return (.empty(), [], [])
+        })
+        defer { scheduler.stopBackgroundScanning() }
+
+        #expect(!scheduler.addCustomPath(missingDirectory.path))
+        #expect(!scheduler.addCustomPath(regularFile.path))
+        #expect(scheduler.scanLocationConfiguration == emptyConfiguration)
+        #expect(scheduler.scanRootAccessWarning?.contains("不是文件夹") == true)
+
+        let acceptedPath = ScanLocationProvider.canonicalExistingFilePath(acceptedDirectory.path)
+        #expect(scheduler.addCustomPath(acceptedDirectory.path))
+        #expect(scheduler.addCustomPath(acceptedDirectory.path))
+        #expect(scheduler.scanDirectories.map(\.path) == [acceptedPath])
+
+        let requests = await recorder.waitForCount(1)
+        #expect(requests.contains { $0.roots.contains(acceptedPath) })
+        let storedData = try #require(defaults.data(forKey: locationsKey))
+        let storedConfiguration = try JSONDecoder().decode(ScanLocationConfiguration.self, from: storedData)
+        #expect(storedConfiguration.customDirectories.map(\.path) == [acceptedPath])
+        try await waitForSchedulerToFinish(scheduler)
+    }
+
     @MainActor
     @Test func matchingRebuiltSchedulerDoesNotRepeatStartupDiscovery() async throws {
         let defaults = try #require(AppGroupStore.defaults)

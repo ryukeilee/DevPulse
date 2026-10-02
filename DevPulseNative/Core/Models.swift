@@ -1601,7 +1601,8 @@ enum RepositoryEmptyStateBuilder {
                       refreshPhase: RefreshPhase,
                       scanRoots: [String],
                       accessWarning: String?,
-                      refreshFailureMessage: String?) -> RepositoryEmptyState {
+                      refreshFailureMessage: String?,
+                      persistenceState: SharedSnapshotPersistenceState = .committed) -> RepositoryEmptyState {
         if scanRoots.isEmpty {
             return RepositoryEmptyState(
                 title: "没有可用的扫描目录",
@@ -1623,6 +1624,14 @@ enum RepositoryEmptyStateBuilder {
                 title: "扫描部分完成",
                 detail: accessWarning ?? "部分仓库未能确认，当前没有可展示的仓库；可完成一次完整成功刷新后再查看。",
                 systemImage: "exclamationmark.triangle"
+            )
+        }
+
+        if persistenceState == .recovered {
+            return RepositoryEmptyState(
+                title: "仓库状态待重新确认",
+                detail: "当前恢复快照为空，需要重新扫描确认仓库范围；执行 Rescan Now 重新扫描当前目录。",
+                systemImage: "magnifyingglass"
             )
         }
 
@@ -2447,11 +2456,14 @@ enum RefreshStatusFormatter {
                     basis: "共享快照已完成兼容迁移，但迁移本身不证明仓库数据仍是当前状态。"
                 )
             case .recovered:
+                let recoveredDetail = successfulRefreshDate.map {
+                    "恢复快照待重新扫描确认 · 上次完整成功：\(updateLabel(for: $0, now: now))"
+                } ?? "恢复快照待重新扫描确认"
                 return SnapshotTrustAssessment(
                     state: .failed,
                     title: "显示恢复数据",
-                    detail: detail,
-                    basis: "主快照不可用，当前使用最后一份通过校验的备份；恢复操作不等同于一次成功刷新。"
+                    detail: recoveredDetail,
+                    basis: "共享快照处于恢复状态；恢复数据本身不证明当前仓库状态。"
                 )
             }
         }
@@ -4100,7 +4112,7 @@ enum DataFreshnessBuilder {
             case .migrated:
                 detail = "快照从旧版迁移，待重新确认"
             case .recovered:
-                detail = "使用备份恢复的数据，待重新确认"
+                detail = "恢复数据待重新扫描确认"
             case .committed:
                 detail = ""
             }
