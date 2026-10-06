@@ -447,9 +447,13 @@ struct SharedSnapshotStoreTests {
         let fullSyncCount = operations.filter {
             $0 == .fullFileSync || $0 == .fullDirectorySync
         }.count
-        print("SharedSnapshotStore non-identical recovery operations: writes=\(writeCount), F_FULLFSYNC=\(fullSyncCount)")
+        let jsonDecodeCount = operations.filter { $0 == .jsonDecode }.count
+        let jsonEncodeCount = operations.filter { $0 == .jsonEncode }.count
+        print("SharedSnapshotStore non-identical recovery operations: writes=\(writeCount), F_FULLFSYNC=\(fullSyncCount), json_decodes=\(jsonDecodeCount), json_encodes=\(jsonEncodeCount)")
         #expect(writeCount == 3)
         #expect(fullSyncCount == 6)
+        #expect(jsonDecodeCount == 9)
+        #expect(jsonEncodeCount == 1)
         #expect(try Data(contentsOf: snapshotStore.primaryURL)
             == Data(contentsOf: snapshotStore.backupURL))
     }
@@ -481,11 +485,47 @@ struct SharedSnapshotStoreTests {
         let fullSyncCount = operations.filter {
             $0 == .fullFileSync || $0 == .fullDirectorySync
         }.count
-        print("SharedSnapshotStore steady-state operations: writes=\(writeCount), F_FULLFSYNC=\(fullSyncCount)")
+        let jsonDecodeCount = operations.filter { $0 == .jsonDecode }.count
+        let jsonEncodeCount = operations.filter { $0 == .jsonEncode }.count
+        print("SharedSnapshotStore steady-state operations: writes=\(writeCount), F_FULLFSYNC=\(fullSyncCount), json_decodes=\(jsonDecodeCount), json_encodes=\(jsonEncodeCount)")
         #expect(writeCount == 2)
         #expect(fullSyncCount == 4)
+        #expect(jsonDecodeCount == 6)
+        #expect(jsonEncodeCount == 1)
         #expect(try Data(contentsOf: snapshotStore.primaryURL)
             == Data(contentsOf: snapshotStore.backupURL))
+    }
+
+    @Test func byteIdenticalPrimaryAndBackupShareOneDecodeOnLoad() throws {
+        let directory = try temporaryDirectory()
+        defer { removeTemporaryDirectory(directory) }
+
+        let recorder = SnapshotOperationRecorder()
+        let snapshotStore = SharedSnapshotStore(
+            directoryURL: directory,
+            fileName: "repositories.json",
+            now: { Self.date("2026-07-18T10:00:00Z") },
+            operationObserver: { recorder.record($0) }
+        )
+        try requireSuccess(
+            snapshotStore.commit(fixture(label: "load-shared", timestamp: "2026-07-18T09:00:00Z"))
+        )
+        #expect(try Data(contentsOf: snapshotStore.primaryURL)
+            == Data(contentsOf: snapshotStore.backupURL))
+
+        recorder.reset()
+        let loaded = try requireSuccess(snapshotStore.load())
+
+        let operations = recorder.operations()
+        let jsonDecodeCount = operations.filter { $0 == .jsonDecode }.count
+        let jsonEncodeCount = operations.filter { $0 == .jsonEncode }.count
+        let writeCount = operations.filter { $0 == .fileWrite }.count
+        print("SharedSnapshotStore identical-copy load operations: json_decodes=\(jsonDecodeCount), json_encodes=\(jsonEncodeCount), writes=\(writeCount)")
+        #expect(loaded.source == .primary)
+        #expect(loaded.snapshot.repositories.first?.id == "load-shared")
+        #expect(jsonDecodeCount == 3)
+        #expect(jsonEncodeCount == 0)
+        #expect(writeCount == 0)
     }
 
     @Test func freshlyCommittedSnapshotLoadsWithPrimarySource() throws {

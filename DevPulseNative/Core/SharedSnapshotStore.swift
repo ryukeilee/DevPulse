@@ -113,8 +113,7 @@ final class SharedSnapshotStore: @unchecked Sendable {
     // MARK: - Read and migration
 
     private func loadUnlocked() throws -> SharedSnapshotRead {
-        let primaryResult = decodeFile(at: primaryURL)
-        let backupResult = decodeFile(at: backupURL)
+        let (primaryResult, backupResult) = decodePrimaryAndBackup()
 
         if case .failure(.futureSchema(let actual, _)) = primaryResult {
             // A future primary is authoritative. An older process must never
@@ -235,27 +234,67 @@ final class SharedSnapshotStore: @unchecked Sendable {
         return SharedSnapshotRead(snapshot: recovered, source: .migratedPrimary)
     }
 
-    private func decodeFile(at url: URL) -> Result<DecodedFile, SnapshotFileFailure> {
+    private func decodePrimaryAndBackup() -> (
+        primary: Result<DecodedFile, SnapshotFileFailure>,
+        backup: Result<DecodedFile, SnapshotFileFailure>
+    ) {
+        let primaryBytes = readFileBytes(at: primaryURL)
+        let backupBytes = readFileBytes(at: backupURL)
+        if case .success(let primaryData) = primaryBytes,
+           case .success(let backupData) = backupBytes,
+           primaryData == backupData {
+            // A successful commit leaves these recovery artifacts byte-identical.
+            // Reuse one fully validated decode only when the bytes read from both
+            // paths compare equal; divergent or unreadable files remain independent.
+            let sharedResult = decodeSnapshotBytes(primaryData)
+            return (primary: sharedResult, backup: sharedResult)
+        }
+
+        return (
+            primary: decodeFile(contents: primaryBytes),
+            backup: decodeFile(contents: backupBytes)
+        )
+    }
+
+    private func readFileBytes(at url: URL) -> Result<Data, SnapshotFileFailure> {
         guard fileManager.fileExists(atPath: url.path) else {
             return .failure(.missing)
         }
-
-        let bytes: Data
         do {
-            bytes = try Data(contentsOf: url, options: [.mappedIfSafe])
+            return .success(try Data(contentsOf: url, options: [.mappedIfSafe]))
         } catch {
             return .failure(.read(error.localizedDescription))
         }
+    }
+
+    private func decodeFile(at url: URL) -> Result<DecodedFile, SnapshotFileFailure> {
+        decodeFile(contents: readFileBytes(at: url))
+    }
+
+    private func decodeFile(
+        contents: Result<Data, SnapshotFileFailure>
+    ) -> Result<DecodedFile, SnapshotFileFailure> {
+        let bytes: Data
+        switch contents {
+        case .success(let contents):
+            bytes = contents
+        case .failure(let failure):
+            return .failure(failure)
+        }
+        return decodeSnapshotBytes(bytes)
+    }
+
+    private func decodeSnapshotBytes(_ bytes: Data) -> Result<DecodedFile, SnapshotFileFailure> {
         guard !bytes.isEmpty else {
             return .failure(.invalid("file is empty"))
         }
-
         let decoder = JSONDecoder()
         let versionHeader: SnapshotVersionHeader
         do {
             // Decode the version in isolation. A future schema may introduce
             // enum values or field shapes this process cannot decode, but the
             // version guard must still recognize and protect that artifact.
+            operationObserver?(.jsonDecode)
             versionHeader = try decoder.decode(SnapshotVersionHeader.self, from: bytes)
         } catch {
             return .failure(.decode("schema header: \(error.localizedDescription)"))
@@ -280,6 +319,7 @@ final class SharedSnapshotStore: @unchecked Sendable {
         if versionHeader.schemaVersion == RepositorySnapshotSchema.version {
             let metadataHeader: CurrentSnapshotMetadataHeader
             do {
+                operationObserver?(.jsonDecode)
                 metadataHeader = try decoder.decode(
                     CurrentSnapshotMetadataHeader.self,
                     from: bytes
@@ -306,6 +346,7 @@ final class SharedSnapshotStore: @unchecked Sendable {
 
         let decoded: AppGroupData
         do {
+            operationObserver?(.jsonDecode)
             decoded = try decoder.decode(AppGroupData.self, from: bytes)
         } catch {
             return .failure(.decode(error.localizedDescription))
@@ -399,6 +440,7 @@ final class SharedSnapshotStore: @unchecked Sendable {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let encoded: Data
         do {
+            operationObserver?(.jsonEncode)
             encoded = try encoder.encode(prepared)
         } catch {
             throw AppGroupStoreError.writeFailed("encode failed: \(error.localizedDescription)")
@@ -473,8 +515,7 @@ final class SharedSnapshotStore: @unchecked Sendable {
     }
 
     private func commitBaselineUnlocked() throws -> CommitBaseline {
-        let primary = decodeFile(at: primaryURL)
-        let backup = decodeFile(at: backupURL)
+        let (primary, backup) = decodePrimaryAndBackup()
 
         if case .failure(.futureSchema(let actual, _)) = primary {
             throw AppGroupStoreError.schemaVersionMismatch(
@@ -1079,6 +1120,8 @@ enum SharedSnapshotStoreOperation: Equatable {
     case fileWrite
     case fullFileSync
     case fullDirectorySync
+    case jsonDecode
+    case jsonEncode
 }
 
 private struct SnapshotValidationError: LocalizedError {

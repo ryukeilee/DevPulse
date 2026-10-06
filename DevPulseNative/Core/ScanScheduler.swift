@@ -3418,10 +3418,14 @@ final class ScanScheduler: ObservableObject {
     }
 
     private func setWidgetReadableSnapshot(_ snapshot: AppGroupData, readAt: Date) {
-        diagnostics.widgetSnapshot = RepositoryScope.filtering(
-            snapshot,
-            excluding: ignoredRepositoryPaths
-        )
+        diagnostics.widgetSnapshot = RepositoryIdentity.withCanonicalizationScopeSync(
+            RepositoryIdentity.CanonicalizationScope()
+        ) {
+            RepositoryScope.filtering(
+                snapshot,
+                excluding: ignoredRepositoryPaths
+            )
+        }
         diagnostics.widgetSnapshotReadAt = readAt
         diagnostics.widgetSnapshotReadError = nil
     }

@@ -500,6 +500,42 @@ struct RepositoryPathCanonicalizationReuseTests {
         #expect(!next.repositories.contains { $0.path == paths[0] })
     }
 
+    @Test func widgetSnapshotFilteringReusesRepeatedCanonicalPaths() throws {
+        let timestamp = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-3600))
+        let repoCount = 20
+        let root = scratchRoot("widget-filtering")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        var paths: [String] = []
+        for index in 0..<repoCount {
+            let repository = root.appendingPathComponent("repo-\(index)")
+            try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+            paths.append(repository.path)
+        }
+        let snapshot = previousSnapshot(for: paths, timestamp: timestamp)
+
+        func filter(reuseEnabled: Bool) -> (RepositoryIdentity.CanonicalizationScope.Metrics, AppGroupData) {
+            let scope = RepositoryIdentity.CanonicalizationScope(reuseEnabled: reuseEnabled)
+            let filtered = RepositoryIdentity.withCanonicalizationScopeSync(scope) {
+                RepositoryScope.filtering(snapshot, excluding: [])
+            }
+            return (scope.metrics, filtered)
+        }
+
+        let withoutReuse = filter(reuseEnabled: false)
+        let withReuse = filter(reuseEnabled: true)
+        print("canonicalization_widget_snapshot_filter repos=\(repoCount) "
+              + "before{lookups=\(withoutReuse.0.lookups),computations=\(withoutReuse.0.computations),distinctInputs=\(withoutReuse.0.distinctInputs)} "
+              + "after{lookups=\(withReuse.0.lookups),computations=\(withReuse.0.computations),reuses=\(withReuse.0.reuses),distinctInputs=\(withReuse.0.distinctInputs)}")
+
+        #expect(withoutReuse.0.lookups == withReuse.0.lookups)
+        #expect(withoutReuse.0.computations == withoutReuse.0.lookups)
+        #expect(withReuse.0.computations == withReuse.0.distinctInputs)
+        #expect(withReuse.0.computations < withoutReuse.0.computations)
+        #expect(withReuse.1 == withoutReuse.1)
+    }
+
     // MARK: - 5. Cost of one canonicalization
 
     /// Per-call cost of a single `canonicalPath` computation, printed but never
