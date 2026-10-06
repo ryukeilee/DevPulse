@@ -72,11 +72,29 @@ first_apple_development_identity_line() {
 }
 
 resolve_identity_team() {
-    local identity_line team
+    local identity_line identity_name team
     identity_line="$(first_apple_development_identity_line)"
-    team="$(printf '%s\n' "$identity_line" | sed -n 's/.*(\([A-Z0-9]\{10\}\)).*/\1/p')"
-    [ -n "$team" ] || fail "No Apple Development identity team could be derived on this Mac."
+    identity_name="$(printf '%s\n' "$identity_line" | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p')"
+    [ -n "$identity_name" ] || fail "No Apple Development identity team could be derived on this Mac."
+    # The value in parentheses in the `security find-identity` line is a
+    # certificate identifier, not a team identifier. Read the team from the
+    # certificate's OU field, which is the real team.
+    team="$(security find-certificate -c "$identity_name" -p 2>/dev/null \
+        | openssl x509 -noout -subject 2>/dev/null \
+        | sed -n 's/.*OU=\([A-Z0-9]*\).*/\1/p')"
+    [ -n "$team" ] || fail "The Apple Development certificate carries no team (OU) field on this Mac."
     printf '%s\n' "$team"
+}
+
+# Team carried by the locally installed provisioning profiles that cover both
+# DevPulse bundle ids. This is what a signed build actually consumes, and it is
+# available without Xcode being signed in to an Apple account.
+resolve_profile_team() {
+    local host_team widget_team
+    host_team="$(profile_team_for_bundle_id "local.devpulse.app" || true)"
+    widget_team="$(profile_team_for_bundle_id "local.devpulse.app.widget" || true)"
+    [ -n "$host_team" ] && [ "$host_team" = "$widget_team" ] || return 1
+    printf '%s\n' "$host_team"
 }
 
 resolve_xcode_team() {
@@ -131,8 +149,15 @@ verify_automatic_signing_prerequisites() {
         fail "Local DevPulse provisioning profiles do not match the active Xcode automatic-signing team. Regenerate or download fresh DevPulse profiles from the signed-in Xcode account before retrying."
     fi
 
-    if ! xcode_accounts_configured; then
-        fail "No Xcode Apple account is configured on this Mac. Automatic signing cannot regenerate the DevPulse host and widget provisioning profiles."
+    # An Xcode account is only needed to create or refresh profiles. When a
+    # matching host and widget profile pair is already installed locally, the
+    # automatic-signed build can consume them without Xcode being signed in.
+    if [ -z "$host_profile_team" ] || [ -z "$widget_profile_team" ]; then
+        if ! xcode_accounts_configured; then
+            fail "No Xcode Apple account is configured on this Mac and no matching local DevPulse host and widget provisioning profiles are installed. Automatic signing cannot produce usable profiles."
+        fi
+    else
+        info "Using locally installed DevPulse host and widget provisioning profiles"
     fi
 }
 
@@ -142,7 +167,13 @@ resolve_development_team() {
         return
     fi
 
-    local configured_team identity_line team xcode_team cert_team
+    local configured_team identity_line team xcode_team cert_team profile_team
+    profile_team="$(resolve_profile_team || true)"
+    if [ -n "$profile_team" ]; then
+        printf '%s\n' "$profile_team"
+        return
+    fi
+
     configured_team="$(
         xcodebuild \
             -project "$XCODEPROJ" \
@@ -155,18 +186,15 @@ resolve_development_team() {
         return
     fi
 
-    # 先从证书提取团队 ID（不会过期）
-    cert_team="$(resolve_identity_team)"
-
-    # 当 Xcode 已登录账号时，用 Xcode 首选项的 teamID
-    if xcode_accounts_configured; then
-        xcode_team="$(resolve_xcode_team || true)"
-        if [ -n "$xcode_team" ]; then
-            printf '%s\n' "$xcode_team"
-            return
-        fi
+    # The team recorded in Xcode's preferences identifies the local development
+    # team even when Xcode is currently signed out of its Apple account.
+    xcode_team="$(resolve_xcode_team || true)"
+    if [ -n "$xcode_team" ]; then
+        printf '%s\n' "$xcode_team"
+        return
     fi
 
+    cert_team="$(resolve_identity_team)"
     printf '%s\n' "$cert_team"
 }
 
@@ -191,6 +219,19 @@ stop_running_app() {
 
 build_signed_app() {
     local team="$1"
+    local signing_args=(
+        DEVELOPMENT_TEAM="$team"
+        CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:-Apple Development}"
+    )
+
+    # -allowProvisioningUpdates drives the account-backed automatic-signing
+    # path: it fails outright on a Mac with no signed-in Xcode account, even
+    # when a matching local profile pair is already installed. Matching local
+    # profiles are enough for this build (same approach as scripts/verify.sh),
+    # so only request profile updates when an account can serve them.
+    if xcode_accounts_configured; then
+        signing_args+=(-allowProvisioningUpdates)
+    fi
 
     info "Building latest DevPulse.app with automatic signing"
     xcodebuild \
@@ -199,8 +240,7 @@ build_signed_app() {
         -configuration "$CONFIGURATION" \
         -derivedDataPath "$DERIVED_DATA_PATH" \
         -destination "$DESTINATION" \
-        DEVELOPMENT_TEAM="$team" \
-        -allowProvisioningUpdates \
+        "${signing_args[@]}" \
         build
 
     [ -d "$BUILD_APP" ] || fail "Build product not found at $BUILD_APP"
