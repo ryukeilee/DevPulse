@@ -461,6 +461,33 @@ struct WorkspaceAggregationTests {
         #expect(agg.staleRepositories.contains { $0.name == "Inactive" })
     }
 
+    /// Locks the staleness rules that the aggregation pass now evaluates in a
+    /// single traversal: a stale activity timestamp feeds both the count and the
+    /// drill-down list, while a stale last scan of a current repository only
+    /// raises the count.
+    @Test func testStalenessClassificationIsStable() {
+        let ws = Workspace(name: "StaleRules", repositoryIDs: ["activity", "changed", "scanned", "fresh"])
+        let longAgo = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-30 * 24 * 3600))
+        let repos = [
+            RepositorySnapshot.mock(id: "activity", name: "Activity", path: "/test/Activity",
+                                   lastActivityAt: longAgo),
+            RepositorySnapshot.mock(id: "changed", name: "Changed", path: "/test/Changed",
+                                   lastActivityAt: nil, lastScannedAt: nil,
+                                   lastChangedAt: longAgo),
+            RepositorySnapshot.mock(id: "scanned", name: "Scanned", path: "/test/Scanned",
+                                   lastActivityAt: nil, lastScannedAt: longAgo),
+            RepositorySnapshot.mock(id: "fresh", name: "Fresh", path: "/test/Fresh",
+                                   lastActivityAt: ISO8601DateFormatter().string(from: Date()))
+        ]
+
+        let agg = WorkspaceAggregationEngine.aggregate(workspace: ws, allRepositories: repos)
+
+        #expect(agg.totalRepositories == 4)
+        #expect(agg.repositorySummaries.count == 4)
+        #expect(agg.staleRepositoryCount == 3)
+        #expect(agg.staleRepositories.map(\.name) == ["Activity", "Changed"])
+    }
+
     @Test func testAggregationIsFromCache() {
         let ws = Workspace(name: "Test", repositoryIDs: ["r1"])
         let repos = [RepositorySnapshot.mock(id: "r1", name: "R", path: "/test/R")]
@@ -790,7 +817,8 @@ extension RepositorySnapshot {
         risk: RiskLevel = .low,
         dataSource: RepositoryDataSource = .current,
         lastActivityAt: String? = nil,
-        lastScannedAt: String? = nil
+        lastScannedAt: String? = nil,
+        lastChangedAt: String? = nil
     ) -> RepositorySnapshot {
         let changedCount = changed ?? (modified + added + deleted + untracked)
         return RepositorySnapshot(
@@ -816,7 +844,7 @@ extension RepositorySnapshot {
             lastScannedAt: lastScannedAt ?? ISO8601DateFormatter().string(from: Date()),
             dataSource: dataSource,
             lastSuccessfulScanAt: dataSource == .current ? (lastScannedAt ?? ISO8601DateFormatter().string(from: Date())) : nil,
-            lastChangedAt: nil,
+            lastChangedAt: lastChangedAt,
             lastCommitID: nil,
             lastCommitSummary: nil,
             lastCommitMetadataAvailable: nil,

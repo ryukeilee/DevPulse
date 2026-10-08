@@ -52,6 +52,7 @@ git config core.hooksPath .githooks
 │   ├── verify-build-consistency.sh  # build config consistency checks
 │   ├── verify-widgetkit.sh          # WidgetKit wiring verification
 │   ├── verify-activity-timeline.sh  # activity timeline logic check
+│   ├── benchmark-workspace-aggregation.sh  # workspace aggregation A/B performance + output equivalence
 │   ├── secret-scan.sh               # secrets scanning (staged/tracked)
 │   ├── generate-icon.mjs            # app icon generation
 │   ├── build-and-install.sh         # 通用多项目签名安装脚本（DevPulse/TinyBuddy 等）

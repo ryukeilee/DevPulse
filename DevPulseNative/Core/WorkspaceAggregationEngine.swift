@@ -120,7 +120,9 @@ struct RepositoryAggregationSummary: Codable, Equatable, Identifiable, Sendable 
     let workspaceKind: RepositoryWorkspaceKind?
     let commitReadiness: CommitReadinessLevel
 
-    init(from snapshot: RepositorySnapshot) {
+    /// Requires the already-evaluated readiness level so the readiness rule
+    /// engine is not run a second time for the same snapshot.
+    init(from snapshot: RepositorySnapshot, commitReadiness: CommitReadinessLevel) {
         self.id = snapshot.id
         self.name = snapshot.name
         self.path = snapshot.path
@@ -142,7 +144,7 @@ struct RepositoryAggregationSummary: Codable, Equatable, Identifiable, Sendable 
         self.dataSource = snapshot.resolvedDataSource
         self.isPinned = snapshot.isPinned
         self.workspaceKind = snapshot.workspaceKind
-        self.commitReadiness = snapshot.decision.commitReadiness.level
+        self.commitReadiness = commitReadiness
     }
 }
 
@@ -163,32 +165,20 @@ enum WorkspaceAggregationEngine {
     ) -> WorkspaceAggregation {
         let startTime = Date()
 
-        // Filter to the repositories belonging to this workspace
-        let workspaceRepos = allRepositories.filter { workspace.repositoryIDs.contains($0.id) }
-        let summaries = workspaceRepos.map(RepositoryAggregationSummary.init)
-        let summaryByID = Dictionary(uniqueKeysWithValues: summaries.map { ($0.id, $0) })
+        // Filter to the repositories belonging to this workspace. A Set keeps the
+        // membership test O(1) instead of rescanning the id list once per
+        // repository in the scan result.
+        let workspaceRepositoryIDs = Set(workspace.repositoryIDs)
+        let workspaceRepos = allRepositories.filter { workspaceRepositoryIDs.contains($0.id) }
+
+        var summaries: [RepositoryAggregationSummary] = []
+        summaries.reserveCapacity(workspaceRepos.count)
+        var staleRepos: [RepositoryAggregationSummary] = []
 
         // Health counts
         var healthy = 0
         var warnings = 0
         var errors = 0
-
-        for repo in workspaceRepos {
-            let decision = repo.decision
-            // Conflicts escalate to error level regardless of other signals
-            if (repo.conflictedFileCount ?? 0) > 0 {
-                errors += 1
-            } else {
-                switch decision.commitReadiness.level {
-                case .ready, .idle:
-                    healthy += 1
-                case .review, .dirty:
-                    warnings += 1
-                case .unknown:
-                    errors += 1
-                }
-            }
-        }
 
         // Aggregated counts
         var activeRepos = 0
@@ -210,7 +200,30 @@ enum WorkspaceAggregationEngine {
         var readErrors = 0
         var conflictRepoNames: [String] = []
 
+        // Single pass over the workspace repositories: health bucketing,
+        // aggregate counters and staleness all share one traversal, and every
+        // timestamp is parsed at most once.
         for repo in workspaceRepos {
+            // `decision` runs the readiness rule engine, so evaluate it once and
+            // reuse it for both the health bucket and the drill-down summary.
+            let readiness = repo.decision.commitReadiness.level
+            let summary = RepositoryAggregationSummary(from: repo, commitReadiness: readiness)
+            summaries.append(summary)
+
+            // Conflicts escalate to error level regardless of other signals
+            if (repo.conflictedFileCount ?? 0) > 0 {
+                errors += 1
+            } else {
+                switch readiness {
+                case .ready, .idle:
+                    healthy += 1
+                case .review, .dirty:
+                    warnings += 1
+                case .unknown:
+                    errors += 1
+                }
+            }
+
             if repo.status == .changed { activeRepos += 1 }
             totalChanged += repo.changedFileCount
             totalCommitted += repo.stagedFileCount ?? 0
@@ -245,11 +258,15 @@ enum WorkspaceAggregationEngine {
             case .low: lowRisk += 1
             }
 
-            // Staleness: no activity in 7+ days
+            // Staleness: no activity in 7+ days. The drill-down list covers
+            // repositories with a stale activity timestamp, while the count also
+            // treats a stale last scan of a current repository as stale; both
+            // classifications share this single parse.
             if let lastActivity = repo.lastActivityAt ?? repo.lastChangedAt,
                let activityDate = DateFormatting.date(from: lastActivity) {
                 if now.timeIntervalSince(activityDate) > staleThresholdDays {
                     staleCount += 1
+                    staleRepos.append(summary)
                 }
             } else if repo.resolvedDataSource == .current {
                 // For current repos with no activity timestamp, check lastScanAt
@@ -264,6 +281,8 @@ enum WorkspaceAggregationEngine {
             }
         }
 
+        let summaryByID = Dictionary(uniqueKeysWithValues: summaries.map { ($0.id, $0) })
+
         // Sort for top-N drill-down
         let sortedByChanged = summaries
             .filter { $0.changedFileCount > 0 }
@@ -273,11 +292,7 @@ enum WorkspaceAggregationEngine {
             .filter { $0.risk == .high }
             .sorted { $0.changedFileCount > $1.changedFileCount }
 
-        let staleRepos = summaries
-            .filter { summary in
-                staleRepositories(from: workspaceRepos, now: now).contains { $0.id == summary.id }
-            }
-            .sorted { $0.name < $1.name }
+        let sortedStaleRepos = staleRepos.sorted { $0.name < $1.name }
 
         let errorRepos = summaries
             .filter { $0.dataSource != .current || $0.commitReadiness == .unknown }
@@ -326,7 +341,7 @@ enum WorkspaceAggregationEngine {
             conflictRepositoryNames: conflictRepoNames,
             topChangedRepositories: Array(sortedByChanged.prefix(5)),
             topRiskRepositories: Array(sortedByRisk.prefix(5)),
-            staleRepositories: Array(staleRepos.prefix(10)),
+            staleRepositories: Array(sortedStaleRepos.prefix(10)),
             errorRepositories: Array(errorRepos.prefix(10)),
             repositorySummaries: summaryByID,
             isFromCache: false,
@@ -359,19 +374,6 @@ enum WorkspaceAggregationEngine {
     ) -> [RepositorySnapshot] {
         let groupedIDs = Set(workspaces.flatMap(\.repositoryIDs))
         return allRepositories.filter { !groupedIDs.contains($0.id) }
-    }
-
-    private static func staleRepositories(
-        from repositories: [RepositorySnapshot],
-        now: Date
-    ) -> [RepositorySnapshot] {
-        repositories.filter { repo in
-            if let lastActivity = repo.lastActivityAt ?? repo.lastChangedAt,
-               let activityDate = DateFormatting.date(from: lastActivity) {
-                return now.timeIntervalSince(activityDate) > staleThresholdDays
-            }
-            return false
-        }
     }
 }
 
