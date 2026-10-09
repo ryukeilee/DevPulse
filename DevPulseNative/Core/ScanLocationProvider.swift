@@ -15,7 +15,10 @@ enum ScanLocationProvider {
 
     /// Expand a tilde-prefixed path to an absolute path.
     static func expandTilde(_ path: String) -> String {
-        let home = resolvedUserHomeDirectory()
+        expandTilde(path, home: resolvedUserHomeDirectory())
+    }
+
+    private static func expandTilde(_ path: String, home: String) -> String {
         if path == "~" {
             return home
         }
@@ -113,7 +116,11 @@ enum ScanLocationProvider {
     }
 
     static func isBuiltInPath(_ path: String) -> Bool {
-        builtInAbsoluteSet.contains(normalizePersistedPath(path))
+        let normalized = normalizePersistedPath(path)
+        let home = resolvedUserHomeDirectory()
+        // Membership needs neither sorting nor a temporary Set. Resolve the
+        // home once per check, not once for every built-in location.
+        return builtInLocations.contains { expandTilde($0, home: home) == normalized }
     }
 
     /// Create toggle objects for all built-in locations.

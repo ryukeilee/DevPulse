@@ -4,6 +4,72 @@ import Testing
 
 @Suite(.serialized)
 struct RepositoryDiscoveryExperienceTests {
+    @Test func sharedRootResolverPreservesFallbackOrderAndWarnings() throws {
+        let fixture = try temporaryDirectory(named: "root-resolver")
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let missing = fixture.appendingPathComponent("missing").path
+        let file = fixture.appendingPathComponent("file")
+        try Data().write(to: file)
+        let container = fixture.appendingPathComponent("Library/Containers/other.app/root").path
+        let entries = [fixture.path, missing, file.path, container, fixture.path]
+            .enumerated().map { CustomScanDirectory(id: String($0.offset), path: $0.element, bookmarkData: Data([9])) }
+        let configuration = ScanLocationConfiguration(enabledBuiltInPaths: [], customDirectories: entries)
+        for context in [ScanRootResolver.WarningContext.settings, .scan] {
+            var visited: [String] = []
+            let result = ScanRootResolver.resolve(configuration, warningContext: context) {
+                visited.append($0.id)
+                return nil // Invalid bookmark falls back to the persisted path.
+            }
+            #expect(visited == entries.map(\.id))
+            #expect(result.roots == [fixture.path, missing, file.path].map { ScanLocationProvider.canonicalExistingFilePath($0) }.sorted())
+            #expect(result.warning == "检测到沙盒容器路径，已忽略。请把扫描目录改回真实用户目录。")
+        }
+        let unavailable = ScanLocationConfiguration(enabledBuiltInPaths: [], customDirectories: [CustomScanDirectory(path: missing)])
+        #expect(ScanRootResolver.resolve(unavailable, warningContext: .settings) { _ in nil }.warning == "部分目录权限失效，请在 Settings 重新授权。")
+        #expect(ScanRootResolver.resolve(unavailable, warningContext: .scan) { _ in nil }.warning == "部分目录权限失效，请在设置中重新授权。")
+        let empty = ScanLocationConfiguration(enabledBuiltInPaths: [], customDirectories: [CustomScanDirectory(path: container)])
+        #expect(ScanRootResolver.resolve(empty, warningContext: .settings) { _ in nil }.warning == "未发现可用的扫描目录。请在 Settings 启用一个默认目录或添加真实的仓库根目录后再刷新。")
+        #expect(ScanRootResolver.resolve(empty, warningContext: .scan) { _ in nil }.warning == "没有找到可用的扫描目录。请在设置中添加一个真实的仓库根目录。")
+    }
+
+    @Test func sharedRootResolverUsesResolvedBookmarkAndCanonicalizesAliases() throws {
+        let fixture = try temporaryDirectory(named: "root-alias")
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let alias = fixture.appendingPathComponent("alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: fixture)
+        let configuration = ScanLocationConfiguration(enabledBuiltInPaths: [], customDirectories: [
+            CustomScanDirectory(path: fixture.appendingPathComponent("old").path),
+            CustomScanDirectory(path: alias.path)
+        ])
+        let result = ScanRootResolver.resolve(configuration, warningContext: .scan) {
+            $0.path.hasSuffix("/old") ? fixture : nil
+        }
+        #expect(result.roots == [ScanLocationProvider.canonicalExistingFilePath(fixture.path)])
+        #expect(result.warning == nil)
+    }
+
+    @Test func builtInMembershipMatchesExpandedSetWithoutCanonicalizingSymlinks() {
+        let home = ScanLocationProvider.resolvedUserHomeDirectory()
+        let paths = ScanLocationProvider.builtInLocations + ScanLocationProvider.builtInAbsolute + [
+            "", "~", "~/Developer/child", "~/Developer/", " ~/Developer ",
+            home + "/Library/Containers/local.devpulse.app/Data/Projects",
+            home + "/Library/Containers/other.app/Data/Projects", "/tmp/Projects"
+        ]
+        for path in paths {
+            let normalized = ScanLocationProvider.normalizePersistedPath(path)
+            #expect(ScanLocationProvider.isBuiltInPath(path) == ScanLocationProvider.builtInAbsoluteSet.contains(normalized))
+            if ScanLocationProvider.isBuiltInPath(path) {
+                #expect(ScanLocationProvider.canonicalExistingFilePath(path) == normalized)
+            }
+        }
+        let enabled = ScanLocationProvider.builtInAbsoluteSet
+        let result = ScanRootResolver.resolve(ScanLocationConfiguration(enabledBuiltInPaths: enabled, customDirectories: []), warningContext: .scan) { _ in
+            Issue.record("No custom directories should be resolved")
+            return nil
+        }
+        #expect(result.roots == enabled.sorted())
+    }
+
     @MainActor
     @Test func legacyExplicitAllOffOverridesBuiltInDirectoryEntries() throws {
         let defaults = try #require(AppGroupStore.defaults)

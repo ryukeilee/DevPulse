@@ -719,6 +719,61 @@ enum StartupRestoreDetailBuilder {
     }
 }
 
+/// Shared synchronous root collection. Bookmark side effects remain with the
+/// caller; no caching or security-scope lifetime changes are introduced here.
+enum ScanRootResolver {
+    enum WarningContext { case settings, scan }
+
+    static func resolve(
+        _ configuration: ScanLocationConfiguration,
+        warningContext: WarningContext,
+        resolveCustomURL: (CustomScanDirectory) -> URL?
+    ) -> (roots: [String], warning: String?) {
+        let enabledBuiltIns = ScanLocationProvider.builtInLocations
+            .map(ScanLocationProvider.expandTilde)
+            .filter { configuration.enabledBuiltInPaths.contains($0) }
+        var roots: [String] = []
+        var inaccessibleCount = 0
+        var containerCount = 0
+
+        func append(_ rawPath: String) {
+            let path = ScanLocationProvider.canonicalExistingFilePath(rawPath)
+            guard !ScanLocationProvider.isLikelySandboxContainerPath(path) else {
+                containerCount += 1
+                return
+            }
+            var isDirectory: ObjCBool = false
+            if !(FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue) {
+                inaccessibleCount += 1
+            }
+            // Retain unavailable roots so a later scan can recover automatically.
+            roots.append(path)
+        }
+
+        enabledBuiltIns.forEach(append)
+        for directory in configuration.customDirectories {
+            append(resolveCustomURL(directory)?.path ?? directory.path)
+        }
+
+        let deduped = Array(Set(roots)).sorted()
+        let warning: String?
+        if deduped.isEmpty {
+            warning = warningContext == .settings
+                ? "未发现可用的扫描目录。请在 Settings 启用一个默认目录或添加真实的仓库根目录后再刷新。"
+                : "没有找到可用的扫描目录。请在设置中添加一个真实的仓库根目录。"
+        } else if containerCount > 0 {
+            warning = "检测到沙盒容器路径，已忽略。请把扫描目录改回真实用户目录。"
+        } else if inaccessibleCount > 0 {
+            warning = warningContext == .settings
+                ? "部分目录权限失效，请在 Settings 重新授权。"
+                : "部分目录权限失效，请在设置中重新授权。"
+        } else {
+            warning = nil
+        }
+        return (deduped, warning)
+    }
+}
+
 /// Manages background scan scheduling with low-power safeguards.
 ///
 /// Key behaviors:
@@ -1919,8 +1974,7 @@ final class ScanScheduler: ObservableObject {
 
             // 2. Resolve scan roots (synchronous FileManager checks, off-main).
             let resolvedRoots = Self.resolveScanRootsOffMain(
-                locationConfig: capturedLocationConfig,
-                capturedConfig: capturedConfig
+                locationConfig: capturedLocationConfig
             )
             let executionConfig: ScanConfig = {
                 var c = capturedConfig
@@ -2747,139 +2801,31 @@ final class ScanScheduler: ObservableObject {
         )
     }
 
-    /// Resolve scan roots without accessing any main-actor-isolated state.
-    /// All FileManager calls run on the calling (background) thread.
+    /// Background resolution deliberately does not refresh or persist bookmarks.
     private nonisolated static func resolveScanRootsOffMain(
-        locationConfig: ScanLocationConfiguration,
-        capturedConfig: ScanConfig
+        locationConfig: ScanLocationConfiguration
     ) -> (roots: [String], warning: String?) {
-        let enabledBuiltIn = ScanLocationProvider.builtInLocations
-            .map(ScanLocationProvider.expandTilde)
-            .filter { locationConfig.enabledBuiltInPaths.contains($0) }
-        let customDirs = locationConfig.customDirectories
-
-        var roots: [String] = []
-        var inaccessibleCount = 0
-        var containerPathCount = 0
-
-        for path in enabledBuiltIn {
-            let norm = ScanLocationProvider.canonicalExistingFilePath(path)
-            if ScanLocationProvider.isLikelySandboxContainerPath(norm) {
-                containerPathCount += 1
-                continue
-            }
-            var isDir: ObjCBool = false
-            if !(FileManager.default.fileExists(atPath: norm, isDirectory: &isDir) && isDir.boolValue) {
-                inaccessibleCount += 1
-            }
-            roots.append(norm)
+        ScanRootResolver.resolve(locationConfig, warningContext: .scan) { directory in
+            guard let bookmark = directory.bookmarkData else { return nil }
+            var stale = false
+            return try? URL(
+                resolvingBookmarkData: bookmark,
+                options: [.withSecurityScope],
+                relativeTo: nil,
+                bookmarkDataIsStale: &stale
+            )
         }
-
-        for dir in customDirs {
-            let resolved: String
-            if let bm = dir.bookmarkData {
-                var stale = false
-                if let url = try? URL(
-                    resolvingBookmarkData: bm,
-                    options: [.withSecurityScope],
-                    relativeTo: nil,
-                    bookmarkDataIsStale: &stale
-                ) {
-                    resolved = ScanLocationProvider.canonicalExistingFilePath(url.path)
-                } else {
-                    resolved = ScanLocationProvider.canonicalExistingFilePath(dir.path)
-                }
-            } else {
-                resolved = ScanLocationProvider.canonicalExistingFilePath(dir.path)
-            }
-
-            if ScanLocationProvider.isLikelySandboxContainerPath(resolved) {
-                containerPathCount += 1
-                continue
-            }
-            var isDir: ObjCBool = false
-            if !(FileManager.default.fileExists(atPath: resolved, isDirectory: &isDir) && isDir.boolValue) {
-                inaccessibleCount += 1
-            }
-            roots.append(resolved)
-        }
-
-        let deduped = Array(Set(roots)).sorted()
-        let warning: String?
-        if deduped.isEmpty {
-            warning = "没有找到可用的扫描目录。请在设置中添加一个真实的仓库根目录。"
-        } else if containerPathCount > 0 {
-            warning = "检测到沙盒容器路径，已忽略。请把扫描目录改回真实用户目录。"
-        } else if inaccessibleCount > 0 {
-            warning = "部分目录权限失效，请在设置中重新授权。"
-        } else {
-            warning = nil
-        }
-        return (deduped, warning)
     }
 
     private func scanRoots() -> (roots: [String], warning: String?) {
-        let enabledBuiltInRoots = ScanLocationProvider.builtInLocations
-            .map(ScanLocationProvider.expandTilde)
-            .filter { scanLocationConfiguration.enabledBuiltInPaths.contains($0) }
-        let configuredDirectories = scanLocationConfiguration.customDirectories
-
-        var configuredRoots: [String] = []
-        var inaccessibleCount = 0
-        var containerPathCount = 0
-
-        for path in enabledBuiltInRoots {
-            let normalizedPath = ScanLocationProvider.canonicalExistingFilePath(path)
-            guard !isAppContainerPath(normalizedPath) else {
-                containerPathCount += 1
-                continue
-            }
-            if !isAccessibleScanRoot(normalizedPath) {
-                inaccessibleCount += 1
-            }
-            configuredRoots.append(normalizedPath)
+        // Capture the configuration before resolving: refreshed bookmarks may
+        // mutate the scheduler's configuration while this snapshot is traversed.
+        let result = ScanRootResolver.resolve(scanLocationConfiguration, warningContext: .settings) {
+            resolvedURL(for: $0)
         }
-
-        for directory in configuredDirectories {
-            if let url = resolvedURL(for: directory) {
-                let path = ScanLocationProvider.canonicalExistingFilePath(url.path)
-                guard !isAppContainerPath(path) else {
-                    containerPathCount += 1
-                    continue
-                }
-                if !isAccessibleScanRoot(path) {
-                    inaccessibleCount += 1
-                }
-                configuredRoots.append(path)
-                continue
-            }
-
-            let normalizedPath = ScanLocationProvider.canonicalExistingFilePath(directory.path)
-            guard !isAppContainerPath(normalizedPath) else {
-                containerPathCount += 1
-                continue
-            }
-            if !isAccessibleScanRoot(normalizedPath) {
-                inaccessibleCount += 1
-            }
-            configuredRoots.append(normalizedPath)
-        }
-
-        let deduped = Array(Set(configuredRoots)).sorted()
-        let warning: String?
-        if deduped.isEmpty {
-            warning = "未发现可用的扫描目录。请在 Settings 启用一个默认目录或添加真实的仓库根目录后再刷新。"
-        } else if containerPathCount > 0 {
-            warning = "检测到沙盒容器路径，已忽略。请把扫描目录改回真实用户目录。"
-        } else if inaccessibleCount > 0 {
-            warning = "部分目录权限失效，请在 Settings 重新授权。"
-        } else {
-            warning = nil
-        }
-
-        diagnostics.scanRoots = deduped
-        diagnostics.scanRootWarnings = warning.map { [$0] } ?? []
-        return (deduped, warning)
+        diagnostics.scanRoots = result.roots
+        diagnostics.scanRootWarnings = result.warning.map { [$0] } ?? []
+        return result
     }
 
     // MARK: - Shared snapshot sync
