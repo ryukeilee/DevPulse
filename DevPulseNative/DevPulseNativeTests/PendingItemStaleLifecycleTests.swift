@@ -110,6 +110,69 @@ struct PendingItemStaleLifecycleTests {
         #expect(result.items.first { $0.source == .workspaceDegraded }?.firstDetectedAt != previous.firstDetectedAt)
     }
 
+    @Test func duplicateRepositoryIDsKeepFirstCandidateAndEveryNotification() throws {
+        let first = repositorySnapshot(id: "duplicate", name: "first", status: .changed, changedFileCount: 1)
+        let second = repositorySnapshot(id: "duplicate", name: "second", status: .changed, changedFileCount: 9)
+        let other = repositorySnapshot(id: "other", name: "other", status: .changed, changedFileCount: 2)
+        let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [first, other, second, first]))
+
+        #expect(result.items.count == 2)
+        let kept = try #require(result.items.first { $0.repositoryID == first.id })
+        #expect(kept.repositoryName == "first")
+        #expect(kept.evidence == ["当前改动文件数：1"])
+        #expect(result.newItemCount == 4)
+        #expect(result.transitions.count == 4)
+        #expect(result.notifications.map { $0.item.repositoryName } == ["first", "other", "second", "first"])
+        #expect(result.notifications[2].item.evidence == ["当前改动文件数：9"])
+    }
+
+    @Test(arguments: [PendingItemStatus.active, .acknowledged, .restored,
+                      .snoozed, .muted, .resolved, .permanentlyIgnored])
+    func duplicateRepositoryIDsPreserveArchiveLifecycle(status: PendingItemStatus) throws {
+        let first = repositorySnapshot(id: "duplicate", name: "first", status: .changed, changedFileCount: 1)
+        let second = repositorySnapshot(id: "duplicate", name: "second", status: .changed, changedFileCount: 9)
+        let original = try #require(PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [first])).items.first)
+        let previous = PendingItem(id: original.id, source: original.source, severity: original.severity,
+                                   repositoryID: first.id, title: original.title, explanation: original.explanation,
+                                   evidence: original.evidence, firstDetectedAt: "2025-01-01T00:00:00Z",
+                                   lastConfirmedAt: "2026-01-01T00:00:00Z", status: status,
+                                   snoozedUntil: "2099-01-01T00:00:00Z")
+        let context = PendingItemEvaluationContext(repositories: [first, second], now: Date(timeIntervalSince1970: 1_770_000_000))
+        let result = PendingItemEvaluator.evaluate(context: context, previousArchive: PendingItemArchive(items: [previous]))
+
+        #expect(result.items.count == 1)
+        #expect(result.items[0].repositoryName == "first")
+        #expect(result.items[0].firstDetectedAt == previous.firstDetectedAt)
+        #expect(result.items[0].snoozedUntil == (status == .snoozed ? previous.snoozedUntil : nil))
+        let expected = PendingItemStatusTransition.evaluate(current: previous, conditionStillActive: true,
+                                                            conditionChanged: false, newSeverity: original.severity,
+                                                            now: context.now)
+        #expect(result.items[0].status == expected.to)
+        #expect(result.newItemCount == 0)
+        #expect(result.transitions.count == 2)
+        #expect(result.notifications.count == (expected.to.allowsNotification && expected.from != expected.to ? 2 : 0))
+    }
+
+    @Test func duplicateResolutionsRemainAppendedAlongsideDeduplicatedCandidates() throws {
+        let clean = repositorySnapshot(id: "duplicate", name: "clean", status: .clean)
+        let dirty = repositorySnapshot(id: "duplicate", name: "dirty", status: .changed, changedFileCount: 1)
+        // Resolution identity uses an empty title in the existing evaluator.
+        let previous = PendingItem(source: .dirtyWorkspace, severity: .low, repositoryID: clean.id,
+                                   title: "", evidence: ["old"], firstDetectedAt: "2025-01-01T00:00:00Z")
+        let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [clean, dirty, clean, dirty], previousItems: [previous]))
+        let resolved = result.items.filter { $0.id == previous.id }
+        #expect(resolved.count == 2)
+        #expect(resolved.allSatisfy { $0.status == .resolved && $0.firstDetectedAt == previous.firstDetectedAt })
+        #expect(result.items.filter { $0.id != previous.id }.count == 1)
+        #expect(result.resolvedItemCount == 2)
+        #expect(result.newItemCount == 2)
+        #expect(result.transitions.count == 4)
+        #expect(result.notifications.count == 2)
+    }
+
     // MARK: - PendingItemSource
 
     @Test func staleRepositorySourceHasCorrectIdentity() throws {

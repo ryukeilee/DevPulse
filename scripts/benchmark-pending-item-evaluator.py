@@ -3,6 +3,8 @@
 Compile both evaluators with -O into one process; alternate measurement order.
 Only temporary sources receive a fixed clock and an optional shared history index
 (for exact ordered equivalence checks, never for timed calls). No git writes.
+BENCH_ITERATIONS defaults to 11 alternating pairs; BENCH_SCENARIOS optionally
+selects comma-separated scenario names for targeted reruns.
 """
 import argparse
 import os
@@ -30,6 +32,32 @@ with tempfile.TemporaryDirectory(prefix="devpulse-pending-bench-") as directory:
         source = source.replace("CachedHealth", f"{label}CachedHealth")
         source = source.replace("previousArchive: PendingItemArchive? = nil", "previousArchive: PendingItemArchive? = nil, previousIndex: [String: PendingItem]? = nil")
         source = source.replace("let previousByID = Dictionary(", "let previousByID = previousIndex ?? Dictionary(")
+        # Exercise the private helper with synthetic rules to cover evidence replacement
+        # and resolved/candidate ID collisions without expanding the production API.
+        index_declaration = "var firstItemIndexByID: [String: Int] = [:]" if "firstItemIndexByID:" in source else ""
+        index_argument = "firstItemIndexByID: &firstItemIndexByID," if index_declaration else ""
+        source += f"""
+extension {label}Evaluator {{
+    static func deduplicationProbe(context: PendingItemEvaluationContext,
+                                   candidates: [PendingItem?], previousIndex: [String: PendingItem]) -> PendingItemEvaluationResult {{
+        var items: [PendingItem] = []
+        {index_declaration}
+        var transitions: [PendingItemTransition] = []
+        var notifications: [(PendingItem, PendingItemTransition, String)] = []
+        var newCount = 0, resolvedCount = 0, escalatedCount = 0, deescalatedCount = 0
+        for candidate in candidates {{
+            evaluateRule(source: .dirtyWorkspace, repo: context.repositories[0], health: nil, cached: nil,
+                         previousByID: previousIndex, context: context, items: &items, {index_argument}
+                         transitions: &transitions, notifications: &notifications, newCount: &newCount,
+                         resolvedCount: &resolvedCount, escalatedCount: &escalatedCount, deescalatedCount: &deescalatedCount,
+                         rule: {{ _, _, _, _ in candidate }})
+        }}
+        return PendingItemEvaluationResult(items: items, transitions: transitions, notifications: notifications,
+            repositoryIdsExamined: 1, workspaceIdsExamined: 0, newItemCount: newCount, resolvedItemCount: resolvedCount,
+            escalatedCount: escalatedCount, deescalatedCount: deescalatedCount, durationMs: 0, warnings: [])
+    }}
+}}
+"""
         write(f"{label}.swift", source)
     date_source = (root / "DevPulseNative/Utilities/DateFormatting.swift").read_text()
     assert "isoString(from: Date())" in date_source

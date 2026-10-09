@@ -94,6 +94,8 @@ enum PendingItemEvaluator {
         let healthByRepoID = context.healthAssessments
 
         var newItems: [PendingItem] = []
+        // Track the first position, including resolved appends, to preserve firstIndex semantics.
+        var firstItemIndexByID: [String: Int] = [:]
         var transitions: [PendingItemTransition] = []
         var notifications: [(PendingItem, PendingItemTransition, String)] = []
         var newCount = 0
@@ -115,6 +117,7 @@ enum PendingItemEvaluator {
                 previousByID: previousByID,
                 context: context,
                 items: &newItems,
+                firstItemIndexByID: &firstItemIndexByID,
                 transitions: &transitions,
                 notifications: &notifications,
                 newCount: &newCount,
@@ -133,6 +136,7 @@ enum PendingItemEvaluator {
                 previousByID: previousByID,
                 context: context,
                 items: &newItems,
+                firstItemIndexByID: &firstItemIndexByID,
                 transitions: &transitions,
                 notifications: &notifications,
                 newCount: &newCount,
@@ -151,6 +155,7 @@ enum PendingItemEvaluator {
                 previousByID: previousByID,
                 context: context,
                 items: &newItems,
+                firstItemIndexByID: &firstItemIndexByID,
                 transitions: &transitions,
                 notifications: &notifications,
                 newCount: &newCount,
@@ -169,6 +174,7 @@ enum PendingItemEvaluator {
                 previousByID: previousByID,
                 context: context,
                 items: &newItems,
+                firstItemIndexByID: &firstItemIndexByID,
                 transitions: &transitions,
                 notifications: &notifications,
                 newCount: &newCount,
@@ -187,6 +193,7 @@ enum PendingItemEvaluator {
                 previousByID: previousByID,
                 context: context,
                 items: &newItems,
+                firstItemIndexByID: &firstItemIndexByID,
                 transitions: &transitions,
                 notifications: &notifications,
                 newCount: &newCount,
@@ -205,6 +212,7 @@ enum PendingItemEvaluator {
                 previousByID: previousByID,
                 context: context,
                 items: &newItems,
+                firstItemIndexByID: &firstItemIndexByID,
                 transitions: &transitions,
                 notifications: &notifications,
                 newCount: &newCount,
@@ -223,6 +231,7 @@ enum PendingItemEvaluator {
                 previousByID: previousByID,
                 context: context,
                 items: &newItems,
+                firstItemIndexByID: &firstItemIndexByID,
                 transitions: &transitions,
                 notifications: &notifications,
                 newCount: &newCount,
@@ -241,6 +250,7 @@ enum PendingItemEvaluator {
                 previousByID: previousByID,
                 context: context,
                 items: &newItems,
+                firstItemIndexByID: &firstItemIndexByID,
                 transitions: &transitions,
                 notifications: &notifications,
                 newCount: &newCount,
@@ -259,6 +269,7 @@ enum PendingItemEvaluator {
                 previousByID: previousByID,
                 context: context,
                 items: &newItems,
+                firstItemIndexByID: &firstItemIndexByID,
                 transitions: &transitions,
                 notifications: &notifications,
                 newCount: &newCount,
@@ -277,6 +288,7 @@ enum PendingItemEvaluator {
                 previousByID: previousByID,
                 context: context,
                 items: &newItems,
+                firstItemIndexByID: &firstItemIndexByID,
                 transitions: &transitions,
                 notifications: &notifications,
                 newCount: &newCount,
@@ -295,6 +307,7 @@ enum PendingItemEvaluator {
                 previousByID: previousByID,
                 context: context,
                 items: &newItems,
+                firstItemIndexByID: &firstItemIndexByID,
                 transitions: &transitions,
                 notifications: &notifications,
                 newCount: &newCount,
@@ -444,6 +457,7 @@ enum PendingItemEvaluator {
         previousByID: [String: PendingItem],
         context: PendingItemEvaluationContext,
         items: inout [PendingItem],
+        firstItemIndexByID: inout [String: Int],
         transitions: inout [PendingItemTransition],
         notifications: inout [(PendingItem, PendingItemTransition, String)],
         newCount: inout Int,
@@ -477,6 +491,9 @@ enum PendingItemEvaluator {
                 resolved.status = transition.to
                 resolved.lastConfirmedAt = DateFormatting.nowISO()
                 resolved.lastTransition = transition
+                if firstItemIndexByID[resolved.id] == nil {
+                    firstItemIndexByID[resolved.id] = items.count
+                }
                 items.append(resolved)
             }
             return
@@ -541,12 +558,13 @@ enum PendingItemEvaluator {
         }
 
         // Deduplicate: if an item with the same ID already exists, keep the one with more evidence
-        if let existingIdx = items.firstIndex(where: { $0.id == finalItem.id }) {
+        if let existingIdx = firstItemIndexByID[finalItem.id] {
             let existing = items[existingIdx]
             if finalItem.evidence.count > existing.evidence.count {
                 items[existingIdx] = finalItem
             }
         } else {
+            firstItemIndexByID[finalItem.id] = items.count
             items.append(finalItem)
         }
 
