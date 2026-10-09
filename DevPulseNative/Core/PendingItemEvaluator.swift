@@ -348,23 +348,21 @@ enum PendingItemEvaluator {
         // original detection timestamp.
         // Also resolve previous items whose source changed to a different
         // category (e.g. .unavailable → .staleRepository).
+        // Preserve the values traversal order within each bucket, including nil
+        // repository IDs used by workspace items. Only these statuses can resolve.
+        let resolvablePreviousByRepository = newItems.isEmpty ? [:] : Dictionary(grouping: previousByID.values.filter {
+            switch $0.status {
+            case .active, .acknowledged, .restored: return true
+            case .snoozed, .muted, .resolved, .permanentlyIgnored: return false
+            }
+        }, by: \.repositoryID)
+
         for i in newItems.indices {
             let currentItem = newItems[i]
-
-            // Find previous items for the same repository with different source
-            // that can be auto-resolved.
-            let matchingPrev = previousByID.values.filter {
-                guard $0.repositoryID == currentItem.repositoryID &&
-                      $0.source != currentItem.source else { return false }
-                switch $0.status {
-                case .active, .acknowledged, .restored:
-                    return true
-                case .snoozed, .muted, .resolved, .permanentlyIgnored:
-                    return false
-                }
-            }
+            let matchingPrev = resolvablePreviousByRepository[currentItem.repositoryID] ?? []
 
             for prev in matchingPrev {
+                guard prev.source != currentItem.source else { continue }
                 // Record a transition from the old source to the new one.
                 // The old item is not added to newItems — the new item
                 // replaces it with the preserved firstDetectedAt.

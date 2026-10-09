@@ -55,6 +55,61 @@ struct PendingItemStaleLifecycleTests {
         #expect(item.severity == .high)
     }
 
+    @Test(arguments: [PendingItemStatus.active, .acknowledged, .restored,
+                      .snoozed, .muted, .resolved, .permanentlyIgnored])
+    func crossRuleResolutionPreservesStatusEligibility(status: PendingItemStatus) throws {
+        let repo = repositorySnapshot(id: "target", name: "target", status: .changed, changedFileCount: 1)
+        let previous = PendingItem(id: "historical", source: .unpushedCommits, severity: .high,
+                                   repositoryID: repo.id, title: "old", firstDetectedAt: "2026-01-01T00:00:00Z",
+                                   status: status)
+        let unrelated = PendingItem(id: "unrelated", source: .mergeConflict, severity: .high,
+                                    repositoryID: "other", title: "other", firstDetectedAt: "2025-01-01T00:00:00Z")
+        let sameSource = PendingItem(id: "same-source", source: .dirtyWorkspace, severity: .low,
+                                     repositoryID: repo.id, title: "same", firstDetectedAt: "2024-01-01T00:00:00Z")
+        let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [repo], previousItems: [previous, unrelated, sameSource]))
+        let item = try #require(result.items.first { $0.source == .dirtyWorkspace })
+        let eligible = status == .active || status == .acknowledged || status == .restored
+        #expect(result.resolvedItemCount == (eligible ? 1 : 0))
+        #expect((item.firstDetectedAt == previous.firstDetectedAt) == eligible)
+        #expect(result.notifications.count == 1)
+        // Notifications retain the rule-produced item, before cross-rule timestamp carry-forward.
+        #expect(result.notifications[0].item.firstDetectedAt != previous.firstDetectedAt)
+    }
+
+    @Test func crossRuleHistoryUsesArchiveAndPreservesTraversalOrder() throws {
+        let repo = repositorySnapshot(id: "target", name: "target", status: .changed, changedFileCount: 1)
+        let history = [PendingItemSource.unpushedCommits, .behindRemote, .mergeConflict].enumerated().map {
+            PendingItem(id: "history-\($0.offset)", source: $0.element, severity: .high,
+                        repositoryID: repo.id, title: "old", firstDetectedAt: "2026-01-0\($0.offset + 1)T00:00:00Z")
+        }
+        let result = PendingItemEvaluator.evaluate(
+            context: PendingItemEvaluationContext(repositories: [repo], previousItems: [
+                PendingItem(source: .unavailable, severity: .high, repositoryID: repo.id, title: "ignored")
+            ]), previousArchive: PendingItemArchive(items: history))
+        let crossRule = result.transitions.filter { $0.reason.hasPrefix("仓库状态从 ") }
+        #expect(crossRule.count == history.count)
+        #expect(result.resolvedItemCount == history.count)
+        let last = try #require(crossRule.last)
+        let previous = try #require(history.first { last.reason.contains($0.source.displayName) })
+        #expect(result.items[0].firstDetectedAt == previous.firstDetectedAt)
+    }
+
+    @Test func workspaceCrossRuleMatchingRetainsNilRepositorySemantics() throws {
+        let repo = repositorySnapshot(id: "conflict", name: "conflict", status: .changed,
+                                      changedFileCount: 1, conflictedFileCount: 1)
+        let workspace = Workspace(id: "current", name: "current", repositoryIDs: [repo.id])
+        let aggregations = WorkspaceAggregationEngine.aggregateAll(workspaces: [workspace], allRepositories: [repo])
+        let previous = PendingItem(id: "old-workspace", source: .workspaceDegraded, severity: .medium,
+                                   workspaceID: "other-workspace", title: "old", firstDetectedAt: "2026-01-01T00:00:00Z")
+        let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [], workspaceAggregations: aggregations, workspaces: [workspace], previousItems: [previous]))
+        let conflict = try #require(result.items.first { $0.source == .workspaceConflicts })
+        #expect(conflict.firstDetectedAt == previous.firstDetectedAt)
+        #expect(result.resolvedItemCount == 1)
+        #expect(result.items.first { $0.source == .workspaceDegraded }?.firstDetectedAt != previous.firstDetectedAt)
+    }
+
     // MARK: - PendingItemSource
 
     @Test func staleRepositorySourceHasCorrectIdentity() throws {
