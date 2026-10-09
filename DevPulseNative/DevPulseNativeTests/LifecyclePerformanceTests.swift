@@ -1,4 +1,7 @@
 import Foundation
+import AppKit
+import Combine
+import SwiftUI
 import Testing
 @testable import DevPulse
 
@@ -480,5 +483,180 @@ private final class SnapshotOperationObserver: @unchecked Sendable {
 
     func operations() -> [SharedSnapshotStoreOperation] {
         recordedOperations
+    }
+}
+
+@Suite("Retained tab updates", .serialized)
+@MainActor
+struct RetainedTabTests {
+    @Test func inactiveUpdatesAreSuppressedAndActivationReadsLiveState() {
+        let scheduler = ScanScheduler(commandMode: true)
+        let scope = TabUpdateScope(scheduler: scheduler, isActive: false)
+        var notifications = 0
+        let subscription = scope.objectWillChange.sink { notifications += 1 }
+        scheduler.isScanning = true
+        scheduler.isScanning = false
+        #expect(notifications == 0)
+        #expect(scope.scheduler === scheduler)
+
+        scope.setActive(true)
+        #expect(notifications == 1)
+        #expect(!scope.scheduler.isScanning)
+        scope.setActive(true)
+        #expect(notifications == 1)
+        scheduler.isScanning = true
+        #expect(notifications == 2)
+        #expect(scope.scheduler.isScanning)
+        scope.setActive(false)
+        scheduler.isScanning = false
+        #expect(notifications == 2)
+        withExtendedLifetime(subscription) {}
+    }
+
+    @Test func scopeDoesNotRetainItselfThroughTheSchedulerSubscription() {
+        let scheduler = ScanScheduler(commandMode: true)
+        weak var released: TabUpdateScope?
+        do {
+            let scope = TabUpdateScope(scheduler: scheduler, isActive: true)
+            released = scope
+            #expect(released != nil)
+        }
+        #expect(released == nil)
+        scheduler.isScanning = true
+    }
+
+    @Test func hostedTabRetainsLocalStateAndLoadsOnceAcrossSwitchesAndRefreshes() {
+        let scheduler = ScanScheduler(commandMode: true)
+        let probe = RetainedTabProbe()
+        let host = NSHostingView(rootView: RetainedTabProbeRoot(scheduler: scheduler, probe: probe))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = host
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+
+        func settle() {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            host.layoutSubtreeIfNeeded()
+        }
+        settle()
+        probe.actions.send()
+        settle()
+        #expect(probe.value == 1)
+        let identity = probe.identity
+        #expect(identity != nil)
+        #expect(probe.factoryCalls == 1)
+        #expect(probe.appearances == 1)
+
+        probe.isActive = false
+        settle()
+        let hiddenBodyCalls = probe.bodyCalls
+        for _ in 0..<3 {
+            scheduler.isScanning.toggle()
+            settle()
+        }
+        #expect(probe.bodyCalls == hiddenBodyCalls)
+        #expect(probe.factoryCalls == 1)
+        probe.isActive = true
+        settle()
+        #expect(probe.isScanning == scheduler.isScanning)
+        #expect(probe.value == 1)
+        #expect(probe.identity == identity)
+        #expect(probe.appearances == 1)
+        #expect(probe.factoryCalls == 1)
+        probe.actions.send()
+        settle()
+        #expect(probe.value == 2)
+    }
+
+    @Test func retainedSettingsBindingStillHandlesDiagnosticsNavigation() {
+        let scheduler = ScanScheduler(commandMode: true)
+        let navigation = RetainedSettingsNavigation()
+        let host = NSHostingView(rootView: RetainedSettingsProbeRoot(
+            scheduler: scheduler, navigation: navigation
+        ).environmentObject(scheduler)
+            .environmentObject(LaunchAtLoginController()))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 560),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = host
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        func settle() {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            host.layoutSubtreeIfNeeded()
+        }
+        settle()
+        navigation.isActive = true
+        navigation.target = .diagnostics
+        settle()
+        #expect(navigation.target == nil)
+        navigation.isActive = false
+        settle()
+        navigation.isActive = true
+        navigation.target = .diagnostics
+        settle()
+        #expect(navigation.target == nil)
+    }
+}
+
+@MainActor
+private final class RetainedSettingsNavigation: ObservableObject {
+    @Published var isActive = false
+    @Published var target: SettingsScrollTarget?
+}
+
+private struct RetainedSettingsProbeRoot: View {
+    let scheduler: ScanScheduler
+    @ObservedObject var navigation: RetainedSettingsNavigation
+
+    var body: some View {
+        RetainedTab(isActive: navigation.isActive, scheduler: scheduler) {
+            SettingsView(scrollTarget: $navigation.target)
+        }
+    }
+}
+
+@MainActor
+private final class RetainedTabProbe: ObservableObject {
+    @Published var isActive = true
+    let actions = PassthroughSubject<Void, Never>()
+    var factoryCalls = 0
+    var bodyCalls = 0
+    var appearances = 0
+    var identity: UUID?
+    var value = 0
+    var isScanning = false
+}
+
+private struct RetainedTabProbeRoot: View {
+    let scheduler: ScanScheduler
+    @ObservedObject var probe: RetainedTabProbe
+
+    var body: some View {
+        RetainedTab(isActive: probe.isActive, scheduler: scheduler) {
+            let _ = probe.factoryCalls += 1
+            RetainedTabProbePage(probe: probe)
+        }
+    }
+}
+
+private struct RetainedTabProbePage: View {
+    @EnvironmentObject private var updates: TabUpdateScope
+    let probe: RetainedTabProbe
+    @State private var identity = UUID()
+    @State private var value = 0
+
+    var body: some View {
+        let _ = record()
+        Text("\(value): \(updates.scheduler.isScanning)")
+            .onReceive(probe.actions) { value += 1 }
+            .onAppear { probe.appearances += 1 }
+    }
+
+    private func record() {
+        probe.bodyCalls += 1
+        probe.identity = identity
+        probe.value = value
+        probe.isScanning = updates.scheduler.isScanning
     }
 }

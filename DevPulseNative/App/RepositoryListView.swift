@@ -41,7 +41,8 @@ enum RepositoryDetailSnapshotResolver {
 }
 
 struct RepositoryListView: View {
-    @EnvironmentObject var scheduler: ScanScheduler
+    @EnvironmentObject private var updates: TabUpdateScope
+    private var scheduler: ScanScheduler { updates.scheduler }
     private let preferencesStore: RepositoryListPreferencesStore
     @State private var searchText: String
     @State private var selectedFilter: RepositoryListFilter

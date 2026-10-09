@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 enum DevPulseVisualStyle {
@@ -30,30 +31,31 @@ struct ContentView: View {
                 .overlay(DevPulseVisualStyle.separator)
 
             ZStack {
-                StatusTab(
-                    openRepositories: openRepositories,
-                    openSettings: openSettings,
-                    openDiagnostics: openDiagnostics
-                )
-                .tabContentVisibility(selectedTab == .overview)
-
-                WorkspaceListView()
-                    .tabContentVisibility(selectedTab == .workspaces)
-
-                RepositoryListView()
-                    .tabContentVisibility(selectedTab == .repositories)
-
-                PendingCenterView()
-                    .tabContentVisibility(selectedTab == .pending)
-
-                ImpactOverviewView()
-                    .tabContentVisibility(selectedTab == .impact)
-
-                BackupManagementView()
-                    .tabContentVisibility(selectedTab == .backup)
-
-                SettingsView(scrollTarget: $settingsScrollTarget)
-                    .tabContentVisibility(selectedTab == .settings)
+                RetainedTab(isActive: selectedTab == .overview, scheduler: scheduler) {
+                    StatusTab(
+                        openRepositories: openRepositories,
+                        openSettings: openSettings,
+                        openDiagnostics: openDiagnostics
+                    )
+                }
+                RetainedTab(isActive: selectedTab == .workspaces, scheduler: scheduler) {
+                    WorkspaceListView()
+                }
+                RetainedTab(isActive: selectedTab == .repositories, scheduler: scheduler) {
+                    RepositoryListView()
+                }
+                RetainedTab(isActive: selectedTab == .pending, scheduler: scheduler) {
+                    PendingCenterView()
+                }
+                RetainedTab(isActive: selectedTab == .impact, scheduler: scheduler) {
+                    ImpactOverviewView()
+                }
+                RetainedTab(isActive: selectedTab == .backup, scheduler: scheduler) {
+                    BackupManagementView()
+                }
+                RetainedTab(isActive: selectedTab == .settings, scheduler: scheduler) {
+                    SettingsView(scrollTarget: $settingsScrollTarget)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -73,6 +75,67 @@ struct ContentView: View {
     private func openSettings() {
         selectedTab = .settings
         settingsScrollTarget = nil
+    }
+}
+
+/// Gates presentation invalidation, never the scheduler or its background work.
+/// Pages read the live scheduler, so reactivation cannot replay an old snapshot.
+@MainActor
+final class TabUpdateScope: ObservableObject {
+    @Published private var revision: UInt64 = 0
+    let scheduler: ScanScheduler
+    private var isActive: Bool
+    private var subscription: AnyCancellable?
+
+    init(scheduler: ScanScheduler, isActive: Bool) {
+        self.scheduler = scheduler
+        self.isActive = isActive
+        subscription = scheduler.objectWillChange.sink { [weak self] _ in
+            guard let self, self.isActive else { return }
+            self.revision &+= 1
+        }
+    }
+
+    func setActive(_ active: Bool) {
+        guard active != isActive else { return }
+        isActive = active
+        if active { revision &+= 1 }
+    }
+}
+
+/// StateObject's deferred construction runs the page factory once per mounted
+/// tab, avoiding repeated initializer I/O while keeping the same SwiftUI identity.
+@MainActor
+private final class RetainedTabStorage<Content: View>: ObservableObject {
+    let content: Content
+    let updates: TabUpdateScope
+
+    init(scheduler: ScanScheduler, isActive: Bool, content: () -> Content) {
+        updates = TabUpdateScope(scheduler: scheduler, isActive: isActive)
+        self.content = content()
+    }
+}
+
+struct RetainedTab<Content: View>: View {
+    // The page factory is fixed for this tab's lifetime. Changing values belong
+    // in bindings or the live scheduler, rather than factory arguments.
+    let isActive: Bool
+    @StateObject private var storage: RetainedTabStorage<Content>
+
+    init(isActive: Bool, scheduler: ScanScheduler, @ViewBuilder content: @escaping () -> Content) {
+        self.isActive = isActive
+        _storage = StateObject(wrappedValue: RetainedTabStorage(
+            scheduler: scheduler, isActive: isActive, content: content
+        ))
+    }
+
+    var body: some View {
+        storage.content
+            .environmentObject(storage.updates)
+            .tabContentVisibility(isActive)
+            .onChange(of: isActive) { _, active in
+                storage.updates.setActive(active)
+            }
     }
 }
 
@@ -167,7 +230,8 @@ private struct AppSectionBar: View {
 // MARK: - Status tab (overview)
 
 struct StatusTab: View {
-    @EnvironmentObject var scheduler: ScanScheduler
+    @EnvironmentObject private var updates: TabUpdateScope
+    private var scheduler: ScanScheduler { updates.scheduler }
     let openRepositories: () -> Void
     let openSettings: () -> Void
     let openDiagnostics: () -> Void
@@ -243,7 +307,8 @@ struct StatusTab: View {
 }
 
 private struct OverviewFocusCard: View {
-    @EnvironmentObject var scheduler: ScanScheduler
+    @EnvironmentObject private var updates: TabUpdateScope
+    private var scheduler: ScanScheduler { updates.scheduler }
     let openRepositories: () -> Void
     let openSettings: () -> Void
     let openDiagnostics: () -> Void

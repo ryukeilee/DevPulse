@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 
 struct SettingsView: View {
-    @EnvironmentObject var scheduler: ScanScheduler
+    @EnvironmentObject private var updates: TabUpdateScope
+    private var scheduler: ScanScheduler { updates.scheduler }
     @EnvironmentObject var launchAtLoginController: LaunchAtLoginController
     @Binding var scrollTarget: SettingsScrollTarget?
     @State private var newCustomPath: String = ""

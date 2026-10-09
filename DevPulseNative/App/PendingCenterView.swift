@@ -31,7 +31,8 @@ private enum PendingCenterScope: String, CaseIterable {
 }
 
 struct PendingCenterView: View {
-    @EnvironmentObject var scheduler: ScanScheduler
+    @EnvironmentObject private var updates: TabUpdateScope
+    private var scheduler: ScanScheduler { updates.scheduler }
     @State private var filter = PendingItemFilter()
     @State private var scope: PendingCenterScope = .current
     @State private var sortOrder: PendingItemSortOrder = .severity

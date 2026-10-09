@@ -1,0 +1,267 @@
+{
+  "baseline": [
+    {
+      "repository_count": 300,
+      "scenarios": {
+        "background_progress": {
+          "body_calls": {
+            "ContentView": 10,
+            "ImpactOverviewView": 10,
+            "OverviewFocusCard": 10,
+            "PendingCenterView": 10,
+            "RepositoryListView": 10,
+            "SettingsView": 10,
+            "StatusTab": 10,
+            "WorkspaceListView": 10,
+            "preferencesLoad": 10
+          },
+          "cpu_ms": 13109.767,
+          "iterations": 10,
+          "settle_p95_ms": 1313.531994819641
+        },
+        "large_snapshot": {
+          "body_calls": {
+            "ContentView": 3,
+            "ImpactOverviewView": 3,
+            "OverviewFocusCard": 3,
+            "PendingCenterView": 3,
+            "RepositoryListView": 3,
+            "SettingsView": 3,
+            "StatusTab": 3,
+            "WorkspaceListView": 3,
+            "preferencesLoad": 3
+          },
+          "cpu_ms": 3835.386999999999,
+          "iterations": 3,
+          "settle_p95_ms": 1279.0459394454956
+        },
+        "switch": {
+          "body_calls": {
+            "ContentView": 7,
+            "OverviewFocusCard": 7,
+            "RepositoryListView": 7,
+            "StatusTab": 7,
+            "preferencesLoad": 7
+          },
+          "cpu_ms": 7542.638000000001,
+          "iterations": 7,
+          "settle_p95_ms": 1103.0280590057373
+        }
+      }
+    },
+    {
+      "repository_count": 300,
+      "scenarios": {
+        "background_progress": {
+          "body_calls": {
+            "ContentView": 10,
+            "ImpactOverviewView": 10,
+            "OverviewFocusCard": 10,
+            "PendingCenterView": 10,
+            "RepositoryListView": 10,
+            "SettingsView": 10,
+            "StatusTab": 10,
+            "WorkspaceListView": 10,
+            "preferencesLoad": 10
+          },
+          "cpu_ms": 13091.071,
+          "iterations": 10,
+          "settle_p95_ms": 1310.57608127594
+        },
+        "large_snapshot": {
+          "body_calls": {
+            "ContentView": 3,
+            "ImpactOverviewView": 3,
+            "OverviewFocusCard": 3,
+            "PendingCenterView": 3,
+            "RepositoryListView": 3,
+            "SettingsView": 3,
+            "StatusTab": 3,
+            "WorkspaceListView": 3,
+            "preferencesLoad": 3
+          },
+          "cpu_ms": 3827.1129999999976,
+          "iterations": 3,
+          "settle_p95_ms": 1275.9790420532227
+        },
+        "switch": {
+          "body_calls": {
+            "ContentView": 7,
+            "OverviewFocusCard": 7,
+            "RepositoryListView": 7,
+            "StatusTab": 7,
+            "preferencesLoad": 7
+          },
+          "cpu_ms": 7540.215000000001,
+          "iterations": 7,
+          "settle_p95_ms": 1103.9550304412842
+        }
+      }
+    },
+    {
+      "repository_count": 300,
+      "scenarios": {
+        "background_progress": {
+          "body_calls": {
+            "ContentView": 10,
+            "ImpactOverviewView": 10,
+            "OverviewFocusCard": 10,
+            "PendingCenterView": 10,
+            "RepositoryListView": 10,
+            "SettingsView": 10,
+            "StatusTab": 10,
+            "WorkspaceListView": 10,
+            "preferencesLoad": 10
+          },
+          "cpu_ms": 13122.831,
+          "iterations": 10,
+          "settle_p95_ms": 1336.6460800170898
+        },
+        "large_snapshot": {
+          "body_calls": {
+            "ContentView": 3,
+            "ImpactOverviewView": 3,
+            "OverviewFocusCard": 3,
+            "PendingCenterView": 3,
+            "RepositoryListView": 3,
+            "SettingsView": 3,
+            "StatusTab": 3,
+            "WorkspaceListView": 3,
+            "preferencesLoad": 3
+          },
+          "cpu_ms": 3819.954999999998,
+          "iterations": 3,
+          "settle_p95_ms": 1270.4640626907349
+        },
+        "switch": {
+          "body_calls": {
+            "ContentView": 7,
+            "OverviewFocusCard": 7,
+            "RepositoryListView": 7,
+            "StatusTab": 7,
+            "preferencesLoad": 7
+          },
+          "cpu_ms": 7566.590999999999,
+          "iterations": 7,
+          "settle_p95_ms": 1116.752028465271
+        }
+      }
+    }
+  ],
+  "candidate": [
+    {
+      "repository_count": 300,
+      "scenarios": {
+        "background_progress": {
+          "body_calls": {
+            "ContentView": 10,
+            "RepositoryListView": 10
+          },
+          "cpu_ms": 2148.0429999999997,
+          "iterations": 10,
+          "settle_p95_ms": 216.74692630767822
+        },
+        "large_snapshot": {
+          "body_calls": {
+            "ContentView": 3,
+            "SettingsView": 3
+          },
+          "cpu_ms": 1280.4670000000006,
+          "iterations": 3,
+          "settle_p95_ms": 425.1089096069336
+        },
+        "switch": {
+          "body_calls": {
+            "ContentView": 7,
+            "ImpactOverviewView": 1,
+            "OverviewFocusCard": 1,
+            "PendingCenterView": 1,
+            "RepositoryListView": 1,
+            "SettingsView": 1,
+            "StatusTab": 1,
+            "WorkspaceListView": 1
+          },
+          "cpu_ms": 2920.1720000000005,
+          "iterations": 7,
+          "settle_p95_ms": 452.5710344314575
+        }
+      }
+    },
+    {
+      "repository_count": 300,
+      "scenarios": {
+        "background_progress": {
+          "body_calls": {
+            "ContentView": 10,
+            "RepositoryListView": 10
+          },
+          "cpu_ms": 2142.396999999999,
+          "iterations": 10,
+          "settle_p95_ms": 216.80200099945068
+        },
+        "large_snapshot": {
+          "body_calls": {
+            "ContentView": 3,
+            "SettingsView": 3
+          },
+          "cpu_ms": 1271.062,
+          "iterations": 3,
+          "settle_p95_ms": 422.34301567077637
+        },
+        "switch": {
+          "body_calls": {
+            "ContentView": 7,
+            "ImpactOverviewView": 1,
+            "OverviewFocusCard": 1,
+            "PendingCenterView": 1,
+            "RepositoryListView": 1,
+            "SettingsView": 1,
+            "StatusTab": 1,
+            "WorkspaceListView": 1
+          },
+          "cpu_ms": 2943.7340000000004,
+          "iterations": 7,
+          "settle_p95_ms": 460.798978805542
+        }
+      }
+    },
+    {
+      "repository_count": 300,
+      "scenarios": {
+        "background_progress": {
+          "body_calls": {
+            "ContentView": 10,
+            "RepositoryListView": 10
+          },
+          "cpu_ms": 2435.8780000000006,
+          "iterations": 10,
+          "settle_p95_ms": 247.65002727508545
+        },
+        "large_snapshot": {
+          "body_calls": {
+            "ContentView": 3,
+            "SettingsView": 3
+          },
+          "cpu_ms": 1429.682999999999,
+          "iterations": 3,
+          "settle_p95_ms": 474.3969440460205
+        },
+        "switch": {
+          "body_calls": {
+            "ContentView": 7,
+            "ImpactOverviewView": 1,
+            "OverviewFocusCard": 1,
+            "PendingCenterView": 1,
+            "RepositoryListView": 1,
+            "SettingsView": 1,
+            "StatusTab": 1,
+            "WorkspaceListView": 1
+          },
+          "cpu_ms": 2958.8640000000005,
+          "iterations": 7,
+          "settle_p95_ms": 461.57097816467285
+        }
+      }
+    }
+  ]
+}

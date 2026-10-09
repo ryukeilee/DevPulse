@@ -5,7 +5,8 @@ import SwiftUI
 /// Main workspace overview tab. Displays all workspaces with aggregated
 /// health metrics, search/filter/sort capabilities, and suggestion cards.
 struct WorkspaceListView: View {
-    @EnvironmentObject var scheduler: ScanScheduler
+    @EnvironmentObject private var updates: TabUpdateScope
+    private var scheduler: ScanScheduler { updates.scheduler }
     @State private var searchText: String = ""
     @State private var sortOrder: WorkspaceSortOrder = .manual
     @State private var selectedWorkspace: Workspace?

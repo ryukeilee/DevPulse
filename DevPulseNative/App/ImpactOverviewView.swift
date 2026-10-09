@@ -4,7 +4,8 @@ import SwiftUI
 
 /// Top-level view showing change impact analysis across all repositories.
 struct ImpactOverviewView: View {
-    @EnvironmentObject var scheduler: ScanScheduler
+    @EnvironmentObject private var updates: TabUpdateScope
+    private var scheduler: ScanScheduler { updates.scheduler }
     @State private var selectedFilter: ImpactFilter = .all
     @State private var searchText = ""
 
