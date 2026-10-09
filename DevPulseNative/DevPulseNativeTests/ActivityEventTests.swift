@@ -230,6 +230,36 @@ struct ActivityEventTests {
         ) == 1)
     }
 
+    @Test func ordinaryEventsDoNotChangeAttentionRecoveryOrDisplayOrder() throws {
+        let started = try #require(event(
+            previous: snapshot(conflicted: 0, id: "repo-a"),
+            current: snapshot(conflicted: 1, id: "repo-a"),
+            at: "2026-07-16T10:00:00Z", kind: .conflictStarted
+        ))
+        let resolved = try #require(event(
+            previous: snapshot(conflicted: 1, id: "repo-a"),
+            current: snapshot(conflicted: 0, id: "repo-a"),
+            at: "2026-07-16T10:30:00.000Z", kind: .conflictResolved
+        ))
+        let open = try #require(event(
+            previous: snapshot(conflicted: 0, id: "repo-b"),
+            current: snapshot(conflicted: 1, id: "repo-b"),
+            at: "2026-07-16T11:00:00Z", kind: .conflictStarted
+        ))
+        let ordinary = try #require(event(
+            previous: snapshot(modified: 0, id: "repo-a"),
+            current: snapshot(modified: 1, id: "repo-a"),
+            at: "invalid-timestamp", kind: .workingTreeChanged
+        ))
+        // Unsorted input, mixed timestamp formats and an ordinary event from
+        // the same repository must not alter the latest attention family.
+        let mixed = [ordinary, started, open, resolved]
+        #expect(ActivityTimelineAttention.openAttentionEvents(in: mixed) == [open])
+        #expect(ActivityTimelineAttention.split(events: mixed, displayedPrefix: 2) == (0, 1))
+        #expect(ActivityTimelineAttention.split(events: mixed, displayedPrefix: 3) == (1, 0))
+        #expect(ActivityTimelineAttention.openAttentionEvents(in: [ordinary]).isEmpty)
+    }
+
     @Test func attentionSplitSeparatesDisplayedAndEarlierRecords() throws {
         // 12 条事件按时间倒序（最新在前）排列，模拟视图折叠态输入：
         // 索引 0-1 repo-a 改动；2 冲突开始（未解除，在折叠区内）；

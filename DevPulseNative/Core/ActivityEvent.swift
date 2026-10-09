@@ -240,7 +240,11 @@ enum ActivityTimelineAttention {
     /// 为冲突开始/读取失败才算未解除。返回保持入参顺序。
     static func openAttentionEvents(in events: [ActivityEvent]) -> [ActivityEvent] {
         var latestByFamily: [String: ActivityEvent] = [:]
-        for event in events.sorted(by: newestFirst) {
+        // Ordinary development events cannot open or close an attention
+        // family. Exclude them before the timestamp-parsing sort, rather than
+        // sorting the entire activity archive on every presentation update.
+        let attentionEvents = events.filter { attentionFamily(for: $0.kind) != nil }
+        for event in attentionEvents.sorted(by: newestFirst) {
             guard let family = attentionFamily(for: event.kind) else { continue }
             let key = "\(event.repositoryID)\u{1F}\(family)"
             if latestByFamily[key] == nil {

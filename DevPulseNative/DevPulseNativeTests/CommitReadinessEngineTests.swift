@@ -2796,6 +2796,41 @@ struct CommitReadinessEngineTests {
         )
     }
 
+    @Test func displayedTimelineContextMatchesFullContextAcrossRefreshes() {
+        let repositories = [
+            snapshot(id: "conflict", modified: 1, conflicted: 1),
+            snapshot(id: "retained", status: .error, dataSource: .lastSuccessful,
+                     lastSuccessfulScanAt: "2026-07-15T10:00:00Z", errorMessage: "读取失败"),
+            snapshot(id: "hidden", modified: 2),
+            snapshot(id: "conflict", modified: 0, ahead: 0, behind: 0,
+                     hasUpstream: true, status: .clean)
+        ]
+        let full = ActivityTimelineDecisionContextBuilder.build(from: repositories)
+        let displayedIDs: Set<String> = ["conflict", "retained", "removed"]
+        let displayed = ActivityTimelineDecisionContextBuilder.build(
+            from: repositories, repositoryIDs: displayedIDs
+        )
+        #expect(displayed == full.filter { displayedIDs.contains($0.key) })
+        #expect(displayed["conflict"] == repositories.last?.decision)
+        #expect(displayed["removed"] == nil)
+        #expect(ActivityTimelineDecisionContextBuilder.build(
+            from: repositories, repositoryIDs: []
+        ).isEmpty)
+
+        // Expanding and a later refresh must use current snapshots, not a
+        // retained context from the folded page or previous scan.
+        #expect(ActivityTimelineDecisionContextBuilder.build(
+            from: repositories, repositoryIDs: Set(repositories.map(\.id))
+        ) == full)
+        let refreshed = [snapshot(id: "conflict", modified: 1, conflicted: 1)]
+        let next = ActivityTimelineDecisionContextBuilder.build(
+            from: refreshed, repositoryIDs: displayedIDs
+        )
+        #expect(next["conflict"] == refreshed[0].decision)
+        #expect(next["conflict"] != displayed["conflict"])
+        #expect(next["retained"] == nil)
+    }
+
     @Test func listDetailTimelineWidgetAndCompatibilityProjectionsShareOneDecision() {
         let repositories = [
             snapshot(id: "shared-retained", status: .error, dataSource: .lastSuccessful, lastSuccessfulScanAt: "2026-07-15T10:00:00Z", errorMessage: "读取失败"),

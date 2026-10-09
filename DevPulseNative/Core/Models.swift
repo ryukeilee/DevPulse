@@ -1473,9 +1473,18 @@ enum ActivityTimelineBuilder {
 }
 
 enum ActivityTimelineDecisionContextBuilder {
-    static func build(from repositories: [RepositorySnapshot]) -> [String: RepositoryDecision] {
-        Dictionary(
-            repositories.map { ($0.id, $0.decision) },
+    static func build(
+        from repositories: [RepositorySnapshot],
+        repositoryIDs: Set<String>? = nil
+    ) -> [String: RepositoryDecision] {
+        // Presentation needs only the displayed events' decisions. Keep the
+        // full-context default for other consumers, including duplicate-ID
+        // semantics (the last snapshot wins).
+        if let repositoryIDs, repositoryIDs.isEmpty { return [:] }
+        return Dictionary(
+            repositories.lazy
+                .filter { repositoryIDs?.contains($0.id) ?? true }
+                .map { ($0.id, $0.decision) },
             uniquingKeysWith: { _, latest in latest }
         )
     }

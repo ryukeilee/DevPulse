@@ -8,10 +8,6 @@ struct ActivityTimelineView: View {
     let onRescan: () -> Void
     @State private var showsAllEvents = false
 
-    private var decisionsByRepositoryID: [String: RepositoryDecision] {
-        ActivityTimelineDecisionContextBuilder.build(from: repositories)
-    }
-
     /// Overview 只先展示最近一小段，避免历史记录把今日状态推到很下面；
     /// 展开仍沿用同一份本地活动记录，最多保留原有的 100 条上限。
     private static let initialDisplayedEventCount = 8
@@ -28,7 +24,10 @@ struct ActivityTimelineView: View {
         let displayedEvents = Array(
             orderedEvents.prefix(showsAllEvents ? Self.maxDisplayedEvents : Self.initialDisplayedEventCount)
         )
-        let decisions = decisionsByRepositoryID
+        let decisions = ActivityTimelineDecisionContextBuilder.build(
+            from: repositories,
+            repositoryIDs: Set(displayedEvents.map(\.repositoryID))
+        )
         // 提示口径覆盖全部未解除的冲突/读取异常：折叠态下较早记录中的
         // 注意力事件同样计入，避免"列表有冲突"因超出前 8 条而漏报。
         let attentionSplit = ActivityTimelineAttention.split(
