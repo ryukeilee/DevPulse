@@ -15,6 +15,7 @@ import tempfile
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--baseline-git", required=True)
+parser.add_argument("--expectation", choices=["gain", "non-regression"], default="gain")
 args = parser.parse_args()
 relative = "DevPulseNative/Core/PendingItemEvaluator.swift"
 baseline = subprocess.check_output(["git", "show", f"{args.baseline_git}:{relative}"], cwd=root, text=True)
@@ -36,7 +37,7 @@ with tempfile.TemporaryDirectory(prefix="devpulse-pending-bench-") as directory:
         # and resolved/candidate ID collisions without expanding the production API.
         index_declaration = "var firstItemIndexByID: [String: Int] = [:]" if "firstItemIndexByID:" in source else ""
         index_argument = "firstItemIndexByID: &firstItemIndexByID," if index_declaration else ""
-        source += f"""
+        probe = f"""
 extension {label}Evaluator {{
     static func deduplicationProbe(context: PendingItemEvaluationContext,
                                    candidates: [PendingItem?], previousIndex: [String: PendingItem]) -> PendingItemEvaluationResult {{
@@ -58,7 +59,16 @@ extension {label}Evaluator {{
     }}
 }}
 """
-        write(f"{label}.swift", source)
+        if "private struct EvaluationState" in source:
+            start = probe.index("        var items:")
+            end = probe.index("        for candidate", start)
+            probe = probe[:start] + "        var state = EvaluationState()\n" + probe[end:]
+            start = probe.index("context: context, items:")
+            end = probe.index("                         rule:", start)
+            probe = probe[:start] + "context: context, state: &state,\n" + probe[end:]
+            for field in ["items", "transitions", "notifications", "newCount", "resolvedCount", "escalatedCount", "deescalatedCount"]:
+                probe = probe.replace(f": {field},", f": state.{field},")
+        write(f"{label}.swift", source + probe)
     date_source = (root / "DevPulseNative/Utilities/DateFormatting.swift").read_text()
     assert "isoString(from: Date())" in date_source
     write("DateFormatting.swift", date_source.replace("isoString(from: Date())", "isoString(from: Date(timeIntervalSince1970: 1770000000))"))
@@ -72,4 +82,6 @@ extension {label}Evaluator {{
     binary = str(tmp / "benchmark")
     subprocess.run(["xcrun", "swiftc", "-O", "-module-cache-path", str(tmp / "cache"),
                     "-o", binary, *sources], check=True)
-    subprocess.run([binary], check=True, env=os.environ.copy())
+    environment = os.environ.copy()
+    environment["BENCH_EXPECTATION"] = args.expectation
+    subprocess.run([binary], check=True, env=environment)

@@ -173,6 +173,58 @@ struct PendingItemStaleLifecycleTests {
         #expect(result.notifications.count == 2)
     }
 
+    @Test func ruleDispatchPreservesHealthRuleAndNotificationOrder() throws {
+        let repo = repositorySnapshot(id: "all-rules", name: "all-rules", status: .changed,
+                                      changedFileCount: 2, aheadCount: 2, hasUpstream: false, conflictedFileCount: 1)
+        let kinds: [RepositoryHealthSignal.SignalKind] = [.dirtyWorkspaceDuration, .unpushedCommitsDuration,
+            .behindRemoteDuration, .staleActivity, .recurringConflicts, .frequentReadFailures, .creepingChanges]
+        let health = RepositoryHealthAssessment(repositoryID: repo.id, repositoryName: repo.name,
+            assessedAt: "2026-01-01T00:00:00Z", overallRisk: .high, signals: kinds.map {
+                RepositoryHealthSignal(kind: $0, level: .high, title: $0.rawValue, explanation: "signal",
+                                       evidence: "evidence", duration: 300000, currentValue: "5", threshold: nil)
+            }, summary: "summary", primaryExplanation: "health", hasSufficientHistory: true)
+        let workspace = Workspace(id: "all", name: "all", repositoryIDs: [repo.id])
+        let aggregations = WorkspaceAggregationEngine.aggregateAll(workspaces: [workspace], allRepositories: [repo])
+        let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(repositories: [repo],
+            workspaceAggregations: aggregations, workspaces: [workspace], healthAssessments: [repo.id: health]))
+        let expected: [PendingItemSource] = [.dirtyWorkspace, .unpushedCommits, .behindRemote, .mergeConflict,
+            .upstreamMissing, .scanFailure, .creepingChanges, .staleActivity, .healthTrend,
+            .workspaceDegraded, .workspaceConflicts]
+        #expect(result.notifications.map { $0.item.source } == expected)
+        #expect(result.transitions.count == expected.count)
+        #expect(result.newItemCount == expected.count)
+        #expect(result.resolvedItemCount == 0)
+        #expect(result.escalatedCount == 0)
+        #expect(result.deescalatedCount == 0)
+        #expect(result.items.map(\.severity) == result.items.map(\.severity).sorted(by: >))
+    }
+
+    @Test(arguments: [PendingItemStatus.active, .acknowledged, .restored,
+                      .snoozed, .muted, .resolved, .permanentlyIgnored])
+    func duplicateWorkspacesPreserveEveryAppendAndLifecycle(status: PendingItemStatus) throws {
+        let repo = repositorySnapshot(id: "conflict", name: "conflict", status: .changed,
+                                      changedFileCount: 1, conflictedFileCount: 1)
+        let workspace = Workspace(id: "duplicate", name: "duplicate", repositoryIDs: [repo.id])
+        let aggregations = WorkspaceAggregationEngine.aggregateAll(workspaces: [workspace], allRepositories: [repo])
+        let seed = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(repositories: [],
+            workspaceAggregations: aggregations, workspaces: [workspace]))
+        let previous = try #require(seed.items.first { $0.source == .workspaceConflicts })
+        var historical = previous
+        historical.status = status
+        historical.snoozedUntil = "2099-01-01T00:00:00Z"
+        let context = PendingItemEvaluationContext(repositories: [], workspaceAggregations: aggregations,
+            workspaces: [workspace, workspace], previousItems: [historical])
+        let result = PendingItemEvaluator.evaluate(context: context)
+        let conflicts = result.items.filter { $0.source == .workspaceConflicts }
+        let expected = PendingItemStatusTransition.evaluate(current: historical, conditionStillActive: true,
+            conditionChanged: false, newSeverity: historical.severity, now: context.now)
+        #expect(conflicts.count == 2)
+        #expect(conflicts.allSatisfy { $0.status == expected.to && $0.firstDetectedAt == historical.firstDetectedAt })
+        #expect(conflicts.allSatisfy { $0.snoozedUntil == (expected.to == .snoozed ? historical.snoozedUntil : nil) })
+        #expect(result.notifications.filter { $0.item.source == .workspaceConflicts }.count
+                == (expected.to.allowsNotification && expected.from != expected.to ? 2 : 0))
+    }
+
     // MARK: - PendingItemSource
 
     @Test func staleRepositorySourceHasCorrectIdentity() throws {

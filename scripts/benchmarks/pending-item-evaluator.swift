@@ -4,15 +4,16 @@ import CryptoKit
 private let now = Date(timeIntervalSince1970: 1_770_000_000)
 private let stamp = "2026-02-02T02:40:00Z"
 
-private func repo(_ i: Int, dirty: Bool, variant: Bool = false) -> RepositorySnapshot {
+private func repo(_ i: Int, dirty: Bool, variant: Bool = false, upstream: Bool = true, unavailableDays: Int? = nil) -> RepositorySnapshot {
     RepositorySnapshot(id: "repo-\(i)", name: "repo-\(i)\(variant ? "-duplicate" : "")", path: "/tmp/bench-\(i)",
-        branch: "main", status: dirty ? .changed : .clean,
+        branch: "main", status: unavailableDays == nil ? (dirty ? .changed : .clean) : .error,
         modifiedFileCount: dirty ? 2 : 0, addedFileCount: 0, deletedFileCount: 0,
         untrackedFileCount: 0, stagedFileCount: 0, unstagedFileCount: dirty ? 2 : 0,
         conflictedFileCount: dirty ? 1 : 0, aheadCount: dirty ? 2 : 0, behindCount: dirty ? 3 : 0,
-        hasUpstream: true, changedFileCount: dirty ? (variant ? 9 : 2) : 0, changedFilesPreview: [],
+        hasUpstream: upstream, changedFileCount: dirty ? (variant ? 9 : 2) : 0, changedFilesPreview: [],
         risk: .low, lastScannedAt: stamp, dataSource: .current,
         lastSuccessfulScanAt: stamp, lastChangedAt: nil, lastCommitMetadataAvailable: false,
+        unavailableSince: unavailableDays.map { DateFormatting.isoString(from: now.addingTimeInterval(-Double($0) * 86400)) },
         errorMessage: nil, isPinned: false)
 }
 
@@ -84,6 +85,52 @@ struct Main {
             require(equal, "Exact-ID mismatch: \(status)")
         }
         print("exact-ID lifecycle equivalence=PASS statuses=7")
+
+        // Cover every rule with health signals, upstream absence and both retention branches.
+        let kinds: [RepositoryHealthSignal.SignalKind] = [.dirtyWorkspaceDuration, .unpushedCommitsDuration,
+            .behindRemoteDuration, .staleActivity, .recurringConflicts, .frequentReadFailures, .creepingChanges]
+        let health = RepositoryHealthAssessment(repositoryID: "repo-0", repositoryName: "repo-0",
+            assessedAt: stamp, overallRisk: .high, signals: kinds.map {
+                RepositoryHealthSignal(kind: $0, level: .high, title: $0.rawValue, explanation: "signal",
+                    evidence: "evidence", duration: 300000, currentValue: "5", threshold: nil)
+            }, summary: "summary", primaryExplanation: "health", hasSufficientHistory: true)
+        var covered = Set<PendingItemSource>()
+        for unavailableDays: Int? in [nil, 1, 8] {
+            let repositories = [repo(0, dirty: true, upstream: false, unavailableDays: unavailableDays)]
+            let workspace = Workspace(id: "all", name: "all", repositoryIDs: ["repo-0"])
+            let aggregations = WorkspaceAggregationEngine.aggregateAll(workspaces: [workspace], allRepositories: repositories, now: now)
+            let seedContext = PendingItemEvaluationContext(repositories: repositories,
+                workspaceAggregations: aggregations, workspaces: [workspace], healthAssessments: ["repo-0": health], now: now)
+            let seed = BaselineEvaluator.evaluate(context: seedContext)
+            covered.formUnion(seed.items.map(\.source))
+            for status in statuses {
+                let history = seed.items.enumerated().map { i, item in
+                    PendingItem(id: item.id, source: item.source, severity: i % 2 == 0 ? .critical : .low,
+                        repositoryID: item.repositoryID, workspaceID: item.workspaceID, title: item.title,
+                        explanation: "changed explanation", firstDetectedAt: "2025-01-01T00:00:00Z", status: status,
+                        snoozedUntil: "2099-01-01T00:00:00Z")
+                }
+                let index = Dictionary(uniqueKeysWithValues: history.map { ($0.id, $0) })
+                let context = PendingItemEvaluationContext(repositories: repositories,
+                    workspaceAggregations: aggregations, workspaces: [workspace, workspace],
+                    healthAssessments: ["repo-0": health], previousItems: history, now: now)
+                require(try data(BaselineEvaluator.evaluate(context: context, previousIndex: index))
+                    == data(CurrentEvaluator.evaluate(context: context, previousIndex: index)), "All-rule lifecycle mismatch")
+                // Empty-title identities exercise resolution of absent repository/workspace rules.
+                let resolutionHistory = seed.items.map {
+                    PendingItem(source: $0.source, severity: $0.severity, repositoryID: $0.repositoryID,
+                        workspaceID: $0.workspaceID, title: "", status: status)
+                }
+                let resolutionIndex = Dictionary(uniqueKeysWithValues: resolutionHistory.map { ($0.id, $0) })
+                let inactive = PendingItemEvaluationContext(repositories: [repo(0, dirty: false)],
+                    workspaces: [workspace, workspace], previousItems: resolutionHistory, now: now)
+                require(try data(BaselineEvaluator.evaluate(context: inactive, previousIndex: resolutionIndex))
+                    == data(CurrentEvaluator.evaluate(context: inactive, previousIndex: resolutionIndex)), "All-rule resolution mismatch")
+            }
+        }
+        require(covered.count == 13, "Expected coverage of all 13 rules, got \(covered.count)")
+        print("all-rule equivalence=PASS rules=13 statuses=7 (workspace duplicates, updates, resolutions)")
+
         // Direct helper probes retain array order, first-position replacement,
         // every transition/notification, and repeated resolved appends.
         let expectedID = PendingItem(source: .dirtyWorkspace, severity: .low, repositoryID: "repo-0", title: "").id
@@ -185,7 +232,10 @@ struct Main {
             let beyondNoise = differences.first! > 0 && medianGain > 3 * mad
             print(String(format: "  paired_mad_ms=%.3f gain_beyond_noise=%@", mad, beyondNoise ? "YES" : "NO"))
             fflush(stdout)
-            if name == "1500-repos" || name == "3000-no-history" {
+            let regressionBeyondNoise = differences.last! < 0 && -medianGain > 3 * mad
+            if ProcessInfo.processInfo.environment["BENCH_EXPECTATION"] == "non-regression" {
+                require(!regressionBeyondNoise, "Consistent regression exceeds 3x paired MAD: \(name)")
+            } else if name == "1500-repos" || name == "3000-no-history" {
                 require(beyondNoise, "Large-repository gain must be positive in every pair and exceed 3x paired MAD")
             }
         }

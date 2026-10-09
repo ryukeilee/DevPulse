@@ -84,7 +84,7 @@ enum PendingItemEvaluator {
         previousArchive: PendingItemArchive? = nil
     ) -> PendingItemEvaluationResult {
         let start = Date()
-        var warnings: [String] = []
+        let warnings: [String] = []
 
         let previousByID = Dictionary(
             uniqueKeysWithValues: (previousArchive?.items ?? context.previousItems).map { ($0.id, $0) }
@@ -93,266 +93,39 @@ enum PendingItemEvaluator {
         // Cache health assessments for fast lookup
         let healthByRepoID = context.healthAssessments
 
-        var newItems: [PendingItem] = []
-        // Track the first position, including resolved appends, to preserve firstIndex semantics.
-        var firstItemIndexByID: [String: Int] = [:]
-        var transitions: [PendingItemTransition] = []
-        var notifications: [(PendingItem, PendingItemTransition, String)] = []
-        var newCount = 0
-        var resolvedCount = 0
-        var escalatedCount = 0
-        var deescalatedCount = 0
+        var state = EvaluationState()
 
-        // ── Repository-level rules ──
+        // Keep explicit dispatch order; no per-repository rule arrays or escaping closures.
         for repo in context.repositories {
             let health = healthByRepoID[repo.id]
             let cached = extractSignals(from: health)
+            func run(_ source: PendingItemSource, _ rule: RuleEvaluator) {
+                evaluateRule(source: source, repo: repo, health: health, cached: cached,
+                             previousByID: previousByID, context: context, state: &state, rule: rule)
+            }
 
-            // Rule: Dirty workspace
-            evaluateRule(
-                source: .dirtyWorkspace,
-                repo: repo,
-                health: health,
-                cached: cached,
-                previousByID: previousByID,
-                context: context,
-                items: &newItems,
-                firstItemIndexByID: &firstItemIndexByID,
-                transitions: &transitions,
-                notifications: &notifications,
-                newCount: &newCount,
-                resolvedCount: &resolvedCount,
-                escalatedCount: &escalatedCount,
-                deescalatedCount: &deescalatedCount,
-                rule: evaluateDirtyWorkspace
-            )
-
-            // Rule: Unpushed commits
-            evaluateRule(
-                source: .unpushedCommits,
-                repo: repo,
-                health: health,
-                cached: cached,
-                previousByID: previousByID,
-                context: context,
-                items: &newItems,
-                firstItemIndexByID: &firstItemIndexByID,
-                transitions: &transitions,
-                notifications: &notifications,
-                newCount: &newCount,
-                resolvedCount: &resolvedCount,
-                escalatedCount: &escalatedCount,
-                deescalatedCount: &deescalatedCount,
-                rule: evaluateUnpushedCommits
-            )
-
-            // Rule: Behind remote
-            evaluateRule(
-                source: .behindRemote,
-                repo: repo,
-                health: health,
-                cached: cached,
-                previousByID: previousByID,
-                context: context,
-                items: &newItems,
-                firstItemIndexByID: &firstItemIndexByID,
-                transitions: &transitions,
-                notifications: &notifications,
-                newCount: &newCount,
-                resolvedCount: &resolvedCount,
-                escalatedCount: &escalatedCount,
-                deescalatedCount: &deescalatedCount,
-                rule: evaluateBehindRemote
-            )
-
-            // Rule: Merge conflict
-            evaluateRule(
-                source: .mergeConflict,
-                repo: repo,
-                health: health,
-                cached: cached,
-                previousByID: previousByID,
-                context: context,
-                items: &newItems,
-                firstItemIndexByID: &firstItemIndexByID,
-                transitions: &transitions,
-                notifications: &notifications,
-                newCount: &newCount,
-                resolvedCount: &resolvedCount,
-                escalatedCount: &escalatedCount,
-                deescalatedCount: &deescalatedCount,
-                rule: evaluateMergeConflict
-            )
-
-            // Rule: Upstream missing
-            evaluateRule(
-                source: .upstreamMissing,
-                repo: repo,
-                health: health,
-                cached: cached,
-                previousByID: previousByID,
-                context: context,
-                items: &newItems,
-                firstItemIndexByID: &firstItemIndexByID,
-                transitions: &transitions,
-                notifications: &notifications,
-                newCount: &newCount,
-                resolvedCount: &resolvedCount,
-                escalatedCount: &escalatedCount,
-                deescalatedCount: &deescalatedCount,
-                rule: evaluateUpstreamMissing
-            )
-
-            // Rule: Unavailable / scan failure
-            evaluateRule(
-                source: .unavailable,
-                repo: repo,
-                health: health,
-                cached: cached,
-                previousByID: previousByID,
-                context: context,
-                items: &newItems,
-                firstItemIndexByID: &firstItemIndexByID,
-                transitions: &transitions,
-                notifications: &notifications,
-                newCount: &newCount,
-                resolvedCount: &resolvedCount,
-                escalatedCount: &escalatedCount,
-                deescalatedCount: &deescalatedCount,
-                rule: evaluateUnavailable
-            )
-
-            // Rule: Stale repository (unavailable beyond retention window)
-            evaluateRule(
-                source: .staleRepository,
-                repo: repo,
-                health: health,
-                cached: cached,
-                previousByID: previousByID,
-                context: context,
-                items: &newItems,
-                firstItemIndexByID: &firstItemIndexByID,
-                transitions: &transitions,
-                notifications: &notifications,
-                newCount: &newCount,
-                resolvedCount: &resolvedCount,
-                escalatedCount: &escalatedCount,
-                deescalatedCount: &deescalatedCount,
-                rule: evaluateStaleRepository
-            )
-
-            // Rule: Scan failure (consecutive)
-            evaluateRule(
-                source: .scanFailure,
-                repo: repo,
-                health: health,
-                cached: cached,
-                previousByID: previousByID,
-                context: context,
-                items: &newItems,
-                firstItemIndexByID: &firstItemIndexByID,
-                transitions: &transitions,
-                notifications: &notifications,
-                newCount: &newCount,
-                resolvedCount: &resolvedCount,
-                escalatedCount: &escalatedCount,
-                deescalatedCount: &deescalatedCount,
-                rule: evaluateScanFailure
-            )
-
-            // Rule: Creeping changes
-            evaluateRule(
-                source: .creepingChanges,
-                repo: repo,
-                health: health,
-                cached: cached,
-                previousByID: previousByID,
-                context: context,
-                items: &newItems,
-                firstItemIndexByID: &firstItemIndexByID,
-                transitions: &transitions,
-                notifications: &notifications,
-                newCount: &newCount,
-                resolvedCount: &resolvedCount,
-                escalatedCount: &escalatedCount,
-                deescalatedCount: &deescalatedCount,
-                rule: evaluateCreepingChanges
-            )
-
-            // Rule: Stale activity
-            evaluateRule(
-                source: .staleActivity,
-                repo: repo,
-                health: health,
-                cached: cached,
-                previousByID: previousByID,
-                context: context,
-                items: &newItems,
-                firstItemIndexByID: &firstItemIndexByID,
-                transitions: &transitions,
-                notifications: &notifications,
-                newCount: &newCount,
-                resolvedCount: &resolvedCount,
-                escalatedCount: &escalatedCount,
-                deescalatedCount: &deescalatedCount,
-                rule: evaluateStaleActivity
-            )
-
-            // Rule: Health trend
-            evaluateRule(
-                source: .healthTrend,
-                repo: repo,
-                health: health,
-                cached: cached,
-                previousByID: previousByID,
-                context: context,
-                items: &newItems,
-                firstItemIndexByID: &firstItemIndexByID,
-                transitions: &transitions,
-                notifications: &notifications,
-                newCount: &newCount,
-                resolvedCount: &resolvedCount,
-                escalatedCount: &escalatedCount,
-                deescalatedCount: &deescalatedCount,
-                rule: evaluateHealthTrend
-            )
+            run(.dirtyWorkspace, evaluateDirtyWorkspace)
+            run(.unpushedCommits, evaluateUnpushedCommits)
+            run(.behindRemote, evaluateBehindRemote)
+            run(.mergeConflict, evaluateMergeConflict)
+            run(.upstreamMissing, evaluateUpstreamMissing)
+            run(.unavailable, evaluateUnavailable)
+            run(.staleRepository, evaluateStaleRepository)
+            run(.scanFailure, evaluateScanFailure)
+            run(.creepingChanges, evaluateCreepingChanges)
+            run(.staleActivity, evaluateStaleActivity)
+            run(.healthTrend, evaluateHealthTrend)
         }
 
-        // ── Workspace-level rules ──
         for workspace in context.workspaces {
             let aggregation = context.workspaceAggregations[workspace.id]
+            func run(_ source: PendingItemSource, _ rule: WorkspaceRuleEvaluator) {
+                evaluateWorkspaceRule(source: source, workspace: workspace, aggregation: aggregation,
+                                      previousByID: previousByID, context: context, state: &state, rule: rule)
+            }
 
-            evaluateWorkspaceRule(
-                source: .workspaceDegraded,
-                workspace: workspace,
-                aggregation: aggregation,
-                previousByID: previousByID,
-                context: context,
-                items: &newItems,
-                transitions: &transitions,
-                notifications: &notifications,
-                newCount: &newCount,
-                resolvedCount: &resolvedCount,
-                escalatedCount: &escalatedCount,
-                deescalatedCount: &deescalatedCount,
-                rule: evaluateWorkspaceDegraded
-            )
-
-            evaluateWorkspaceRule(
-                source: .workspaceConflicts,
-                workspace: workspace,
-                aggregation: aggregation,
-                previousByID: previousByID,
-                context: context,
-                items: &newItems,
-                transitions: &transitions,
-                notifications: &notifications,
-                newCount: &newCount,
-                resolvedCount: &resolvedCount,
-                escalatedCount: &escalatedCount,
-                deescalatedCount: &deescalatedCount,
-                rule: evaluateWorkspaceConflicts
-            )
+            run(.workspaceDegraded, evaluateWorkspaceDegraded)
+            run(.workspaceConflicts, evaluateWorkspaceConflicts)
         }
 
         // Post-processing: carry forward firstDetectedAt from previous items
@@ -363,21 +136,21 @@ enum PendingItemEvaluator {
         // category (e.g. .unavailable → .staleRepository).
         // Preserve the values traversal order within each bucket, including nil
         // repository IDs used by workspace items. Only these statuses can resolve.
-        let resolvablePreviousByRepository = newItems.isEmpty ? [:] : Dictionary(grouping: previousByID.values.filter {
+        let resolvablePreviousByRepository = state.items.isEmpty ? [:] : Dictionary(grouping: previousByID.values.filter {
             switch $0.status {
             case .active, .acknowledged, .restored: return true
             case .snoozed, .muted, .resolved, .permanentlyIgnored: return false
             }
         }, by: \.repositoryID)
 
-        for i in newItems.indices {
-            let currentItem = newItems[i]
+        for i in state.items.indices {
+            let currentItem = state.items[i]
             let matchingPrev = resolvablePreviousByRepository[currentItem.repositoryID] ?? []
 
             for prev in matchingPrev {
                 guard prev.source != currentItem.source else { continue }
                 // Record a transition from the old source to the new one.
-                // The old item is not added to newItems — the new item
+                // The old item is not added to state.items — the new item
                 // replaces it with the preserved firstDetectedAt.
                 let transition = PendingItemTransition(
                     from: prev.status,
@@ -387,12 +160,12 @@ enum PendingItemEvaluator {
                     newSeverity: currentItem.severity,
                     reason: "仓库状态从 \(prev.source.displayName) 转为 \(currentItem.source.displayName)"
                 )
-                transitions.append(transition)
-                resolvedCount += 1
+                state.transitions.append(transition)
+                state.resolvedCount += 1
 
                 // Carry forward firstDetectedAt from the previous item
                 if prev.firstDetectedAt != currentItem.firstDetectedAt {
-                    newItems[i] = PendingItem(
+                    state.items[i] = PendingItem(
                         id: currentItem.id,
                         source: currentItem.source,
                         severity: currentItem.severity,
@@ -415,20 +188,20 @@ enum PendingItemEvaluator {
         }
 
         // Sort by severity descending then lastConfirmedAt descending
-        newItems.sort { $0.severity > $1.severity || ($0.severity == $1.severity && $0.lastConfirmedAt > $1.lastConfirmedAt) }
+        state.items.sort { $0.severity > $1.severity || ($0.severity == $1.severity && $0.lastConfirmedAt > $1.lastConfirmedAt) }
 
         let duration = Date().timeIntervalSince(start) * 1000
 
         return PendingItemEvaluationResult(
-            items: newItems,
-            transitions: transitions,
-            notifications: notifications,
+            items: state.items,
+            transitions: state.transitions,
+            notifications: state.notifications,
             repositoryIdsExamined: context.repositories.count,
             workspaceIdsExamined: context.workspaces.count,
-            newItemCount: newCount,
-            resolvedItemCount: resolvedCount,
-            escalatedCount: escalatedCount,
-            deescalatedCount: deescalatedCount,
+            newItemCount: state.newCount,
+            resolvedItemCount: state.resolvedCount,
+            escalatedCount: state.escalatedCount,
+            deescalatedCount: state.deescalatedCount,
             durationMs: duration,
             warnings: warnings
         )
@@ -449,6 +222,19 @@ enum PendingItemEvaluator {
         _ context: PendingItemEvaluationContext
     ) -> PendingItem?
 
+    /// Mutable output shared by rule dispatch and post-processing. The repository
+    /// position index intentionally excludes workspace appends, which are not deduplicated.
+    private struct EvaluationState {
+        var items: [PendingItem] = []
+        var firstItemIndexByID: [String: Int] = [:]
+        var transitions: [PendingItemTransition] = []
+        var notifications: [(PendingItem, PendingItemTransition, String)] = []
+        var newCount = 0
+        var resolvedCount = 0
+        var escalatedCount = 0
+        var deescalatedCount = 0
+    }
+
     private static func evaluateRule(
         source: PendingItemSource,
         repo: RepositorySnapshot,
@@ -456,25 +242,41 @@ enum PendingItemEvaluator {
         cached: CachedHealth?,
         previousByID: [String: PendingItem],
         context: PendingItemEvaluationContext,
-        items: inout [PendingItem],
-        firstItemIndexByID: inout [String: Int],
-        transitions: inout [PendingItemTransition],
-        notifications: inout [(PendingItem, PendingItemTransition, String)],
-        newCount: inout Int,
-        resolvedCount: inout Int,
-        escalatedCount: inout Int,
-        deescalatedCount: inout Int,
+        state: inout EvaluationState,
         rule: RuleEvaluator
     ) {
-        guard let candidate = rule(repo, health, cached, context) else {
+        processRule(candidate: rule(repo, health, cached, context),
+                    expectedID: PendingItem(source: source, severity: .low, repositoryID: repo.id, title: "").id,
+                    isRepositoryRule: true, previousByID: previousByID, context: context, state: &state)
+    }
+
+    private static func evaluateWorkspaceRule(
+        source: PendingItemSource,
+        workspace: Workspace,
+        aggregation: WorkspaceAggregation?,
+        previousByID: [String: PendingItem],
+        context: PendingItemEvaluationContext,
+        state: inout EvaluationState,
+        rule: WorkspaceRuleEvaluator
+    ) {
+        processRule(candidate: rule(workspace, aggregation, context),
+                    expectedID: PendingItem(source: source, severity: .low, workspaceID: workspace.id, title: "").id,
+                    isRepositoryRule: false, previousByID: previousByID, context: context, state: &state)
+    }
+
+    // Repository rules also detect explanation changes and deduplicate candidates;
+    // workspace rules retain every append and only compare severity/title.
+    private static func processRule(
+        candidate: PendingItem?,
+        expectedID: @autoclosure () -> String,
+        isRepositoryRule: Bool,
+        previousByID: [String: PendingItem],
+        context: PendingItemEvaluationContext,
+        state: inout EvaluationState
+    ) {
+        guard let candidate else {
             // Condition not present — check if previous item needs resolution
-            let expectedID = PendingItem(
-                source: source,
-                severity: .low,
-                repositoryID: repo.id,
-                title: ""
-            ).id
-            if let previous = previousByID[expectedID],
+            if let previous = previousByID[expectedID()],
                previous.status == .active || previous.status == .restored || previous.status == .acknowledged {
                 let transition = PendingItemStatusTransition.evaluate(
                     current: previous,
@@ -484,17 +286,17 @@ enum PendingItemEvaluator {
                     now: context.now
                 )
                 if transition.to == .resolved {
-                    resolvedCount += 1
+                    state.resolvedCount += 1
                 }
-                transitions.append(transition)
+                state.transitions.append(transition)
                 var resolved = previous
                 resolved.status = transition.to
                 resolved.lastConfirmedAt = DateFormatting.nowISO()
                 resolved.lastTransition = transition
-                if firstItemIndexByID[resolved.id] == nil {
-                    firstItemIndexByID[resolved.id] = items.count
+                if isRepositoryRule && state.firstItemIndexByID[resolved.id] == nil {
+                    state.firstItemIndexByID[resolved.id] = state.items.count
                 }
-                items.append(resolved)
+                state.items.append(resolved)
             }
             return
         }
@@ -505,7 +307,7 @@ enum PendingItemEvaluator {
         if let prev = previous {
             conditionChanged = prev.severity != candidate.severity
                 || prev.title != candidate.title
-                || prev.explanation != candidate.explanation
+                || (isRepositoryRule && prev.explanation != candidate.explanation)
         } else {
             conditionChanged = true
         }
@@ -518,20 +320,16 @@ enum PendingItemEvaluator {
             now: context.now
         )
 
-        transitions.append(transition)
+        state.transitions.append(transition)
 
-        if transition.from == .resolved || previous == nil {
-            if previous == nil {
-                newCount += 1
-            }
-        }
+        if previous == nil { state.newCount += 1 }
         if transition.severityChanged {
             if let prevSeverity = transition.previousSeverity,
                let newSeverity = transition.newSeverity,
                newSeverity > prevSeverity {
-                escalatedCount += 1
+                state.escalatedCount += 1
             } else {
-                deescalatedCount += 1
+                state.deescalatedCount += 1
             }
         }
 
@@ -558,124 +356,22 @@ enum PendingItemEvaluator {
         }
 
         // Deduplicate: if an item with the same ID already exists, keep the one with more evidence
-        if let existingIdx = firstItemIndexByID[finalItem.id] {
-            let existing = items[existingIdx]
+        if !isRepositoryRule {
+            state.items.append(finalItem)
+        } else if let existingIdx = state.firstItemIndexByID[finalItem.id] {
+            let existing = state.items[existingIdx]
             if finalItem.evidence.count > existing.evidence.count {
-                items[existingIdx] = finalItem
+                state.items[existingIdx] = finalItem
             }
         } else {
-            firstItemIndexByID[finalItem.id] = items.count
-            items.append(finalItem)
+            state.firstItemIndexByID[finalItem.id] = state.items.count
+            state.items.append(finalItem)
         }
 
         // Check notification
         if transition.to.allowsNotification &&
             (previous == nil || transition.from != transition.to || transition.severityChanged) {
-            notifications.append((finalItem, transition, transition.reason))
-        }
-    }
-
-    private static func evaluateWorkspaceRule(
-        source: PendingItemSource,
-        workspace: Workspace,
-        aggregation: WorkspaceAggregation?,
-        previousByID: [String: PendingItem],
-        context: PendingItemEvaluationContext,
-        items: inout [PendingItem],
-        transitions: inout [PendingItemTransition],
-        notifications: inout [(PendingItem, PendingItemTransition, String)],
-        newCount: inout Int,
-        resolvedCount: inout Int,
-        escalatedCount: inout Int,
-        deescalatedCount: inout Int,
-        rule: WorkspaceRuleEvaluator
-    ) {
-        guard let candidate = rule(workspace, aggregation, context) else {
-            let expectedID = PendingItem(
-                source: source,
-                severity: .low,
-                workspaceID: workspace.id,
-                title: ""
-            ).id
-            if let previous = previousByID[expectedID],
-               previous.status == .active || previous.status == .restored || previous.status == .acknowledged {
-                let transition = PendingItemStatusTransition.evaluate(
-                    current: previous,
-                    conditionStillActive: false,
-                    conditionChanged: false,
-                    newSeverity: nil,
-                    now: context.now
-                )
-                if transition.to == .resolved {
-                    resolvedCount += 1
-                }
-                transitions.append(transition)
-                var resolved = previous
-                resolved.status = transition.to
-                resolved.lastConfirmedAt = DateFormatting.nowISO()
-                resolved.lastTransition = transition
-                items.append(resolved)
-            }
-            return
-        }
-
-        let previous = previousByID[candidate.id]
-        let conditionChanged: Bool
-        if let prev = previous {
-            conditionChanged = prev.severity != candidate.severity
-                || prev.title != candidate.title
-        } else {
-            conditionChanged = true
-        }
-
-        let transition = PendingItemStatusTransition.evaluate(
-            current: previous ?? candidate,
-            conditionStillActive: true,
-            conditionChanged: conditionChanged,
-            newSeverity: candidate.severity,
-            now: context.now
-        )
-
-        transitions.append(transition)
-
-        if previous == nil { newCount += 1 }
-        if transition.severityChanged {
-            if let prevSeverity = transition.previousSeverity,
-               let newSeverity = transition.newSeverity,
-               newSeverity > prevSeverity {
-                escalatedCount += 1
-            } else {
-                deescalatedCount += 1
-            }
-        }
-
-        var finalItem = candidate
-        if let prev = previous {
-            finalItem = PendingItem(
-                id: candidate.id,
-                source: candidate.source,
-                severity: candidate.severity,
-                repositoryID: candidate.repositoryID,
-                repositoryName: candidate.repositoryName,
-                workspaceID: candidate.workspaceID,
-                workspaceName: candidate.workspaceName,
-                title: candidate.title,
-                explanation: candidate.explanation,
-                evidence: candidate.evidence,
-                firstDetectedAt: prev.firstDetectedAt,
-                lastConfirmedAt: DateFormatting.nowISO(),
-                status: transition.to,
-                snoozedUntil: transition.to == .snoozed ? prev.snoozedUntil : nil,
-                duration: candidate.duration,
-                lastTransition: transition
-            )
-        }
-
-        items.append(finalItem)
-
-        if transition.to.allowsNotification &&
-            (previous == nil || transition.from != transition.to || transition.severityChanged) {
-            notifications.append((finalItem, transition, transition.reason))
+            state.notifications.append((finalItem, transition, transition.reason))
         }
     }
 
