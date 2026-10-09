@@ -1874,6 +1874,399 @@ struct CommitReadinessEngineTests {
         #expect(ids(for: .errors) == ["retained"])
     }
 
+    @Test func repositoryListQueryRecentActivityMatchesBaselineComparator() {
+        let repositories = repositoryOrderingFixture()
+        let optimized = RepositoryListQuery.apply(
+            to: repositories,
+            searchText: "",
+            filter: .all,
+            sortOrder: .recentActivity
+        )
+        #expect(optimized.map(\.id) == referenceRecentActivityOrder(repositories).map(\.id))
+    }
+
+    @Test func repositorySorterMatchesBaselineActionQueueOrder() {
+        let repositories = repositoryOrderingFixture()
+        #expect(
+            RepositorySorter.sort(repositories).map(\.id)
+                == referenceRepositorySorterOrder(repositories).map(\.id)
+        )
+    }
+
+    @Test func repositoryDecisionOrderingMatchesBaselineComparator() {
+        let repositories = repositoryOrderingFixture()
+        let parser = DateFormatting.TimestampParser()
+        let keys = repositories.map {
+            RepositoryDecisionOrdering.Key(snapshot: $0, parser: parser)
+        }
+
+        var firstMismatch: String?
+        outer: for (lhsIndex, lhs) in repositories.enumerated() {
+            for (rhsIndex, rhs) in repositories.enumerated() where lhsIndex != rhsIndex {
+                let reference = referenceDecisionPrecedes(lhs, rhs)
+                let keyed = RepositoryDecisionOrdering.precedes(
+                    keys[lhsIndex], keys[rhsIndex]
+                )
+                let snapshot = RepositoryDecisionOrdering.precedes(lhs, rhs)
+                if keyed != reference || snapshot != reference {
+                    firstMismatch = "\(lhs.id) vs \(rhs.id)"
+                    break outer
+                }
+            }
+        }
+        #expect(firstMismatch == nil, "ordering diverged for \(firstMismatch ?? "")")
+    }
+
+    @Test func repositoryListSortKeepsOriginalOrderForFullyEqualKeys() {
+        let repositories = [
+            snapshot(id: "first", name: "Same", lastActivityAt: "2026-07-01T12:00:00Z"),
+            snapshot(id: "second", name: "Same", lastActivityAt: "2026-07-01T12:00:00Z"),
+            snapshot(id: "third", name: "Same", lastActivityAt: "2026-07-01T12:00:00Z")
+        ]
+
+        #expect(RepositoryListQuery.apply(
+            to: repositories,
+            searchText: "",
+            filter: .all,
+            sortOrder: .recentActivity
+        ).map(\.id) == ["first", "second", "third"])
+        #expect(RepositorySorter.sort(repositories).map(\.id) == ["first", "second", "third"])
+    }
+
+    @Test func repositoryListRecentActivityBreaksEqualDatesByName() {
+        let repositories = [
+            snapshot(id: "zeta", name: "Zeta", lastActivityAt: "2026-07-01T12:00:00Z"),
+            snapshot(id: "alpha", name: "Alpha", lastActivityAt: "2026-07-01T12:00:00Z"),
+            snapshot(id: "older", name: "Older", lastActivityAt: "2026-07-01T11:00:00Z")
+        ]
+
+        #expect(RepositoryListQuery.apply(
+            to: repositories,
+            searchText: "",
+            filter: .all,
+            sortOrder: .recentActivity
+        ).map(\.id) == ["alpha", "zeta", "older"])
+    }
+
+    @Test func mostRecentActivityPrefersLastActivityAtOnEqualDates() throws {
+        let now = try #require(DateFormatting.date(from: "2026-08-01T00:00:00Z"))
+        let parser = DateFormatting.TimestampParser()
+        let equalDate = "2026-07-31T12:00:00Z"
+
+        // Ties keep lastActivityAt, matching the previous first-wins behavior.
+        #expect(RepositorySnapshot.mostRecentActivity(
+            lastActivityAt: equalDate,
+            lastChangedAt: equalDate,
+            now: now,
+            parser: parser
+        )?.timestamp == equalDate)
+
+        // A newer lastChangedAt still wins over an older lastActivityAt.
+        #expect(RepositorySnapshot.mostRecentActivity(
+            lastActivityAt: "2026-07-30T12:00:00Z",
+            lastChangedAt: "2026-07-31T18:00:00Z",
+            now: now,
+            parser: parser
+        )?.timestamp == "2026-07-31T18:00:00Z")
+
+        // Implausible future timestamps stay filtered.
+        #expect(RepositorySnapshot.mostRecentActivity(
+            lastActivityAt: "2027-01-01T00:00:00Z",
+            lastChangedAt: nil,
+            now: now,
+            parser: parser
+        ) == nil)
+    }
+
+    @Test func mostRecentActivityAcceptsExactlySixtySecondsInFuture() throws {
+        let now = try #require(DateFormatting.date(from: "2026-08-01T00:00:00Z"))
+        let parser = DateFormatting.TimestampParser()
+        let fallback = "2026-07-31T23:59:00Z"
+        let cases = [
+            ("2026-08-01T00:00:59.999Z", true),
+            ("2026-08-01T00:01:00Z", true),
+            ("2026-08-01T00:01:00.000Z", true),
+            ("2026-08-01T00:01:00.001Z", false)
+        ]
+
+        for (timestamp, accepted) in cases {
+            // Exercise either source, rejection with no fallback, and rejection
+            // with a valid older source. The fixed clock avoids wall-clock races.
+            for candidateIsActivity in [true, false] {
+                for olderSource in [nil, Optional(fallback)] {
+                    let activity = candidateIsActivity ? timestamp : olderSource
+                    let changed = candidateIsActivity ? olderSource : timestamp
+                    let expected = accepted ? timestamp : olderSource
+                    let result = RepositorySnapshot.mostRecentActivity(
+                        lastActivityAt: activity, lastChangedAt: changed,
+                        now: now, parser: parser
+                    )
+                    #expect(result?.timestamp == expected)
+                    #expect(result?.date == expected.flatMap { parser.date(from: $0) })
+                    #expect(RepositorySnapshot.mostRecentActivityTimestamp(
+                        lastActivityAt: activity, lastChangedAt: changed, now: now
+                    ) == expected)
+                }
+            }
+        }
+    }
+
+    @Test func repositoryDecisionOrderingPreservesNegativeCountOrdering() {
+        let repositories = [
+            snapshot(id: "negative", name: "Alpha", ahead: -1, behind: -1),
+            snapshot(id: "zero", name: "Zeta", ahead: 0, behind: 0)
+        ]
+        #expect(RepositorySorter.sort(repositories).map(\.id)
+            == referenceRepositorySorterOrder(repositories).map(\.id))
+    }
+
+    @Test func mostRecentActivityTimestampMatchesParsedCompanion() throws {
+        let now = try #require(DateFormatting.date(from: "2026-08-01T00:00:00Z"))
+        let parser = DateFormatting.TimestampParser()
+        let candidates: [String?] = [
+            nil,
+            "2026-07-31T12:00:00Z",
+            "2026-07-31T12:00:00.250Z",
+            "not-a-timestamp",
+            "2027-01-01T00:00:00Z"
+        ]
+
+        for lastActivityAt in candidates {
+            for lastChangedAt in candidates {
+                let legacy = RepositorySnapshot.mostRecentActivityTimestamp(
+                    lastActivityAt: lastActivityAt,
+                    lastChangedAt: lastChangedAt,
+                    now: now
+                )
+                let parsed = RepositorySnapshot.mostRecentActivity(
+                    lastActivityAt: lastActivityAt,
+                    lastChangedAt: lastChangedAt,
+                    now: now,
+                    parser: parser
+                )
+                #expect(legacy == parsed?.timestamp)
+            }
+        }
+    }
+
+    /// Deterministic fixture covering the ordering branches exercised by list
+    /// sorting: pins, both ISO-8601 formats, the `lastChangedAt` fallback,
+    /// equal and missing timestamps, names that reverse the date order,
+    /// non-current data sources, and the implausible-future filter.
+    private func repositoryOrderingFixture() -> [RepositorySnapshot] {
+        (0..<90).map { index in
+            let day = String(format: "%02d", index % 28 + 1)
+            let hour = String(format: "%02d", index % 24)
+            let activity = "2026-07-\(day)T\(hour):00:00Z"
+            let changed = "2026-07-\(day)T\(hour):30:00Z"
+            let fractional = "2026-07-\(day)T\(hour):15:30.500Z"
+            let sharedDate = "2026-06-01T00:00:00Z"
+            let futureDate = "2027-01-01T00:00:00Z"
+            let name: String
+            switch index % 5 {
+            case 0: name = "Zeta \(index)"
+            case 1: name = "alpha \(index)"
+            case 2: name = "Café \(index)"
+            case 3: name = "汉字仓库 \(index)"
+            default: name = "repo \(index)"
+            }
+            let scanDay = String(format: "%02d", index % 20 + 1)
+            let lastScannedAt = "2026-07-\(scanDay)T08:00:00Z"
+            let status: RepositoryStatus = index % 9 == 0
+                ? .error
+                : (index % 3 == 0 ? .clean : .changed)
+            let dataSource: RepositoryDataSource?
+            switch index % 4 {
+            case 0: dataSource = .lastSuccessful
+            case 3: dataSource = .unknown
+            default: dataSource = .current
+            }
+            let errorMessage = status == .error ? "读取失败" : nil
+            let isPinned = index % 7 == 0
+            let risk = [RiskLevel.low, .medium, .high][index % 3]
+
+            switch index % 6 {
+            case 0:
+                return snapshot(
+                    id: "fixture-\(index)", name: name,
+                    modified: index % 4, added: index % 3, deleted: index % 2,
+                    untracked: index % 3, ahead: index % 3, behind: index % 2,
+                    hasUpstream: index % 2 == 0, risk: risk, status: status,
+                    lastScannedAt: lastScannedAt, lastChangedAt: nil,
+                    lastActivityAt: activity, dataSource: dataSource,
+                    errorMessage: errorMessage, isPinned: isPinned
+                )
+            case 1:
+                return snapshot(
+                    id: "fixture-\(index)", name: name,
+                    modified: index % 4, added: index % 3, deleted: index % 2,
+                    untracked: index % 3, ahead: index % 3, behind: index % 2,
+                    hasUpstream: index % 2 == 0, risk: risk, status: status,
+                    lastScannedAt: lastScannedAt, lastChangedAt: changed,
+                    lastActivityAt: nil, dataSource: dataSource,
+                    errorMessage: errorMessage, isPinned: isPinned
+                )
+            case 2:
+                return snapshot(
+                    id: "fixture-\(index)", name: name,
+                    modified: index % 4, added: index % 3, deleted: index % 2,
+                    untracked: index % 3, ahead: index % 3, behind: index % 2,
+                    hasUpstream: index % 2 == 0, risk: risk, status: status,
+                    lastScannedAt: lastScannedAt, lastChangedAt: sharedDate,
+                    lastActivityAt: sharedDate, dataSource: dataSource,
+                    errorMessage: errorMessage, isPinned: isPinned
+                )
+            case 3:
+                return snapshot(
+                    id: "fixture-\(index)", name: name,
+                    modified: index % 4, added: index % 3, deleted: index % 2,
+                    untracked: index % 3, ahead: index % 3, behind: index % 2,
+                    hasUpstream: index % 2 == 0, risk: risk, status: status,
+                    lastScannedAt: lastScannedAt, lastChangedAt: nil,
+                    lastActivityAt: nil, dataSource: dataSource,
+                    errorMessage: errorMessage, isPinned: isPinned
+                )
+            case 4:
+                return snapshot(
+                    id: "fixture-\(index)", name: name,
+                    modified: index % 4, added: index % 3, deleted: index % 2,
+                    untracked: index % 3, ahead: index % 3, behind: index % 2,
+                    hasUpstream: index % 2 == 0, risk: risk, status: status,
+                    lastScannedAt: lastScannedAt, lastChangedAt: fractional,
+                    lastActivityAt: futureDate, dataSource: dataSource,
+                    errorMessage: errorMessage, isPinned: isPinned
+                )
+            default:
+                return snapshot(
+                    id: "fixture-\(index)", name: name,
+                    modified: index % 4, added: index % 3, deleted: index % 2,
+                    untracked: index % 3, ahead: index % 3, behind: index % 2,
+                    hasUpstream: index % 2 == 0, risk: risk, status: status,
+                    lastScannedAt: lastScannedAt, lastChangedAt: changed,
+                    lastActivityAt: activity, dataSource: dataSource,
+                    errorMessage: errorMessage, isPinned: isPinned
+                )
+            }
+        }
+    }
+
+    /// Independent copy of the pre-optimization recent-activity ordering,
+    /// kept in the test so the optimized query is pinned against the original
+    /// pairwise decisions rather than against itself.
+    private func referenceRecentActivityOrder(
+        _ repositories: [RepositorySnapshot]
+    ) -> [RepositorySnapshot] {
+        func activityDate(_ repository: RepositorySnapshot) -> Date? {
+            guard let timestamp = RepositorySnapshot.mostRecentActivityTimestamp(
+                lastActivityAt: repository.lastActivityAt,
+                lastChangedAt: repository.lastChangedAt
+            ) else { return nil }
+            return DateFormatting.date(from: timestamp)
+        }
+        func precedes(_ lhs: RepositorySnapshot, _ rhs: RepositorySnapshot) -> Bool {
+            if lhs.isPinned != rhs.isPinned { return lhs.isPinned }
+            let lhsDate = activityDate(lhs)
+            let rhsDate = activityDate(rhs)
+            if let lhsDate, let rhsDate, lhsDate != rhsDate { return lhsDate > rhsDate }
+            if lhsDate != nil && rhsDate == nil { return true }
+            if rhsDate != nil && lhsDate == nil { return false }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+        return repositories.enumerated().sorted { lhs, rhs in
+            if precedes(lhs.element, rhs.element) { return true }
+            if precedes(rhs.element, lhs.element) { return false }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+    }
+
+    /// Independent copy of the pre-optimization action-queue ordering.
+    private func referenceRepositorySorterOrder(
+        _ repositories: [RepositorySnapshot]
+    ) -> [RepositorySnapshot] {
+        repositories.enumerated().sorted { lhs, rhs in
+            if referenceDecisionPrecedes(lhs.element, rhs.element) { return true }
+            if referenceDecisionPrecedes(rhs.element, lhs.element) { return false }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+    }
+
+    private func referenceDecisionPrecedes(
+        _ lhs: RepositorySnapshot,
+        _ rhs: RepositorySnapshot
+    ) -> Bool {
+        if lhs.isPinned != rhs.isPinned { return lhs.isPinned }
+
+        let lhsDecision = lhs.decision
+        let rhsDecision = rhs.decision
+        if lhsDecision.sortPriority != rhsDecision.sortPriority {
+            return lhsDecision.sortPriority < rhsDecision.sortPriority
+        }
+
+        let lhsReadiness = referenceReadinessPriority(lhsDecision.commitReadiness.level)
+        let rhsReadiness = referenceReadinessPriority(rhsDecision.commitReadiness.level)
+        if lhsReadiness != rhsReadiness { return lhsReadiness < rhsReadiness }
+
+        let lhsSource = referenceSourcePriority(lhsDecision.dataTrust)
+        let rhsSource = referenceSourcePriority(rhsDecision.dataTrust)
+        if lhsSource != rhsSource { return lhsSource < rhsSource }
+
+        if lhsDecision.dataTrust != .current || rhsDecision.dataTrust != .current {
+            let lhsAttempt = referenceDate(lhs.lastScannedAt)
+            let rhsAttempt = referenceDate(rhs.lastScannedAt)
+            if let lhsAttempt, let rhsAttempt, lhsAttempt != rhsAttempt {
+                return lhsAttempt > rhsAttempt
+            }
+            if lhsAttempt != nil && rhsAttempt == nil { return true }
+            if rhsAttempt != nil && lhsAttempt == nil { return false }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+
+        if lhs.risk != rhs.risk { return lhs.risk > rhs.risk }
+        if (lhs.aheadCount ?? 0) != (rhs.aheadCount ?? 0) {
+            return (lhs.aheadCount ?? 0) > (rhs.aheadCount ?? 0)
+        }
+        if lhs.changedFileCount != rhs.changedFileCount {
+            return lhs.changedFileCount > rhs.changedFileCount
+        }
+        if (lhs.behindCount ?? 0) != (rhs.behindCount ?? 0) {
+            return (lhs.behindCount ?? 0) > (rhs.behindCount ?? 0)
+        }
+
+        let lhsActivity = referenceDate(lhs.lastActivityAt ?? lhs.lastChangedAt)
+        let rhsActivity = referenceDate(rhs.lastActivityAt ?? rhs.lastChangedAt)
+        if let lhsActivity, let rhsActivity, lhsActivity != rhsActivity {
+            return lhsActivity > rhsActivity
+        }
+        if lhsActivity != nil && rhsActivity == nil { return true }
+        if rhsActivity != nil && lhsActivity == nil { return false }
+        return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+    }
+
+    private func referenceReadinessPriority(_ level: CommitReadinessLevel) -> Int {
+        switch level {
+        case .unknown: return 0
+        case .dirty: return 1
+        case .review: return 2
+        case .ready: return 3
+        case .idle: return 4
+        }
+    }
+
+    private func referenceSourcePriority(_ source: RepositoryDataSource) -> Int {
+        switch source {
+        case .unknown: return 0
+        case .lastSuccessful: return 1
+        case .current: return 2
+        }
+    }
+
+    private func referenceDate(_ string: String?) -> Date? {
+        guard let string else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: string) ?? ISO8601DateFormatter().date(from: string)
+    }
+
     @Test func repositoryListPreferencesRoundTripAndRecoverFromInvalidData() throws {
         let suiteName = "DevPulseTests.RepositoryListPreferences.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))

@@ -1114,15 +1114,36 @@ extension RepositorySnapshot {
         lastChangedAt: String?,
         now: Date = Date()
     ) -> String? {
-        [lastActivityAt, lastChangedAt]
-            .compactMap { $0 }
-            .compactMap { timestamp -> (String, Date)? in
-                guard let date = DateFormatting.date(from: timestamp),
-                      now.timeIntervalSince(date) >= -60 else { return nil }
-                return (timestamp, date)
+        mostRecentActivity(
+            lastActivityAt: lastActivityAt,
+            lastChangedAt: lastChangedAt,
+            now: now,
+            parser: DateFormatting.TimestampParser()
+        )?.timestamp
+    }
+
+    /// Parsed companion to `mostRecentActivityTimestamp` for callers that also
+    /// need the winning date, or that process a batch of snapshots and can reuse
+    /// one `parser` instead of building formatters for every timestamp.
+    ///
+    /// Ties keep `lastActivityAt`, matching the previous first-wins `.max`
+    /// behavior, so the selected timestamp string is unchanged.
+    static func mostRecentActivity(
+        lastActivityAt: String?,
+        lastChangedAt: String?,
+        now: Date = Date(),
+        parser: DateFormatting.TimestampParser
+    ) -> (timestamp: String, date: Date)? {
+        var winner: (timestamp: String, date: Date)?
+        for candidate in [lastActivityAt, lastChangedAt] {
+            guard let timestamp = candidate,
+                  let date = parser.date(from: timestamp),
+                  now.timeIntervalSince(date) >= -60 else { continue }
+            if winner == nil || winner!.date < date {
+                winner = (timestamp, date)
             }
-            .max { $0.1 < $1.1 }?
-            .0
+        }
+        return winner
     }
 }
 

@@ -729,6 +729,47 @@ enum CommitReadinessEngine {
 }
 
 enum RepositoryDecisionOrdering {
+    /// Precomputed ordering inputs for one snapshot.
+    ///
+    /// Sorting evaluates `precedes` in both directions per comparison, so
+    /// rebuilding each snapshot's decision and re-parsing its timestamps inside
+    /// the comparator dominated large-list sorts. Resolving the key once per
+    /// repository keeps every pairwise decision unchanged.
+    struct Key {
+        let isPinned: Bool
+        let sortPriority: Int
+        let readinessPriority: Int
+        let sourcePriority: Int
+        let dataTrust: RepositoryDataSource
+        let lastScannedDate: Date?
+        let risk: RiskLevel
+        let aheadCount: Int
+        let changedFileCount: Int
+        let behindCount: Int
+        let activityDate: Date?
+        let name: String
+
+        init(snapshot: RepositorySnapshot, parser: DateFormatting.TimestampParser) {
+            let decision = snapshot.decision
+            isPinned = snapshot.isPinned
+            sortPriority = decision.sortPriority
+            readinessPriority = RepositoryDecisionOrdering.readinessPriority(
+                decision.commitReadiness.level
+            )
+            sourcePriority = RepositoryDecisionOrdering.sourcePriority(decision.dataTrust)
+            dataTrust = decision.dataTrust
+            lastScannedDate = parser.date(from: snapshot.lastScannedAt)
+            risk = snapshot.risk
+            aheadCount = snapshot.aheadCount ?? 0
+            changedFileCount = snapshot.changedFileCount
+            behindCount = snapshot.behindCount ?? 0
+            activityDate = (snapshot.lastActivityAt ?? snapshot.lastChangedAt).flatMap {
+                parser.date(from: $0)
+            }
+            name = snapshot.name
+        }
+    }
+
     static func precedes(
         _ lhs: RepositorySnapshot,
         _ rhs: RepositorySnapshot,
@@ -790,6 +831,70 @@ enum RepositoryDecisionOrdering {
         if lhsActivity != nil && rhsActivity == nil { return true }
         if rhsActivity != nil && lhsActivity == nil { return false }
         return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+    }
+
+    /// Batch variant used when many snapshots are compared repeatedly. The
+    /// single-shot overload above stays allocation-lean for callers that resolve
+    /// on an early branch; this one resolves the key once per snapshot.
+    static func precedes(
+        _ lhs: Key,
+        _ rhs: Key,
+        prioritizePins: Bool = true
+    ) -> Bool {
+        if prioritizePins, lhs.isPinned != rhs.isPinned {
+            return lhs.isPinned
+        }
+
+        if lhs.sortPriority != rhs.sortPriority {
+            return lhs.sortPriority < rhs.sortPriority
+        }
+
+        if lhs.readinessPriority != rhs.readinessPriority {
+            return lhs.readinessPriority < rhs.readinessPriority
+        }
+
+        if lhs.sourcePriority != rhs.sourcePriority {
+            return lhs.sourcePriority < rhs.sourcePriority
+        }
+
+        // Retained values are useful for display, but they are not current
+        // business facts and must not influence action-queue ranking.
+        if lhs.dataTrust != .current || rhs.dataTrust != .current {
+            if let lhsAttempt = lhs.lastScannedDate,
+               let rhsAttempt = rhs.lastScannedDate,
+               lhsAttempt != rhsAttempt {
+                return lhsAttempt > rhsAttempt
+            }
+            if lhs.lastScannedDate != nil && rhs.lastScannedDate == nil { return true }
+            if rhs.lastScannedDate != nil && lhs.lastScannedDate == nil { return false }
+            return namePrecedes(lhs, rhs)
+        }
+
+        if lhs.risk != rhs.risk {
+            return lhs.risk > rhs.risk
+        }
+        if lhs.aheadCount != rhs.aheadCount {
+            return lhs.aheadCount > rhs.aheadCount
+        }
+        if lhs.changedFileCount != rhs.changedFileCount {
+            return lhs.changedFileCount > rhs.changedFileCount
+        }
+        if lhs.behindCount != rhs.behindCount {
+            return lhs.behindCount > rhs.behindCount
+        }
+
+        if let lhsActivity = lhs.activityDate,
+           let rhsActivity = rhs.activityDate,
+           lhsActivity != rhsActivity {
+            return lhsActivity > rhsActivity
+        }
+        if lhs.activityDate != nil && rhs.activityDate == nil { return true }
+        if rhs.activityDate != nil && lhs.activityDate == nil { return false }
+        return namePrecedes(lhs, rhs)
+    }
+
+    private static func namePrecedes(_ lhs: Key, _ rhs: Key) -> Bool {
+        lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
     }
 
     private static func readinessPriority(_ level: CommitReadinessLevel) -> Int {

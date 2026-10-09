@@ -160,6 +160,18 @@ enum RepositoryListQuery {
         return sort(filtered, by: sortOrder)
     }
 
+    /// Ordering inputs for one repository, resolved once per query.
+    ///
+    /// The previous comparator re-parsed ISO-8601 timestamps on every pairwise
+    /// comparison, and the stable wrapper evaluated the comparator twice per
+    /// comparison. Precomputing dates removes that repeated parsing; name
+    /// collation and pairwise ordering decisions remain unchanged.
+    private struct OrderingKey {
+        let isPinned: Bool
+        let name: String
+        let activityDate: Date?
+    }
+
     private static func sort(
         _ repositories: [RepositorySnapshot],
         by sortOrder: RepositoryListSortOrder
@@ -168,21 +180,58 @@ enum RepositoryListQuery {
         case .smart:
             return RepositorySorter.sort(repositories)
         case .recentActivity:
-            return stableSort(repositories) { lhs, rhs in
+            // One parser and one reference instant for the whole query: every
+            // timestamp is parsed once and the implausible-future guard is
+            // applied consistently across repositories.
+            let parser = DateFormatting.TimestampParser()
+            let now = Date()
+            let keys = repositories.map { repository in
+                OrderingKey(
+                    isPinned: repository.isPinned,
+                    name: repository.name,
+                    activityDate: RepositorySnapshot.mostRecentActivity(
+                        lastActivityAt: repository.lastActivityAt,
+                        lastChangedAt: repository.lastChangedAt,
+                        now: now,
+                        parser: parser
+                    )?.date
+                )
+            }
+            return stableSort(repositories, keys: keys) { lhs, rhs in
                 if lhs.isPinned != rhs.isPinned { return lhs.isPinned }
-                let lhsDate = activityDate(lhs)
-                let rhsDate = activityDate(rhs)
-                if let lhsDate, let rhsDate, lhsDate != rhsDate { return lhsDate > rhsDate }
-                if lhsDate != nil && rhsDate == nil { return true }
-                if rhsDate != nil && lhsDate == nil { return false }
-                return namePrecedes(lhs, rhs)
+                if let lhsDate = lhs.activityDate,
+                   let rhsDate = rhs.activityDate,
+                   lhsDate != rhsDate {
+                    return lhsDate > rhsDate
+                }
+                if lhs.activityDate != nil && rhs.activityDate == nil { return true }
+                if rhs.activityDate != nil && lhs.activityDate == nil { return false }
+                return namePrecedes(lhs.name, rhs.name)
             }
         case .name:
             return stableSort(repositories) { lhs, rhs in
                 if lhs.isPinned != rhs.isPinned { return lhs.isPinned }
-                return namePrecedes(lhs, rhs)
+                return namePrecedes(lhs.name, rhs.name)
             }
         }
+    }
+
+    /// Stable sort over precomputed keys. `precedes` is still evaluated in both
+    /// directions — exactly like the snapshot-based comparator it replaces — so
+    /// the pairwise outcomes, and therefore the resulting order, are unchanged.
+    private static func stableSort(
+        _ repositories: [RepositorySnapshot],
+        keys: [OrderingKey],
+        precedes: (OrderingKey, OrderingKey) -> Bool
+    ) -> [RepositorySnapshot] {
+        zip(repositories, keys)
+            .enumerated()
+            .sorted { lhs, rhs in
+                if precedes(lhs.element.1, rhs.element.1) { return true }
+                if precedes(rhs.element.1, lhs.element.1) { return false }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element.0)
     }
 
     private static func stableSort(
@@ -196,19 +245,8 @@ enum RepositoryListQuery {
         }.map(\.element)
     }
 
-    private static func activityDate(_ repository: RepositorySnapshot) -> Date? {
-        guard let timestamp = RepositorySnapshot.mostRecentActivityTimestamp(
-            lastActivityAt: repository.lastActivityAt,
-            lastChangedAt: repository.lastChangedAt
-        ) else { return nil }
-        return DateFormatting.date(from: timestamp)
-    }
-
-    private static func namePrecedes(
-        _ lhs: RepositorySnapshot,
-        _ rhs: RepositorySnapshot
-    ) -> Bool {
-        lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+    private static func namePrecedes(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.localizedStandardCompare(rhs) == .orderedAscending
     }
 
     private static func matches(_ candidate: String, query: String) -> Bool {
@@ -228,12 +266,18 @@ enum RepositorySorter {
     /// under `RepositoryDecisionOrdering.precedes`, their original relative
     /// order is preserved. This prevents UI flickering between refreshes when
     /// repos rank identically on all meaningful criteria.
+    /// Ordering keys are resolved once per repository. `precedes` is evaluated
+    /// in both directions on every comparison, and rebuilding each snapshot's
+    /// decision engine result and timestamps per call dominated large-list
+    /// sorting.
     static func sort(_ repos: [RepositorySnapshot]) -> [RepositorySnapshot] {
-        repos.enumerated().sorted { lhs, rhs in
-            let (lIdx, lRepo) = lhs
-            let (rIdx, rRepo) = rhs
-            if RepositoryDecisionOrdering.precedes(lRepo, rRepo) { return true }
-            if RepositoryDecisionOrdering.precedes(rRepo, lRepo) { return false }
+        let parser = DateFormatting.TimestampParser()
+        let keys = repos.map { RepositoryDecisionOrdering.Key(snapshot: $0, parser: parser) }
+        return repos.enumerated().sorted { lhs, rhs in
+            let (lIdx, _) = lhs
+            let (rIdx, _) = rhs
+            if RepositoryDecisionOrdering.precedes(keys[lIdx], keys[rIdx]) { return true }
+            if RepositoryDecisionOrdering.precedes(keys[rIdx], keys[lIdx]) { return false }
             return lIdx < rIdx
         }.map(\.element)
     }
