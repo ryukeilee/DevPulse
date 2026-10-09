@@ -1,0 +1,1330 @@
+{
+  "baseline": "08f33ba",
+  "cpu_scope": "RUSAGE_SELF user + system; excludes Git child CPU",
+  "environment": {
+    "machine": "arm64",
+    "sw_vers": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434",
+    "swift": "Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)\nTarget: arm64-apple-macosx27.0.0"
+  },
+  "pairs": [
+    {
+      "baseline": {
+        "cold_refresh": {
+          "cpu_ms": 181.21500000000003,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 181.3021666603163
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 57.36400000000003,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 61.5950416540727
+        },
+        "concurrency_probe": {
+          "cpu_ms": 56.79599999999999,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 312.83312500454485
+        },
+        "incremental_refresh": {
+          "cpu_ms": 184.671,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 135.10954164667055
+        },
+        "incremental_scanner": {
+          "cpu_ms": 148.47699999999998,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 171.64999997476116
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 7453.773999999999,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 1518.8563750125468
+        }
+      },
+      "candidate": {
+        "cold_refresh": {
+          "cpu_ms": 142.704,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 137.07620836794376
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 55.55799999999999,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 61.00170832360163
+        },
+        "concurrency_probe": {
+          "cpu_ms": 52.582,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 300.144333334174
+        },
+        "incremental_refresh": {
+          "cpu_ms": 89.344,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 100.89437500573695
+        },
+        "incremental_scanner": {
+          "cpu_ms": 152.57399999999996,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 172.15154168661684
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 8997.228000000001,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 1673.7095416756347
+        }
+      },
+      "order": [
+        "baseline",
+        "candidate"
+      ]
+    },
+    {
+      "baseline": {
+        "cold_refresh": {
+          "cpu_ms": 184.22000000000003,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 159.51445832615718
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 55.793000000000006,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 61.16208335151896
+        },
+        "concurrency_probe": {
+          "cpu_ms": 43.777,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 287.30625001480803
+        },
+        "incremental_refresh": {
+          "cpu_ms": 134.72500000000002,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 128.63712495891377
+        },
+        "incremental_scanner": {
+          "cpu_ms": 159.988,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 174.25483337137848
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 11356.983,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 1993.7175000086427
+        }
+      },
+      "candidate": {
+        "cold_refresh": {
+          "cpu_ms": 130.095,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 133.51349998265505
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 49.30400000000003,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 60.93795836204663
+        },
+        "concurrency_probe": {
+          "cpu_ms": 45.527,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 296.85745836468413
+        },
+        "incremental_refresh": {
+          "cpu_ms": 85.51100000000002,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 101.88758338335901
+        },
+        "incremental_scanner": {
+          "cpu_ms": 161.53299999999996,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 173.83741668891162
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 5197.858,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 1196.2310000089929
+        }
+      },
+      "order": [
+        "candidate",
+        "baseline"
+      ]
+    },
+    {
+      "baseline": {
+        "cold_refresh": {
+          "cpu_ms": 160.12900000000002,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 153.760458342731
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 74.20300000000003,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 65.0523750227876
+        },
+        "concurrency_probe": {
+          "cpu_ms": 46.26,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 294.0474583301693
+        },
+        "incremental_refresh": {
+          "cpu_ms": 118.44,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 126.64412497542799
+        },
+        "incremental_scanner": {
+          "cpu_ms": 156.526,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 176.63637502118945
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 21793.008,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 3305.0374583690427
+        }
+      },
+      "candidate": {
+        "cold_refresh": {
+          "cpu_ms": 147.15699999999998,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 134.5991250127554
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 56.976,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 63.05991666158661
+        },
+        "concurrency_probe": {
+          "cpu_ms": 44.138000000000005,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 292.1452500158921
+        },
+        "incremental_refresh": {
+          "cpu_ms": 141.686,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 107.43070830358192
+        },
+        "incremental_scanner": {
+          "cpu_ms": 153.53099999999995,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 174.86058332724497
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 8756.1,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 1644.429208303336
+        }
+      },
+      "order": [
+        "baseline",
+        "candidate"
+      ]
+    },
+    {
+      "baseline": {
+        "cold_refresh": {
+          "cpu_ms": 188.53400000000002,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 160.41716665495187
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 59.65700000000004,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 63.4347916347906
+        },
+        "concurrency_probe": {
+          "cpu_ms": 47.977,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 293.17604162497446
+        },
+        "incremental_refresh": {
+          "cpu_ms": 139.39700000000002,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 129.264333343599
+        },
+        "incremental_scanner": {
+          "cpu_ms": 140.56700000000006,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 175.662083318457
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 12549.861,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 2190.830666630063
+        }
+      },
+      "candidate": {
+        "cold_refresh": {
+          "cpu_ms": 138.987,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 128.97758331382647
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 70.49099999999999,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 64.29279170697555
+        },
+        "concurrency_probe": {
+          "cpu_ms": 46.565,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 297.14233335107565
+        },
+        "incremental_refresh": {
+          "cpu_ms": 130.906,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 105.38370831636712
+        },
+        "incremental_scanner": {
+          "cpu_ms": 150.945,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 174.76308334153146
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 7948.339,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 1554.4603749876842
+        }
+      },
+      "order": [
+        "candidate",
+        "baseline"
+      ]
+    },
+    {
+      "baseline": {
+        "cold_refresh": {
+          "cpu_ms": 184.898,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 164.11054169293493
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 42.456999999999994,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 59.12929167971015
+        },
+        "concurrency_probe": {
+          "cpu_ms": 51.593,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 306.92462500883266
+        },
+        "incremental_refresh": {
+          "cpu_ms": 150.039,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 132.93233333388343
+        },
+        "incremental_scanner": {
+          "cpu_ms": 182.51800000000003,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 179.62712503504008
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 8958.134,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 1688.6072083143517
+        }
+      },
+      "candidate": {
+        "cold_refresh": {
+          "cpu_ms": 118.03500000000001,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 132.24570831516758
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 44.80599999999998,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 59.28600003244355
+        },
+        "concurrency_probe": {
+          "cpu_ms": 46.017,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 303.26133337803185
+        },
+        "incremental_refresh": {
+          "cpu_ms": 111.18200000000002,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 104.74604170303792
+        },
+        "incremental_scanner": {
+          "cpu_ms": 169.42899999999997,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 175.7326249498874
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 7126.748,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 1445.8431666716933
+        }
+      },
+      "order": [
+        "baseline",
+        "candidate"
+      ]
+    },
+    {
+      "baseline": {
+        "cold_refresh": {
+          "cpu_ms": 193.128,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 165.13379162643105
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 46.03200000000004,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 61.50870834244415
+        },
+        "concurrency_probe": {
+          "cpu_ms": 47.259,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 289.36837502988055
+        },
+        "incremental_refresh": {
+          "cpu_ms": 122.84100000000001,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 125.7693333318457
+        },
+        "incremental_scanner": {
+          "cpu_ms": 152.577,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 175.29124999418855
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 10167.491,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 1848.701125010848
+        }
+      },
+      "candidate": {
+        "cold_refresh": {
+          "cpu_ms": 151.166,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 136.70904166065156
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 62.80200000000002,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 62.92895833030343
+        },
+        "concurrency_probe": {
+          "cpu_ms": 44.975,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 300.94045837176964
+        },
+        "incremental_refresh": {
+          "cpu_ms": 101.80399999999997,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 104.70854170853272
+        },
+        "incremental_scanner": {
+          "cpu_ms": 148.24900000000002,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 174.19312504353002
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 7215.192000000001,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 1392.921083373949
+        }
+      },
+      "order": [
+        "candidate",
+        "baseline"
+      ]
+    },
+    {
+      "baseline": {
+        "cold_refresh": {
+          "cpu_ms": 170.996,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 155.67154169548303
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 63.567999999999984,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 63.170833338517696
+        },
+        "concurrency_probe": {
+          "cpu_ms": 46.615,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 296.1676249979064
+        },
+        "incremental_refresh": {
+          "cpu_ms": 125.56699999999998,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 125.50666666356847
+        },
+        "incremental_scanner": {
+          "cpu_ms": 148.33599999999996,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 175.41908333078027
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 10824.797,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 2044.6407083654776
+        }
+      },
+      "candidate": {
+        "cold_refresh": {
+          "cpu_ms": 128.943,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 134.25216666655615
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 52.35300000000001,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 63.002583337947726
+        },
+        "concurrency_probe": {
+          "cpu_ms": 45.983000000000004,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 294.64316670782864
+        },
+        "incremental_refresh": {
+          "cpu_ms": 116.35799999999998,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 104.36125000705943
+        },
+        "incremental_scanner": {
+          "cpu_ms": 146.423,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 173.9342916989699
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 18286.963,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 2846.059041679837
+        }
+      },
+      "order": [
+        "baseline",
+        "candidate"
+      ]
+    },
+    {
+      "baseline": {
+        "cold_refresh": {
+          "cpu_ms": 172.10000000000002,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 158.67566666565835
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 65.12399999999997,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 63.38770833099261
+        },
+        "concurrency_probe": {
+          "cpu_ms": 45.681,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 291.65891668526456
+        },
+        "incremental_refresh": {
+          "cpu_ms": 143.949,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 130.27916662395
+        },
+        "incremental_scanner": {
+          "cpu_ms": 142.8,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 170.86070828372613
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 22208.56,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 3404.0662916959263
+        }
+      },
+      "candidate": {
+        "cold_refresh": {
+          "cpu_ms": 146.63500000000002,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 132.67433334840462
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 60.41199999999998,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 60.56474999058992
+        },
+        "concurrency_probe": {
+          "cpu_ms": 48.627,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 299.90029166219756
+        },
+        "incremental_refresh": {
+          "cpu_ms": 107.98599999999999,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 102.04558330588043
+        },
+        "incremental_scanner": {
+          "cpu_ms": 150.89000000000004,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 171.83662502793595
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 9204.169000000002,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 1732.5307917199098
+        }
+      },
+      "order": [
+        "candidate",
+        "baseline"
+      ]
+    },
+    {
+      "baseline": {
+        "cold_refresh": {
+          "cpu_ms": 181.019,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 162.3645416693762
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 56.82299999999998,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 60.74304162757471
+        },
+        "concurrency_probe": {
+          "cpu_ms": 46.209,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 301.81658337824047
+        },
+        "incremental_refresh": {
+          "cpu_ms": 124.49999999999997,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 127.89704167516902
+        },
+        "incremental_scanner": {
+          "cpu_ms": 147.10300000000007,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 174.05533336568624
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 11526.506,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 2059.8359582945704
+        }
+      },
+      "candidate": {
+        "cold_refresh": {
+          "cpu_ms": 142.904,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 140.90312499320135
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 72.33299999999997,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 67.76454165810719
+        },
+        "concurrency_probe": {
+          "cpu_ms": 49.196,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 306.8237917032093
+        },
+        "incremental_refresh": {
+          "cpu_ms": 122.578,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 110.96604162594303
+        },
+        "incremental_scanner": {
+          "cpu_ms": 156.00600000000003,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 176.5937500167638
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 4427.018,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 1096.2305417051539
+        }
+      },
+      "order": [
+        "baseline",
+        "candidate"
+      ]
+    },
+    {
+      "baseline": {
+        "cold_refresh": {
+          "cpu_ms": 160.12400000000002,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 161.2822082825005
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 64.17000000000002,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 62.87862500175834
+        },
+        "concurrency_probe": {
+          "cpu_ms": 46.52,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 295.94929167069495
+        },
+        "incremental_refresh": {
+          "cpu_ms": 159.956,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 130.6987083517015
+        },
+        "incremental_scanner": {
+          "cpu_ms": 145.464,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 173.8914999878034
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 9468.51,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 1843.7367916922085
+        }
+      },
+      "candidate": {
+        "cold_refresh": {
+          "cpu_ms": 326.659,
+          "log_calls": 12,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 222.97545830952004
+        },
+        "committed_incremental_refresh": {
+          "cpu_ms": 72.50799999999998,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "4cb379e49a038a1319688759d19fd042832e122602db81d99a4b717a0effa697",
+          "status_calls": 12,
+          "wall_ms": 62.30474996846169
+        },
+        "concurrency_probe": {
+          "cpu_ms": 46.356,
+          "log_calls": 24,
+          "peak": 6,
+          "signature": "b1f7f03d69abd430fd6ae6ecc37e9cc36faa57d74bfdae23cb65dc01861ccae6",
+          "status_calls": 24,
+          "wall_ms": 337.940166646149
+        },
+        "incremental_refresh": {
+          "cpu_ms": 97.19,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 103.4464166732505
+        },
+        "incremental_scanner": {
+          "cpu_ms": 150.36800000000005,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 172.22895834129304
+        },
+        "scheduler_incremental_refresh": {
+          "cpu_ms": 8775.345000000001,
+          "log_calls": 0,
+          "peak": 6,
+          "signature": "53f7810a7aace34c5fc36174fced2e994d402ac0c281d207f9359b359ce12ade",
+          "status_calls": 24,
+          "wall_ms": 1652.027249976527
+        }
+      },
+      "order": [
+        "candidate",
+        "baseline"
+      ]
+    }
+  ],
+  "repos": 24,
+  "scheduler_included": true,
+  "scheduler_measurement_valid": false,
+  "summary": {
+    "cold_refresh": {
+      "cpu_ms": {
+        "baseline_median": 181.11700000000002,
+        "candidate_median": 142.804,
+        "faster_pairs": 9,
+        "paired_mad": 11.59950000000002,
+        "paired_median_delta": -40.23650000000001,
+        "two_sided_sign_p": 0.021484375
+      },
+      "log_calls": {
+        "baseline_median": 24.0,
+        "candidate_median": 12.0,
+        "faster_pairs": 10,
+        "paired_mad": 0.0,
+        "paired_median_delta": -12.0,
+        "two_sided_sign_p": 0.001953125
+      },
+      "peak": {
+        "baseline_median": 6.0,
+        "candidate_median": 6.0,
+        "faster_pairs": 0,
+        "paired_mad": 0.0,
+        "paired_median_delta": 0.0,
+        "two_sided_sign_p": 1
+      },
+      "status_calls": {
+        "baseline_median": 24.0,
+        "candidate_median": 24.0,
+        "faster_pairs": 0,
+        "paired_mad": 0.0,
+        "paired_median_delta": 0.0,
+        "two_sided_sign_p": 1
+      },
+      "wall_ms": {
+        "baseline_median": 160.8496874687262,
+        "candidate_median": 134.42564583965577,
+        "faster_pairs": 9,
+        "paired_mad": 5.01010415609926,
+        "paired_median_delta": -26.001145830377936,
+        "two_sided_sign_p": 0.021484375
+      }
+    },
+    "committed_incremental_refresh": {
+      "cpu_ms": {
+        "baseline_median": 58.510500000000036,
+        "candidate_median": 58.69399999999999,
+        "faster_pairs": 5,
+        "paired_mad": 9.314499999999981,
+        "paired_median_delta": 0.27149999999997476,
+        "two_sided_sign_p": 1
+      },
+      "log_calls": {
+        "baseline_median": 0.0,
+        "candidate_median": 0.0,
+        "faster_pairs": 0,
+        "paired_mad": 0.0,
+        "paired_median_delta": 0.0,
+        "two_sided_sign_p": 1
+      },
+      "peak": {
+        "baseline_median": 6.0,
+        "candidate_median": 6.0,
+        "faster_pairs": 0,
+        "paired_mad": 0.0,
+        "paired_median_delta": 0.0,
+        "two_sided_sign_p": 1
+      },
+      "status_calls": {
+        "baseline_median": 12.0,
+        "candidate_median": 12.0,
+        "faster_pairs": 0,
+        "paired_mad": 0.0,
+        "paired_median_delta": 0.0,
+        "two_sided_sign_p": 1
+      },
+      "wall_ms": {
+        "baseline_median": 62.23683332791552,
+        "candidate_median": 62.61685414938256,
+        "faster_pairs": 6,
+        "paired_mad": 0.7256667013280094,
+        "paired_median_delta": -0.19618749502114952,
+        "two_sided_sign_p": 0.75390625
+      }
+    },
+    "concurrency_probe": {
+      "cpu_ms": {
+        "baseline_median": 46.5675,
+        "candidate_median": 46.1865,
+        "faster_pairs": 7,
+        "paired_mad": 2.0169999999999995,
+        "paired_median_delta": -1.0219999999999985,
+        "two_sided_sign_p": 0.34375
+      },
+      "log_calls": {
+        "baseline_median": 24.0,
+        "candidate_median": 24.0,
+        "faster_pairs": 0,
+        "paired_mad": 0.0,
+        "paired_median_delta": 0.0,
+        "two_sided_sign_p": 1
+      },
+      "peak": {
+        "baseline_median": 6.0,
+        "candidate_median": 6.0,
+        "faster_pairs": 0,
+        "paired_mad": 0.0,
+        "paired_median_delta": 0.0,
+        "two_sided_sign_p": 1
+      },
+      "status_calls": {
+        "baseline_median": 24.0,
+        "candidate_median": 24.0,
+        "faster_pairs": 0,
+        "paired_mad": 0.0,
+        "paired_median_delta": 0.0,
+        "two_sided_sign_p": 1
+      },
+      "wall_ms": {
+        "baseline_median": 294.99837500043213,
+        "candidate_median": 300.0223124981858,
+        "faster_pairs": 4,
+        "paired_mad": 6.200083327712491,
+        "paired_median_delta": 4.486750025535002,
+        "two_sided_sign_p": 0.75390625
+      }
+    },
+    "incremental_refresh": {
+      "cpu_ms": {
+        "baseline_median": 137.06100000000004,
+        "candidate_median": 109.584,
+        "faster_pairs": 9,
+        "paired_mad": 20.361499999999992,
+        "paired_median_delta": -28.50000000000003,
+        "two_sided_sign_p": 0.021484375
+      },
+      "log_calls": {
+        "baseline_median": 12.0,
+        "candidate_median": 0.0,
+        "faster_pairs": 10,
+        "paired_mad": 0.0,
+        "paired_median_delta": -12.0,
+        "two_sided_sign_p": 0.001953125
+      },
+      "peak": {
+        "baseline_median": 6.0,
+        "candidate_median": 6.0,
+        "faster_pairs": 0,
+        "paired_mad": 0.0,
+        "paired_median_delta": 0.0,
+        "two_sided_sign_p": 1
+      },
+      "status_calls": {
+        "baseline_median": 24.0,
+        "candidate_median": 24.0,
+        "faster_pairs": 0,
+        "paired_mad": 0.0,
+        "paired_median_delta": 0.0,
+        "two_sided_sign_p": 1
+      },
+      "wall_ms": {
+        "baseline_median": 128.95072915125638,
+        "candidate_median": 104.53489585779607,
+        "faster_pairs": 10,
+        "paired_mad": 3.5440833307802677,
+        "paired_median_delta": -25.315083301393315,
+        "two_sided_sign_p": 0.001953125
+      }
+    },
+    "incremental_scanner": {
+      "cpu_ms": {
+        "baseline_median": 148.40649999999997,
+        "candidate_median": 151.75949999999997,
+        "faster_pairs": 4,
+        "paired_mad": 5.542500000000047,
+        "paired_median_delta": 2.8209999999999695,
+        "two_sided_sign_p": 0.75390625
+      },
+      "log_calls": {
+        "baseline_median": 0.0,
+        "candidate_median": 0.0,
+        "faster_pairs": 0,
+        "paired_mad": 0.0,
+        "paired_median_delta": 0.0,
+        "two_sided_sign_p": 1
+      },
+      "peak": {
+        "baseline_median": 6.0,
+        "candidate_median": 6.0,
+        "faster_pairs": 0,
+        "paired_mad": 0.0,
+        "paired_median_delta": 0.0,
+        "two_sided_sign_p": 1
+      },
+      "status_calls": {
+        "baseline_median": 24.0,
+        "candidate_median": 24.0,
+        "faster_pairs": 0,
+        "paired_mad": 0.0,
+        "paired_median_delta": 0.0,
+        "two_sided_sign_p": 1
+      },
+      "wall_ms": {
+        "baseline_median": 174.77304168278351,
+        "candidate_median": 174.06370837124996,
+        "faster_pairs": 7,
+        "paired_mad": 0.7206042064353824,
+        "paired_median_delta": -0.9985624637920409,
+        "two_sided_sign_p": 0.34375
+      }
+    },
+    "scheduler_incremental_refresh": {
+      "cpu_ms": {
+        "baseline_median": 11090.89,
+        "candidate_median": 8352.2195,
+        "faster_pairs": 8,
+        "paired_mad": 3203.1615,
+        "paired_median_delta": -3776.9105,
+        "two_sided_sign_p": 0.109375
+      },
+      "log_calls": {
+        "baseline_median": 12.0,
+        "candidate_median": 0.0,
+        "faster_pairs": 10,
+        "paired_mad": 0.0,
+        "paired_median_delta": -12.0,
+        "two_sided_sign_p": 0.001953125
+      },
+      "peak": {
+        "baseline_median": 6.0,
+        "candidate_median": 6.0,
+        "faster_pairs": 0,
+        "paired_mad": 0.0,
+        "paired_median_delta": 0.0,
+        "two_sided_sign_p": 1
+      },
+      "status_calls": {
+        "baseline_median": 24.0,
+        "candidate_median": 24.0,
+        "faster_pairs": 0,
+        "paired_mad": 0.0,
+        "paired_median_delta": 0.0,
+        "two_sided_sign_p": 1
+      },
+      "wall_ms": {
+        "baseline_median": 2019.1791041870601,
+        "candidate_median": 1599.4447916455101,
+        "faster_pairs": 8,
+        "paired_mad": 385.9479374368675,
+        "paired_median_delta": -546.0751666396391,
+        "two_sided_sign_p": 0.109375
+      }
+    }
+  },
+  "unborn_repos": 12,
+  "validation_note": "Standalone scheduler emitted repeated sandbox_extension_issue_file failed warnings; scheduler timing rejected. Engine signatures matched in all 10 pairs."
+}

@@ -529,6 +529,8 @@ struct DiscoveredRepositories: Sendable {
 
 struct CoreReadResult: Sendable {
     let snapshots: [RepositorySnapshot]  // in original path order
+    /// Only paths whose current status explicitly reports an unborn branch.
+    let unbornRepositoryPaths: Set<String>
     let completed: Int
     let total: Int
     let gitStatusCount: Int
@@ -627,7 +629,7 @@ extension RefreshEngine {
         warnings: inout [String]
     ) async -> CoreReadResult {
         guard !paths.isEmpty else {
-            return CoreReadResult(snapshots: [], completed: 0, total: 0,
+            return CoreReadResult(snapshots: [], unbornRepositoryPaths: [], completed: 0, total: 0,
                                   gitStatusCount: 0, gitTimeoutCount: 0,
                                   gitCancelledCount: 0, gitFailureCount: 0,
                                   peakConcurrency: 0)
@@ -636,6 +638,7 @@ extension RefreshEngine {
         let previousUnavailableSinceByPath = previousSnapshot?.repositoryUnavailableSinceByPath ?? [:]
         let concurrency = min(config.maxConcurrentGitOps, paths.count)
         var snapshotsByIndex: [Int: RepositorySnapshot] = [:]
+        var unbornRepositoryPaths: Set<String> = []
         var counters = (status: 0, timeout: 0, cancelled: 0, failed: 0, peak: 0)
 
         // Process in priority order but with bounded concurrency. Every
@@ -720,14 +723,15 @@ extension RefreshEngine {
                     switch read.result {
                     case .success(let output):
                         let snapshotBuildStartedAt = ProcessInfo.processInfo.systemUptime
-                        let snapshot = buildSnapshot(output: output, read: read,
-                                                      scannedAt: DateFormatting.nowISO())
+                        let built = buildSnapshot(output: output, read: read,
+                                                  scannedAt: DateFormatting.nowISO())
                         measurementObserver?.record(
                             name: "core_status_snapshot_build",
                             duration: ProcessInfo.processInfo.systemUptime - snapshotBuildStartedAt,
                             calls: 1
                         )
-                        snapshotsByIndex[idx] = snapshot
+                        snapshotsByIndex[idx] = built.snapshot
+                        if built.hasNoCommits { unbornRepositoryPaths.insert(read.path) }
                         counters.status += 1
 
                     case .timeout:
@@ -761,6 +765,7 @@ extension RefreshEngine {
 
         return CoreReadResult(
             snapshots: orderedSnapshots,
+            unbornRepositoryPaths: unbornRepositoryPaths,
             completed: snapshotsByIndex.count,
             total: paths.count,
             gitStatusCount: counters.status + counters.timeout + counters.failed,
@@ -783,10 +788,13 @@ extension RefreshEngine {
         output: String,
         read: ProcessReadResult,
         scannedAt: String
-    ) -> RepositorySnapshot {
+    ) -> (snapshot: RepositorySnapshot, hasNoCommits: Bool) {
         let name = (read.path as NSString).lastPathComponent
         let id = RepositoryIdentity.id(for: read.path)
         let branchMeta = GitStatusParser.parseBranchMetadata(output)
+        let canReuseCommitMetadata = branchMeta.headOID != nil
+            && branchMeta.headOID == read.previous?.lastCommitID
+            && read.previous?.lastCommitMetadataAvailable == true
         let entries = GitStatusParser.parseStatusEntries(output)
         let summary = GitStatusParser.summarize(entries)
         let changedFiles = entries.map(\.path)
@@ -803,7 +811,7 @@ extension RefreshEngine {
             currentTotal: changedCount, scannedAt: scannedAt
         )
 
-        return RepositorySnapshot(
+        let snapshot = RepositorySnapshot(
             id: id, name: name, path: read.path,
             workspaceKind: read.workspaceKind ?? read.previous?.workspaceKind,
             branch: branchMeta.branch, status: status,
@@ -820,14 +828,15 @@ extension RefreshEngine {
             changedFilesPreview: preview, risk: risk.level,
             lastScannedAt: scannedAt,
             dataSource: .current, lastSuccessfulScanAt: scannedAt,
-            lastChangedAt: read.previous?.lastChangedAt,
+            lastChangedAt: canReuseCommitMetadata ? read.previous?.lastChangedAt : nil,
             lastCommitID: branchMeta.headOID,
-            lastCommitSummary: read.previous?.lastCommitSummary,
-            lastCommitMetadataAvailable: read.previous?.lastCommitMetadataAvailable,
+            lastCommitSummary: canReuseCommitMetadata ? read.previous?.lastCommitSummary : nil,
+            lastCommitMetadataAvailable: branchMeta.hasNoCommits || canReuseCommitMetadata,
             lastActivityAt: activityAt,
             errorMessage: nil,
             isPinned: read.previous?.isPinned ?? false
         )
+        return (snapshot, branchMeta.hasNoCommits)
     }
 
     private func buildFailedSnapshot(read: ProcessReadResult, error: String) -> RepositorySnapshot {
@@ -914,9 +923,18 @@ extension RefreshEngine {
                 continue
             }
 
+            // Status already proves there is no commit to read. Carry this
+            // fact only within the current refresh; a later first commit must
+            // still execute log, and an absent/malformed OID is not proof.
+            if coreResult.unbornRepositoryPaths.contains(snapshot.path) {
+                baselineByIndex[idx] = snapshot
+                continue
+            }
+
             let prev = previousByPath[snapshot.path]
             let headChanged = prev?.lastCommitID != snapshot.lastCommitID
-            let canReuse = prev?.lastCommitMetadataAvailable == true && !headChanged
+            let canReuse = snapshot.lastCommitID != nil
+                && prev?.lastCommitMetadataAvailable == true && !headChanged
 
             if canReuse, let prev {
                 baselineByIndex[idx] = snapshot.reusingCommitMetadata(from: prev)

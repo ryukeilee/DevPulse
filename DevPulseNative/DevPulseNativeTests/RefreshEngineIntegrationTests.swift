@@ -260,6 +260,115 @@ struct RefreshEngineIntegrationTests {
         #expect(mock.logCallCount == 2)
     }
 
+    @Test func unbornRefreshSkipsLogAndFirstCommitReadsMetadata() async throws {
+        let root = reposRoot("unborn")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = root.appendingPathComponent("repo")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try runGit(["init", "-q", "-b", "main"], in: repo)
+        try "new file\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        let engine = RefreshEngine()
+        func refresh(_ previous: AppGroupData? = nil) async -> RefreshResult {
+            await engine.execute(config: scanConfig(), scanRoots: [repo.path],
+                                 knownRepositoryPaths: [repo.path], forceRepositoryDiscovery: false,
+                                 previousSnapshot: previous, source: previous == nil ? .manual : .timer)
+        }
+        let initial = await refresh()
+        let repeated = await refresh(initial.data)
+        for result in [initial, repeated] {
+            let snapshot = try #require(result.data.repositories.first)
+            #expect(result.diagnostics.totalGitCalls == 1)
+            #expect(result.diagnostics.stageDiagnostics.first { $0.stage == .extendedInfo }?.gitCommandCount == 0)
+            #expect(snapshot.status == .changed)
+            #expect(snapshot.changedFilesPreview == ["README.md"])
+            #expect(snapshot.lastCommitID == nil)
+            #expect(snapshot.lastCommitSummary == nil)
+            #expect(snapshot.lastChangedAt == nil)
+            #expect(snapshot.lastCommitMetadataAvailable == true)
+            #expect(snapshot.resolvedDataSource == .current)
+        }
+        try runGit(["config", "user.name", "DevPulse Tests"], in: repo)
+        try runGit(["config", "user.email", "devpulse-tests@example.com"], in: repo)
+        try runGit(["add", "README.md"], in: repo)
+        try runGit(["commit", "-q", "-m", "First commit"], in: repo)
+        let committed = await refresh(repeated.data)
+        let snapshot = try #require(committed.data.repositories.first)
+        #expect(committed.diagnostics.totalGitCalls == 2)
+        #expect(snapshot.lastCommitID == (try runGit(["rev-parse", "HEAD"], in: repo)).trimmingCharacters(in: .whitespacesAndNewlines))
+        #expect(snapshot.lastCommitSummary == "First commit")
+        #expect(snapshot.lastChangedAt != nil)
+        #expect(snapshot.lastCommitMetadataAvailable == true)
+
+        // Moving to an orphan branch must also clear previously valid metadata.
+        try runGit(["checkout", "-q", "--orphan", "fresh"], in: repo)
+        let orphan = await refresh(committed.data)
+        let orphanSnapshot = try #require(orphan.data.repositories.first)
+        #expect(orphan.diagnostics.totalGitCalls == 1)
+        #expect(orphanSnapshot.branch == "fresh")
+        #expect(orphanSnapshot.lastCommitID == nil)
+        #expect(orphanSnapshot.lastCommitSummary == nil)
+        #expect(orphanSnapshot.lastChangedAt == nil)
+        #expect(orphanSnapshot.lastCommitMetadataAvailable == true)
+    }
+
+    @Test func missingOIDIsNotTreatedAsAnUnbornBranch() async throws {
+        let root = reposRoot("missing-oid")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = root.appendingPathComponent("repo")
+        try createTempGitRepo(at: repo)
+        let path = RepositoryIdentity.canonicalPath(repo.path)
+        let mock = MockGitCommandRunner()
+        let engine = RefreshEngine()
+        mock.setStatusResult(.success(output: "# branch.oid (initial)\n# branch.head main"), for: path)
+        let initial = await engine.execute(config: scanConfig(), scanRoots: [repo.path],
+                                           knownRepositoryPaths: [path], forceRepositoryDiscovery: false,
+                                           gitCommandRunner: mock.runner())
+        #expect(mock.logCallCount == 0)
+        mock.setStatusResult(.success(output: "# branch.head main"), for: path)
+        let result = await engine.execute(config: scanConfig(), scanRoots: [repo.path],
+                                         knownRepositoryPaths: [path], forceRepositoryDiscovery: false,
+                                         previousSnapshot: initial.data, gitCommandRunner: mock.runner())
+        #expect(mock.logCallCount == 1)
+        #expect(result.data.repositories.first?.lastCommitID == "abc123def4567890")
+    }
+
+    @Test(arguments: [true, false], [ProcessRunResult.timeout, .nonZero(exitCode: 128), .outputLimit])
+    func changedHeadLogFailureRetriesMetadata(startUnborn: Bool, failure: ProcessRunResult) async throws {
+        let root = reposRoot("metadata-retry")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = root.appendingPathComponent("repo")
+        try createTempGitRepo(at: repo)
+        let path = RepositoryIdentity.canonicalPath(repo.path)
+        let mock = MockGitCommandRunner()
+        let engine = RefreshEngine()
+        if startUnborn {
+            mock.setStatusResult(.success(output: "# branch.oid (initial)\n# branch.head main"), for: path)
+        }
+        let initial = await engine.execute(config: scanConfig(), scanRoots: [repo.path],
+                                           knownRepositoryPaths: [path], forceRepositoryDiscovery: false,
+                                           gitCommandRunner: mock.runner())
+        let newOID = "def456abc1237890"
+        mock.setStatusResult(.success(output: MockGitCommandRunner.cleanStatusOutput(oid: newOID)), for: path)
+        mock.setLogResult(failure, for: path)
+        let failed = await engine.execute(config: scanConfig(), scanRoots: [repo.path],
+                                          knownRepositoryPaths: [path], forceRepositoryDiscovery: false,
+                                          previousSnapshot: initial.data, gitCommandRunner: mock.runner())
+        let incomplete = try #require(failed.data.repositories.first)
+        #expect(incomplete.lastCommitID == newOID)
+        #expect(incomplete.lastCommitMetadataAvailable == false)
+        #expect(incomplete.lastCommitSummary == nil)
+        #expect(incomplete.lastChangedAt == nil)
+        let callsBeforeRetry = mock.logCallCount
+        mock.setLogResult(.success(output: MockGitCommandRunner.defaultLogOutput(commitID: newOID, summary: "Retried")), for: path)
+        let retried = await engine.execute(config: scanConfig(), scanRoots: [repo.path],
+                                           knownRepositoryPaths: [path], forceRepositoryDiscovery: false,
+                                           previousSnapshot: failed.data, gitCommandRunner: mock.runner())
+        #expect(mock.logCallCount == callsBeforeRetry + 1)
+        #expect(retried.data.repositories.first?.lastCommitMetadataAvailable == true)
+        #expect(retried.data.repositories.first?.lastCommitSummary == "Retried")
+        #expect(retried.data.repositories.first?.lastChangedAt != nil)
+    }
+
     // MARK: - 2. Cancellation During Core Status
 
     @Test func cancellationDuringCoreStatus() async throws {
