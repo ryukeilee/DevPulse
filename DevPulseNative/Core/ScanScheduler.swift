@@ -2357,14 +2357,17 @@ final class ScanScheduler: ObservableObject {
         }
 
         let maximumRetryCount = min(12, max(1, scanConfigForExecution().maxConcurrentGitOps))
-        while repositoryRetryTasks.count < maximumRetryCount {
-            guard let repositoryID = pendingRepositoryRefreshRequirements.keys
-                .sorted()
-                .first(where: { !retryingRepositoryIDs.contains($0) }),
+        guard repositoryRetryTasks.count < maximumRetryCount else { return }
+
+        // This MainActor turn does not suspend; starts cannot enqueue new intents
+        // or finish retries until the drain returns. Sort once, then walk once.
+        for repositoryID in pendingRepositoryRefreshRequirements.keys.sorted() {
+            guard repositoryRetryTasks.count < maximumRetryCount else { break }
+            guard !retryingRepositoryIDs.contains(repositoryID),
                   let requiresRetryState = pendingRepositoryRefreshRequirements.removeValue(
                     forKey: repositoryID
                   ) else {
-                return
+                continue
             }
             _ = startRepositoryRefresh(
                 repositoryID,

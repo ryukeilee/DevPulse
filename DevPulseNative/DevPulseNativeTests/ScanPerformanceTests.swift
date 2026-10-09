@@ -885,6 +885,99 @@ struct ScanPerformanceTests {
         #expect(await waitUntil { await retryProbe.activeCount == 0 })
     }
 
+    @Test @MainActor func pathRefreshQueueKeepsSortedSelectionAndInFlightIntents() async {
+        let limit = min(12, max(1, ScanConfig.default.maxConcurrentGitOps))
+        let probe = PathRefreshCapacityProbe()
+        let scheduler = ScanScheduler(
+            commandMode: true,
+            repositoryRetryExecution: { _, previous in await probe.execute(previous) },
+            scanExecution: { _ in (.empty(), [], []) }
+        )
+        let timestamp = DateFormatting.nowISO()
+        let repositories = (0..<(limit + 3)).reversed().map { index in
+            let id = String(format: "repo-%02d", index)
+            return repositorySnapshot(
+                id: id, path: "/Volumes/Ordered/\(id)", timestamp: timestamp,
+                status: .error, dataSource: .lastSuccessful
+            )
+        }
+        scheduler.lastResult = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: timestamp,
+            writtenAt: timestamp,
+            scanSummary: ScanSummary.build(from: repositories),
+            repositories: repositories
+        )
+
+        // The lowest ID is already running and must retain its follow-up intent.
+        scheduler.retryRepository("repo-00")
+        scheduler.handleLifecycleRefresh(
+            .pathAvailabilityChanged(rootPath: "/Volumes/Ordered", isAvailable: false)
+        )
+        let selectedIDs = Set((0..<limit).map { String(format: "repo-%02d", $0) })
+        #expect(scheduler.retryingRepositoryIDs == selectedIDs)
+        #expect(scheduler.pendingPathRefreshCount == 4)
+        #expect(await waitUntil { await probe.executionCount == limit })
+
+        // A second event at capacity must coalesce, not start duplicate work.
+        scheduler.handleLifecycleRefresh(
+            .pathAvailabilityChanged(rootPath: "/Volumes/Ordered", isAvailable: false)
+        )
+        #expect(scheduler.retryingRepositoryIDs == selectedIDs)
+        #expect(scheduler.pendingPathRefreshCount == repositories.count)
+        #expect(await probe.executionCount == limit)
+        #expect(await probe.peakActiveCount <= limit)
+
+        scheduler.shutdown()
+        #expect(scheduler.pendingPathRefreshCount == 0)
+        #expect(await waitUntil { await probe.activeCount == 0 })
+    }
+
+    @Test @MainActor func pathRefreshQueueSkipsRemovedRepositoryWithoutUsingCapacity() async {
+        let limit = min(12, max(1, ScanConfig.default.maxConcurrentGitOps))
+        let probe = PathRefreshCapacityProbe(fastRepositoryID: "repo-00")
+        let scheduler = ScanScheduler(
+            commandMode: true,
+            repositoryRetryExecution: { _, previous in await probe.execute(previous) },
+            scanExecution: { _ in (.empty(), [], []) }
+        )
+        let timestamp = DateFormatting.nowISO()
+        let repositories = (0..<(limit + 2)).reversed().map { index in
+            let id = String(format: "repo-%02d", index)
+            return repositorySnapshot(id: id, path: "/Volumes/Removed/\(id)", timestamp: timestamp)
+        }
+        scheduler.lastResult = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: timestamp,
+            writtenAt: timestamp,
+            scanSummary: ScanSummary.build(from: repositories),
+            repositories: repositories
+        )
+        scheduler.handleLifecycleRefresh(
+            .pathAvailabilityChanged(rootPath: "/Volumes/Removed", isAvailable: false)
+        )
+        #expect(scheduler.pendingPathRefreshCount == 2)
+
+        // Remove the next queued ID before the fast retry's completion drains.
+        let removedID = String(format: "repo-%02d", limit)
+        let remaining = repositories.filter { $0.id != removedID }
+        scheduler.lastResult = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: timestamp,
+            writtenAt: timestamp,
+            scanSummary: ScanSummary.build(from: remaining),
+            repositories: remaining
+        )
+        #expect(await waitUntil { await probe.executionCount == limit + 1 })
+        #expect(scheduler.pendingPathRefreshCount == 0)
+        #expect(scheduler.isRetryingRepository(String(format: "repo-%02d", limit + 1)))
+        #expect(!scheduler.isRetryingRepository(removedID))
+        #expect(await probe.peakActiveCount <= limit)
+
+        scheduler.shutdown()
+        #expect(await waitUntil { await probe.activeCount == 0 })
+    }
+
     @Test func pathAvailabilityPolicyTargetsOnlyAffectedRepositoriesAndReachableRetries() {
         let timestamp = DateFormatting.nowISO()
         let repositories = [
