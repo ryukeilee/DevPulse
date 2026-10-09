@@ -12,7 +12,7 @@ Preserve these boundaries unless the task explicitly changes product scope:
 - show changed file basenames in the UI; do not expose full paths unnecessarily
 - do not read working-tree file contents merely to calculate repository status
 
-The scanner currently derives state from `git status --porcelain=v2 --branch` and latest-commit metadata from `git log -1`. Treat expansion beyond that metadata boundary as a product and privacy change.
+扫描器通过 `git status --porcelain=v2 --branch` 获取状态、通过 `git log -1` 获取最新提交元数据，并通过 `git worktree list --porcelain -z` 发现关联 worktree。超出这些只读元数据范围的扩展属于产品与隐私边界变更。
 
 ## Repository Layout
 
@@ -40,33 +40,31 @@ Important current values:
 - Swift language version: Swift 6
 - marketing version: 0.2.0
 
-`project.yml` is the declarative project definition, while the checked-in `.xcodeproj` is what normal build commands consume. When changing targets, sources, build settings, dependencies, schemes, bundle identifiers, or entitlements, update `project.yml`, regenerate the project with the repository-compatible XcodeGen version, and inspect the resulting `.xcodeproj` diff. Do not hand-edit generated project data for an incidental change.
+`project.yml` is the declarative project definition, while the checked-in `.xcodeproj` is what normal build commands consume. When changing targets, sources, build settings, dependencies, schemes, bundle identifiers, or entitlements, update `project.yml`, regenerate the project with the repository-compatible XcodeGen version, and inspect the resulting `.xcodeproj` diff. 不要为顺手清理手工修改生成工程。`project.yml` 的 `postGenCommand` 调用 `../scripts/ensure-app-groups-capability.sh` 修复 App Group capability，重新生成后需检查该部分差异。
 
 Bundle identifiers, App Group wiring, signing settings, entitlements, deployment target, and the app/widget shared snapshot contract are high-risk. Never insert a personal Team ID, certificate hash, provisioning UUID, or other machine-specific signing value into tracked files.
 
 ## Build and Test
 
-Run commands from this directory (or use `./scripts/verify.sh` from the repository root).
+裸 `xcodebuild` 命令在本目录运行；统一脚本在本目录使用 `../scripts/verify.sh`，在仓库根目录使用 `./scripts/verify.sh`。
 
 ### Unified verification script (recommended)
 
-The repository root provides `./scripts/verify.sh` which orchestrates the entire
-workflow with a single shared DerivedData cache, `build-for-testing` + `test-without-building`,
-timeouts, and failure log capture:
+统一脚本复用 DerivedData、使用 `build-for-testing` + `test-without-building`，保留失败日志。以下脚本示例均从本目录运行：
 
 ```sh
 # Build once (compile app + test bundle)
-./scripts/verify.sh build
+../scripts/verify.sh build
 
 # Run targeted tests (no recompilation)
-./scripts/verify.sh test DevPulseTests/ActivityEventTests
-./scripts/verify.sh test DevPulseTests/CommitReadinessEngineTests
+../scripts/verify.sh test DevPulseTests/ActivityEventTests
+../scripts/verify.sh test DevPulseTests/CommitReadinessEngineTests
 
 # Full acceptance gate: build + full test suite
-./scripts/verify.sh final
+../scripts/verify.sh final
 
 # WidgetKit wiring check
-./scripts/verify.sh widgetkit
+../scripts/verify.sh widgetkit
 ```
 
 ### Build-for-testing (compile once)
@@ -79,7 +77,9 @@ xcodebuild -project DevPulseNative.xcodeproj -scheme DevPulse -configuration Deb
   build-for-testing
 ```
 
-### Test-without-building (reuse pre-built bundle — seconds, not minutes)
+### Test-without-building（复用当前源码对应的产物）
+
+优先用 `../scripts/verify.sh test/final`。脚本自动创建一次性 App Group 容器与偏好域，避免测试读写用户真实数据。以下裸测试命令必须先配置同等的 `TEST_RUNNER_DEVPULSE_APP_GROUP_CONTAINER_PATH` 和 `TEST_RUNNER_DEVPULSE_APP_GROUP_DEFAULTS_SUITE` 隔离；详见仓库根目录的 `docs/test-signing-modes.md`。
 
 Run the full suite:
 
@@ -109,13 +109,9 @@ xcodebuild -project DevPulseNative.xcodeproj -scheme DevPulse -configuration Deb
 
 ### Targeted testing flow
 
-After modifying source code:
-1. Run `verify.sh build` or the raw `build-for-testing` command once.
-2. Run `verify.sh test DevPulseTests/AffectedTest` repeatedly while iterating.
-3. At final acceptance, run `verify.sh final` for the full suite.
+每次修改源码、测试或构建配置后，先运行 `../scripts/verify.sh build`，再运行 `../scripts/verify.sh test DevPulseTests/AffectedTest`。测试命令不会重新编译，不能用旧产物验证新修改；最终验收使用 `../scripts/verify.sh final`。
 
-Each `verify.sh test` call completes in seconds because it reuses the pre-built
-bundle — no recompilation, re-linking, or re-indexing.
+`DEVPULSE_SIGNING_MODE=auto` 仅在本机存在同时匹配 app/widget 的 profile 时签名，否则无签名；可显式指定 `unsigned`。两种模式都会隔离测试数据。并行验证使用不同的 `DERIVED_DATA_PATH`；单次构建与测试复用同一路径。
 
 | Source area                      | Targeted test class                              |
 |----------------------------------|--------------------------------------------------|
@@ -140,8 +136,7 @@ bundle — no recompilation, re-linking, or re-indexing.
 
 ### Timeouts and failure logs
 
-- `verify.sh` imposes a **5-minute build timeout** and a **10-minute test timeout**
-  by default (overridable via `BUILD_TIMEOUT` / `TEST_TIMEOUT`).
+- `verify.sh` 默认配置构建 300 秒、测试 600 秒（可用 `BUILD_TIMEOUT` / `TEST_TIMEOUT` 覆盖）；仅当 PATH 中有 `timeout` 时才强制计时，否则提示无超时运行。
 - Logs are captured to temp files; on failure, the last 120–200 lines are printed
   and the full log path is reported.
 - When using raw `xcodebuild`, wrap with `timeout` in CI or scripts:

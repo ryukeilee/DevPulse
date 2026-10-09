@@ -6,30 +6,22 @@ DevPulse is a local-first native macOS app with a WidgetKit extension. The entir
 GitHub remote: `origin https://github.com/ryukeilee/DevPulse.git`
 
 Preserve these boundaries unless the task explicitly changes product scope:
-- read local Git metadata only (`git status --porcelain=v2 --branch`, `git log -1`)
+- 仅只读扫描本地 Git 元数据：`git status --porcelain=v2 --branch`、`git log -1`，以及发现关联 worktree 时的 `git worktree list --porcelain -z`
 - show changed file basenames only; do not expose full paths unnecessarily
 - do not read repository file contents unless the task requires it
 - do not add network or cloud access implicitly
 
 ## Project Initialization
 
-First-time setup:
+原生应用使用 Xcode 工程；仓库没有 `package.json` 或 Node 依赖安装步骤，不要运行 `npm install`。产品不需要 `.env` 凭据，不要要求复制或填入密钥。
 
-```sh
-# Install Node.js dependencies (build tooling, icon generation)
-npm install
-
-# Ensure git hooks point to this repo's hooks
-git config core.hooksPath .githooks
-```
-
-`.env` with credentials should exist in the repo root; if missing, copy `.env.example` and populate.
+只有任务明确授权配置本地 Git hooks 时，才执行 `git config core.hooksPath .githooks`；正常文档核对无需更改 Git 配置。
 
 ## Repository Layout
 
 ```
 .
-├── .agent/                   # Evidence-driven Maintenance Loop (loop.md/rules.md/memory.md/history.md/archive/)
+├── .agent/                   # 本地维护记录归档（非构建依赖）
 ├── .claude/worktrees/        # Claude worktree sessions
 ├── .githooks/
 │   ├── pre-commit            # runs scripts/secret-scan.sh staged
@@ -40,7 +32,7 @@ git config core.hooksPath .githooks
 │   │   └── Backup/           # backup/restore engine, migration, privacy filter, retention
 │   ├── Utilities/            # ProcessRunner, DateFormatting
 │   ├── Widget/               # WidgetKit extension (DevPulseWidget.swift, entitlements, plist)
-│   ├── DevPulseNativeTests/  # Swift Testing coverage (37 test files)
+│   ├── DevPulseNativeTests/  # Swift Testing 测试；文件清单以当前目录为准
 │   ├── Assets.xcassets/      # app icon
 │   ├── project.yml           # XcodeGen declarative project spec
 │   └── AGENTS.md             # detailed native-app agent guidelines
@@ -72,11 +64,7 @@ Do not commit DerivedData, build products, installed app bundles, or Xcode user 
 
 ## Maintenance Loop
 
-`.agent/` defines the evidence-driven maintenance loop
-(Observe → Evidence → Decide → Execute → Verify → Record). Before any
-evidence-based maintenance work, read `.agent/rules.md`, `.agent/memory.md`,
-and the recent records in `.agent/history.md`, then follow `.agent/loop.md`.
-Boundary rules in this file and `DevPulseNative/AGENTS.md` take precedence.
+维护按 Observe → Evidence → Decide → Execute → Verify → Record 进行。当前 `.agent/` 中没有 `loop.md`、`rules.md`、`memory.md` 或 `history.md`，不要把读取这些不存在的文件作为前置步骤。本文件及 `DevPulseNative/AGENTS.md` 的边界规则优先。
 
 ## Core files (DevPulseNative/Core/)
 
@@ -85,7 +73,7 @@ Boundary rules in this file and `DevPulseNative/AGENTS.md` take precedence.
 | File | Purpose |
 |------|---------|
 | `GitRepositoryScanner.swift` | actor-based repo discovery + batched git-status read + slow-repo tracking |
-| `GitStatusParser.swift` | parse `git status --short` output |
+| `GitStatusParser.swift` | 解析 porcelain v2 分支/状态与最新提交元数据，同时兼容 short 状态格式 |
 | `GitCommitLogParser.swift` | parse `git log` output for recent commits |
 | `ScanLocationProvider.swift` | scan root resolution |
 | `ExcludedDirectoryRules.swift` | directory exclusion rules |
@@ -271,6 +259,10 @@ DERIVED_DATA_PATH=/tmp/devpulse-custom BUILD_TIMEOUT=600 ./scripts/verify.sh fin
 
 ### Raw xcodebuild commands (for CI or advanced workflows)
 
+优先使用 `verify.sh test/final`：脚本通过 `TEST_RUNNER_DEVPULSE_APP_GROUP_CONTAINER_PATH` 和 `TEST_RUNNER_DEVPULSE_APP_GROUP_DEFAULTS_SUITE` 将测试隔离到一次性容器与偏好域，不读写用户真实 App Group。裸 `xcodebuild` 测试不自动提供此隔离，执行下方测试命令前必须设置同等隔离，详见 `docs/test-signing-modes.md`。
+
+`DEVPULSE_SIGNING_MODE=auto` 默认仅在本机存在同时匹配 app/widget 的 profile 时签名，否则无签名；可显式指定 `unsigned`。并行验证应使用各自独立的 `DERIVED_DATA_PATH`，单次构建与测试则复用同一路径。
+
 Build and test **share the same DerivedData** so incremental compilation is preserved:
 
 ```sh
@@ -317,9 +309,7 @@ DERIVED_DATA_PATH="$DERIVED_DATA_PATH" ./scripts/verify-widgetkit.sh
 ### Targeted testing
 
 After modifying source code, run the narrowest affected test class first.
-The `verify.sh build` step is needed only once per session — subsequent
-`verify.sh test <TestClass>` calls use `test-without-building` and complete
-in seconds.
+`verify.sh test <TestClass>` 使用 `test-without-building`，不会重新编译；每次修改源码、测试或构建配置后必须先重新运行 `verify.sh build`，否则验证的是旧测试产物。
 
 | Source area | Targeted test class |
 |---|---|
@@ -356,8 +346,7 @@ in seconds.
 
 ### Timeouts and failure logs
 
-- `verify.sh` applies a **5-minute build timeout** and a **10-minute test timeout**
-  by default, configurable via `BUILD_TIMEOUT` / `TEST_TIMEOUT`.
+- `verify.sh` 默认配置构建 300 秒、测试 600 秒（`BUILD_TIMEOUT` / `TEST_TIMEOUT`）；只有 PATH 中存在 `timeout` 时才强制计时，否则脚本明确提示无超时运行。
 - Build and test logs are captured to temporary files; on failure, the last
   120–200 lines are printed and the full log path is reported.
 - Raw `xcodebuild` commands should be wrapped with `timeout` in CI:
@@ -389,7 +378,7 @@ timeout 600 xcodebuild … test-without-building
 
 Changes affecting bundle IDs, entitlements, `Info.plist`, widget embedding, App Group wiring, or shared snapshot format are high-risk and must be verified explicitly.
 
-`project.yml` is the declarative project definition; when changing targets, sources, build settings, or entitlements, update `project.yml` and regenerate with `cd DevPulseNative && xcodegen generate`. Do not hand-edit generated `.xcodeproj` data.
+`project.yml` is the declarative project definition; when changing targets, sources, build settings, or entitlements, update `project.yml` and regenerate with `cd DevPulseNative && xcodegen generate`. 不要手工修改生成的 `.xcodeproj` 数据。`project.yml` 的 `postGenCommand` 会运行 `scripts/ensure-app-groups-capability.sh` 修复 App Group capability，重新生成后需检查该部分差异。
 
 ## Change Boundaries
 
