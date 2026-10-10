@@ -106,6 +106,12 @@ struct DateFormattingTests {
             "2026-01-15T00:00:60Z",
             "2026-01-15T00:00:61Z",
             // 越界 UTC 偏移：formatter 接受，`Date.ISO8601FormatStyle` 拒绝。
+            "2026-01-15T00:00:00+14:01",
+            "2026-01-15T00:00:00-14:01",
+            "2026-01-15T00:00:00+14:30",
+            "2026-01-15T00:00:00-14:30",
+            "2026-01-15T00:00:00+14:59",
+            "2026-01-15T00:00:00-14:59",
             "2026-01-15T00:00:00+23:59",
             "2026-01-15T00:00:00+99:99",
             "2026-01-15T00:00:00+15:00",
@@ -137,6 +143,32 @@ struct DateFormattingTests {
 
         for input in inputs {
             Self.expectMatchesReference(input)
+        }
+    }
+
+    /// 快速路径的 UTC 偏移守卫必须精确落在 ISO 8601 的 `±14:00` 上：`hh == 14`
+    /// 只允许 `mm == 00`。`±14:01` 到 `±14:59` 超出这一范围，必须回落到 formatter，
+    /// 取值由与改动前相同的实现决定，而不是由快速路径的算术决定。
+    ///
+    /// 这些输入当前的 formatter 结果恰好与算术结果相同，因此只比对解析值无法
+    /// 区分两条路径；这里同时断言快速路径本身拒绝它们，避免守卫被悄悄放宽。
+    @Test func canonicalFastPathStopsAtPlusMinus14Hours() {
+        for offset in ["Z", "+00:00", "-00:00", "+13:59", "-13:59", "+14:00", "-14:00"] {
+            let input = "2026-01-15T12:00:00\(offset)"
+            #expect(DateFormatting.canonicalDate(input) != nil,
+                    "\(input) 在 ±14:00 内，应留在快速路径")
+            Self.expectMatchesReference(input)
+        }
+
+        for offset in ["+14:01", "-14:01", "+14:30", "-14:30", "+14:59", "-14:59",
+                       "+15:00", "-15:00", "+23:59", "-23:59", "+99:99", "-99:99"] {
+            let input = "2026-01-15T12:00:00\(offset)"
+            #expect(DateFormatting.canonicalDate(input) == nil,
+                    "\(input) 超出 ±14:00，必须回落到 formatter")
+            Self.expectMatchesReference(input)
+            // 日期边界处的偏移溢出与日期边界组合也不得进入快速路径。
+            Self.expectMatchesReference("1582-10-15T00:00:00\(offset)")
+            Self.expectMatchesReference("9999-12-31T23:59:59\(offset)")
         }
     }
 

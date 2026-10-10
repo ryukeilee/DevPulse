@@ -90,13 +90,18 @@ enum DateFormatting {
     /// `ISO8601DateFormatter` and `Date.ISO8601FormatStyle` disagree, so those
     /// keep taking the formatter path and keep their current result: clock
     /// fields at or past their maximum (`hh >= 24`, `mm >= 60`, `ss >= 60`),
-    /// UTC offsets outside `±14:00` or with `mm > 59`, and calendar days that
-    /// only exist after normalization such as `2025-02-29`.
+    /// UTC offsets outside `±14:00` — the ISO 8601 bound, so `±14:01` through
+    /// `±14:59` included — or with `mm > 59`, and calendar days that only exist
+    /// after normalization such as `2025-02-29`.
     ///
     /// Restricting the fast path to valid calendar dates is what makes the
     /// arithmetic below exact: no normalization is involved, and integral
     /// epoch seconds convert to the same `Date` the formatter returns.
-    private static func canonicalDate(_ string: String) -> Date? {
+    ///
+    /// Internal rather than private so `DateFormattingTests` can pin the
+    /// fast-path boundary directly instead of inferring it from a result that
+    /// the formatter fallback happens to agree with.
+    static func canonicalDate(_ string: String) -> Date? {
         string.utf8.withContiguousStorageIfAvailable { buffer in
             parseCanonical(buffer)
         } ?? nil
@@ -133,8 +138,15 @@ enum DateFormatting {
             guard bytes[22] == colon,
                   let offsetHour = digits(bytes, 20),
                   let offsetMinute = digits(bytes, 23),
-                  offsetHour <= 14, offsetMinute <= 59 else { return nil }
+                  offsetMinute <= 59 else { return nil }
+            // ISO 8601 caps the UTC offset at ±14:00, which leaves `hh == 14`
+            // valid only with `mm == 00`. `ISO8601DateFormatter` currently still
+            // reads offsets past that bound by their face value, but its
+            // off-range behavior is unspecified, so those offsets must not be
+            // decided here: falling through to the formatter keeps the baseline
+            // answer whatever that Foundation version answers.
             let magnitude = offsetHour * 3_600 + offsetMinute * 60
+            guard magnitude <= 14 * 3_600 else { return nil }
             switch bytes[19] {
             case plus: offset = magnitude
             case dash: offset = -magnitude

@@ -16,19 +16,29 @@
 - 形状恰为 `YYYY-MM-DDTHH:MM:SSZ` 或 `YYYY-MM-DDTHH:MM:SS±HH:MM`，且每个字段都是 ASCII 数字；
 - 时钟字段在范围内（`hh < 24`、`mm < 60`、`ss < 60`）；
 - 月、日构成合法日历日（含闰年规则）；
-- UTC 偏移在 `±14:00` 内且 `mm <= 59`；
+- UTC 偏移不超过 `±14:00`（即 `hh == 14` 时 `mm` 必须为 `00`），且 `mm <= 59`；
 - `(year, month, day) >= (1582, 10, 15)`。
 
 这样就排除了两套实现存在分歧的全部形状：
 
 - `ISO8601DateFormatter` 在 1582-10-15 之前按儒略历解释（包括 1582-10-05..14 这些被跳过的日期），快速路径的格里高利历算术在那里不成立；
 - 时钟字段越界——formatter 拒绝，而 `Date.ISO8601FormatStyle` 会归一化接受；
-- UTC 偏移越界（`> ±14:00` 或 `mm > 59`）——formatter 接受，而 `Date.ISO8601FormatStyle` 拒绝；
+- UTC 偏移越界（`> ±14:00`，含 `±14:01`–`±14:59`，或 `mm > 59`）——formatter 接受，而 `Date.ISO8601FormatStyle` 拒绝；
 - 需要归一化的日历日（如 `2025-02-29`）、分数秒，以及任何形状不匹配的输入。
 
 因此被接受的输入都是合法日历日：算术不涉及归一化，整数秒转 `Double` 精确（最大 `days × 86400 ≈ 2.53e11`，远小于 2^53），与 formatter 逐位一致。偏移量在 `Z` 的情况下按 `9999-12-31T23:59:59-14:00` 之类的极端输入已验证无整数溢出。
 
 `DevPulseNativeTests/DateFormattingTests.swift` 把上述边界固化为可执行断言：规范形状的全字段矩阵、分歧形状表、儒略历切分点、随机变异模糊输入，以及 `isoString` 在 0001-01-01 至 9999-12-31 范围内的输出比对。删除儒略历守卫后该测试会失败（已用变异验证），因此守卫不会被无声放宽。
+
+### 修订：偏移守卫的 `±14:00` 上界
+
+初版守卫写作 `offsetHour <= 14, offsetMinute <= 59`，实际接受 `±14:01` 至 `±14:59`（直接调用修订前的 `canonicalDate` 得到接受表），与注释及本文档声明的 `±14:00` 不符。当前 Foundation 的 `ISO8601DateFormatter` 恰好仍按字面读取这些越界偏移，所以快速路径的算术结果与 formatter 相同，仅比对解析值无法暴露这一差异。
+
+同一套差分夹具在修订前后分别与改动前的 `fractional ?? standard` 逐位比对：全偏移组合（0–99 时 × 0–99 分 × 两种符号 × 3 个极端时间戳，共 60,000 个）、12 个世纪的月/日矩阵、时钟字段极值、儒略历切分点，以及随机结构与字节变异输入；修订后共 132,060 个输入，0 处分歧。但 `ISO8601DateFormatter` 在 `±14:00` 之外的行为没有规范约束，等价性不应建立在它的宽容上。
+
+守卫因此收紧为 `magnitude <= 14 * 3_600`：`±14:01` 至 `±14:59` 与更大的偏移一起回落 formatter，取值由与改动前完全相同的实现决定；`±14:00` 及以内的快速路径不变。`canonicalDate` 由 `private` 改为 internal，`DateFormattingTests.canonicalFastPathStopsAtPlusMinus14Hours` 直接断言快速路径在 `±14:00` 处接受、在 `±14:01` 起拒绝，并对每个边界偏移（含 1582-10-15 与 9999-12-31 的日期边界组合）比对 formatter 基准。
+
+修订后 `./scripts/verify.sh final`：974 个测试、96 个套件通过。`python3 scripts/benchmark-date-formatting.py --baseline-git e295cdf` 的输出指纹仍为 `f11087eb6bdfc045`，与下表一致；`parse_offset` 3792x（表中原值 3808x，属测量噪声），即行为不变且无性能退化。
 
 ## 复现
 
