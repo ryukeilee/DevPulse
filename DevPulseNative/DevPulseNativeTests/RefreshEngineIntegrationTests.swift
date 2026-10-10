@@ -1091,8 +1091,96 @@ struct RefreshEngineIntegrationTests {
         #expect(Set(result.data.repositories.map(\.path)).count == 5)
     }
 
-    // MARK: - 17. Serial full scan reads every repository
+    /// Paths whose status task never started fall back to the previous payload.
+    /// That fallback is the only consumer of the merge stage's
+    /// previous-snapshot index, which is now built on first use, so this pins
+    /// both the retention behaviour and the deferred index.
+    @Test func budgetExhaustionRetainsPreviousPayloadForUnstartedPaths() async throws {
+        let root = reposRoot("budget-previous")
+        defer { try? FileManager.default.removeItem(at: root) }
 
+        let repoURLs = try (0..<5).map { i in
+            let url = root.appendingPathComponent("repo-\(i)")
+            try createTempGitRepo(at: url)
+            return url
+        }
+
+        let formatter = ISO8601DateFormatter()
+        let previousSnapshots: [RepositorySnapshot] = try repoURLs.enumerated().map { (i, url) in
+            let canonPath = RepositoryIdentity.canonicalPath(url.path)
+            let successfulAt = formatter.string(from: Date().addingTimeInterval(-3600))
+            return RepositorySnapshot(
+                id: RepositoryIdentity.id(for: canonPath),
+                name: "repo-\(i)",
+                path: canonPath,
+                branch: "previous-branch-\(i)",
+                status: .clean,
+                modifiedFileCount: 0,
+                addedFileCount: 0,
+                deletedFileCount: 0,
+                untrackedFileCount: 0,
+                stagedFileCount: 0,
+                unstagedFileCount: 0,
+                conflictedFileCount: nil,
+                aheadCount: nil,
+                hasUpstream: true,
+                changedFileCount: 0,
+                changedFilesPreview: [],
+                risk: .low,
+                lastScannedAt: successfulAt,
+                dataSource: .current,
+                lastSuccessfulScanAt: successfulAt,
+                lastChangedAt: successfulAt,
+                lastCommitID: String(repeating: "a", count: 40),
+                lastCommitSummary: "previous-summary-\(i)",
+                lastCommitMetadataAvailable: true,
+                errorMessage: nil,
+                isPinned: false
+            )
+        }
+
+        let previousSnapshot = AppGroupData(
+            schemaVersion: RepositorySnapshotSchema.version,
+            generatedAt: formatter.string(from: Date()),
+            writtenAt: nil,
+            lastSuccessfulRefreshAt: formatter.string(from: Date()),
+            scanSummary: ScanSummary.build(from: previousSnapshots),
+            repositories: previousSnapshots,
+            storageRevision: 0,
+            persistenceState: .committed
+        )
+
+        let mock = MockGitCommandRunner()
+        mock.setDelay(0.4)
+
+        let engine = RefreshEngine()
+        let result = await engine.execute(
+            config: scanConfig(maxConcurrent: 1, commandTimeout: 0.3, scanTimeout: 0.8),
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true,
+            previousSnapshot: previousSnapshot,
+            source: .manual,
+            gitCommandRunner: mock.runner()
+        )
+
+        let coreDiag = try #require(result.diagnostics.stageDiagnostics.first { $0.stage == .coreStatus })
+        #expect(coreDiag.repositoriesCompleted < 5)
+        #expect(result.data.repositories.count == 5)
+
+        // At least one path missed the stage budget, and every such path must
+        // carry the previous payload instead of an empty placeholder.
+        let retained = result.data.repositories.filter { $0.resolvedDataSource == .lastSuccessful }
+        #expect(!retained.isEmpty, "expected at least one path to retain its previous payload")
+        for snapshot in retained {
+            #expect(snapshot.branch.hasPrefix("previous-branch-"),
+                    "previous branch was not retained for \(snapshot.path)")
+            #expect(snapshot.lastCommitSummary?.hasPrefix("previous-summary-") == true,
+                    "previous commit summary was not retained for \(snapshot.path)")
+            #expect(snapshot.status == .error)
+        }
+    }
+
+    // MARK: - 17. Serial full scan reads every repository
     /// Every repository executes a status command even when a previous clean
     /// snapshot exists, and serial scheduling must retain the complete batch.
     @Test func serialFullScanReadsEveryRepository() async throws {

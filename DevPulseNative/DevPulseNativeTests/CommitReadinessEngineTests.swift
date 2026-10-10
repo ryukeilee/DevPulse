@@ -4088,6 +4088,62 @@ struct CommitReadinessEngineTests {
         #expect(refreshed.data.repositories.count == 50)
     }
 
+    /// Wide sibling discovery: one parent holding many repositories and
+    /// non-repository directories, plus a traversed non-repository directory
+    /// full of regular files and excluded subdirectories. The walk merges every
+    /// child result into one accumulator instead of rebuilding the running
+    /// result per child, and it canonicalizes a child path only once the child
+    /// is known to be a directory worth walking.
+    @Test func gitScannerDiscoversWideDirectoryAndSkipsNonRepositories() async throws {
+        let root = try temporaryDirectory(named: "scanner-wide")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repositoryCount = 40
+        var repositoryURLs: [URL] = []
+        for index in 0..<repositoryCount {
+            let url = root.appendingPathComponent("repo-\(index)")
+            try createCommittedRepository(at: url)
+            repositoryURLs.append(url)
+        }
+
+        // A traversed directory that is not itself a repository. It is mostly
+        // regular files, and the excluded directories it also holds contain a
+        // repository that discovery must never report.
+        let scratch = root.appendingPathComponent("scratch")
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        for index in 0..<200 {
+            try "file \(index)\n".write(to: scratch.appendingPathComponent("file-\(index).txt"),
+                                         atomically: true, encoding: .utf8)
+        }
+        for name in ["node_modules", "DerivedData", ".cache"] {
+            let excluded = scratch.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: excluded, withIntermediateDirectories: true)
+            try createCommittedRepository(at: excluded.appendingPathComponent("hidden-repo"))
+        }
+
+        let config = ScanConfig(
+            enabledBuiltInPaths: [],
+            customPaths: [],
+            maxDepth: testScanConfig.maxDepth,
+            changedPreviewLimit: testScanConfig.changedPreviewLimit,
+            maxConcurrentGitOps: 6,
+            gitCommandTimeout: testScanConfig.gitCommandTimeout,
+            scanTimeout: 60,
+            slowReposkipSeconds: testScanConfig.slowReposkipSeconds,
+            activeRepoThreshold: 100
+        )
+
+        let result = await GitRepositoryScanner.scan(
+            config: config,
+            scanRoots: [root.path],
+            forceRepositoryDiscovery: true
+        )
+
+        let discovered = Set(normalizeRepositoryPaths(result.data.repositories.map(\.path)))
+        #expect(discovered == Set(normalizeRepositoryPaths(repositoryURLs.map(\.path))))
+        #expect(result.data.repositories.allSatisfy { $0.status == .clean })
+    }
+
     @Test func gitScannerTimeoutRetainsPriorRepositorySnapshot() async throws {
         let root = try temporaryDirectory(named: "scanner-timeout-retain")
         defer { try? FileManager.default.removeItem(at: root) }

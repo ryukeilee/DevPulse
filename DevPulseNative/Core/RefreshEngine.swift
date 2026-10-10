@@ -1084,9 +1084,22 @@ extension RefreshEngine {
             }
         }
 
-        var previousByPath: [String: RepositorySnapshot] = [:]
-        for prev in previousSnapshot?.repositories ?? [] {
-            previousByPath[RepositoryIdentity.canonicalPath(prev.path)] = RepositoryIdentity.normalize(prev)
+        // Indexed on first use. Only the two fallback loops below consult it,
+        // and they are reached only for paths that produced no snapshot this
+        // round, so a refresh where every readable repository returned status
+        // never pays for it. Building the index eagerly canonicalized every
+        // previous repository and re-normalized it, which derives a repository
+        // ID (SHA-256 plus per-byte hex formatting) per entry.
+        var previousByPath: [String: RepositorySnapshot]?
+        func previousRepository(atCanonicalPath cpath: String) -> RepositorySnapshot? {
+            if previousByPath == nil {
+                var index: [String: RepositorySnapshot] = [:]
+                for prev in previousSnapshot?.repositories ?? [] {
+                    index[RepositoryIdentity.canonicalPath(prev.path)] = RepositoryIdentity.normalize(prev)
+                }
+                previousByPath = index
+            }
+            return previousByPath?[cpath]
         }
 
         let previousUnavailableSinceByPath = previousSnapshot?.repositoryUnavailableSinceByPath ?? [:]
@@ -1098,7 +1111,7 @@ extension RefreshEngine {
         for readablePath in discovery.readablePaths {
             let cpath = RepositoryIdentity.canonicalPath(readablePath)
             guard byPath[cpath] == nil else { continue }
-            let previous = previousByPath[cpath]
+            let previous = previousRepository(atCanonicalPath: cpath)
             byPath[cpath] = buildFailedSnapshot(
                 read: ProcessReadResult(
                     result: .timeout,
@@ -1116,7 +1129,7 @@ extension RefreshEngine {
         for unavailablePath in discovery.unavailablePaths {
             let cpath = RepositoryIdentity.canonicalPath(unavailablePath)
             guard byPath[cpath] == nil else { continue }
-            let previous = previousByPath[cpath]
+            let previous = previousRepository(atCanonicalPath: cpath)
             byPath[cpath] = buildFailedSnapshot(
                 read: ProcessReadResult(
                     result: .unavailable,

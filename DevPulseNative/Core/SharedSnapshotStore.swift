@@ -729,9 +729,8 @@ final class SharedSnapshotStore: @unchecked Sendable {
     }
 
     private func validateRepositoryPayload(_ snapshot: AppGroupData) throws {
-        // ISO8601DateFormatter is not thread-safe, so this parser is scoped to
-        // this synchronous validation pass. Reusing it avoids allocating one
-        // or two formatters for every repository timestamp.
+        // Scoped to this synchronous validation pass so one parser serves every
+        // repository timestamp in the payload.
         let timestampParser = DateFormatting.TimestampParser()
 
         // This must precede every `ScanSummary.build` call below. The model's

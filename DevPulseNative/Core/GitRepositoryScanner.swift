@@ -332,29 +332,6 @@ private struct WalkResult: Sendable {
     let unavailablePrefixes: Set<String>
     let warnings: [String]
     let isComplete: Bool
-
-    static func empty() -> WalkResult {
-        WalkResult(discovered: [], unavailablePrefixes: [], warnings: [], isComplete: true)
-    }
-
-    static func merge(_ results: [WalkResult]) -> WalkResult {
-        var discovered = Set<String>()
-        var unavailablePrefixes = Set<String>()
-        var warnings: [String] = []
-        var isComplete = true
-        for r in results {
-            discovered.formUnion(r.discovered)
-            unavailablePrefixes.formUnion(r.unavailablePrefixes)
-            warnings.append(contentsOf: r.warnings)
-            if !r.isComplete { isComplete = false }
-        }
-        return WalkResult(
-            discovered: discovered,
-            unavailablePrefixes: unavailablePrefixes,
-            warnings: warnings,
-            isComplete: isComplete
-        )
-    }
 }
 
 private struct SnapshotReadResult: Sendable {
@@ -1460,10 +1437,15 @@ enum GitRepositoryScanner {
         }
 
         // Collect subdirectories first, then walk them in parallel.
+        // `entryName` decides both the exclusion and the file/directory split,
+        // so the path is only canonicalized once an entry is known to be a
+        // directory we will walk (or a failed attribute read we must report).
+        // Canonicalization resolves the built-in home prefixes and touches the
+        // filesystem, which was previously paid for every excluded entry and
+        // every regular file in a traversed non-repository directory.
         var subdirectories: [String] = []
         for entryURL in entries {
             if Date() >= overallDeadline || Task.isCancelled { break }
-            let fullPath = ScanLocationProvider.canonicalExistingFilePath(entryURL.path, resolveBuiltIn: true)
             let entryName = entryURL.lastPathComponent
 
             guard !ExcludedDirectoryRules.isExcluded(dirName: entryName) else { continue }
@@ -1474,13 +1456,17 @@ enum GitRepositoryScanner {
                 isDirectory = values.isDirectory ?? false
             } catch {
                 if !isMissingFileError(error) {
-                    unavailablePrefixes.insert(fullPath)
+                    unavailablePrefixes.insert(
+                        ScanLocationProvider.canonicalExistingFilePath(entryURL.path, resolveBuiltIn: true)
+                    )
                     traversalState.markUnavailable()
                 }
                 continue
             }
             guard isDirectory else { continue }
-            subdirectories.append(fullPath)
+            subdirectories.append(
+                ScanLocationProvider.canonicalExistingFilePath(entryURL.path, resolveBuiltIn: true)
+            )
         }
 
         if !subdirectories.isEmpty {
@@ -1511,16 +1497,25 @@ enum GitRepositoryScanner {
                     }
                 }
 
-                var merged = WalkResult.empty()
+                // Accumulate in place. Rebuilding the running result per child
+                // re-copied every already-merged entry, making a parent with
+                // many subdirectories quadratic in the merged set sizes.
+                var discovered = Set<String>()
+                var unavailable = Set<String>()
+                var warnings: [String] = []
+                var isComplete = true
                 for await result in group {
-                    merged = WalkResult(
-                        discovered: merged.discovered.union(result.discovered),
-                        unavailablePrefixes: merged.unavailablePrefixes.union(result.unavailablePrefixes),
-                        warnings: merged.warnings + result.warnings,
-                        isComplete: merged.isComplete && result.isComplete
-                    )
+                    discovered.formUnion(result.discovered)
+                    unavailable.formUnion(result.unavailablePrefixes)
+                    warnings.append(contentsOf: result.warnings)
+                    isComplete = isComplete && result.isComplete
                 }
-                return merged
+                return WalkResult(
+                    discovered: discovered,
+                    unavailablePrefixes: unavailable,
+                    warnings: warnings,
+                    isComplete: isComplete
+                )
             }
 
             discovered.formUnion(results.discovered)
