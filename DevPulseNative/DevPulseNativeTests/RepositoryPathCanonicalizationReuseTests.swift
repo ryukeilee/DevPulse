@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import Testing
@@ -575,5 +576,79 @@ struct RepositoryPathCanonicalizationReuseTests {
 
         print(String(format: "canonicalization_cost per_call_us=%.2f samples=%d total_ms=%.1f loadavg=%@",
                      perCallMicroseconds, samples, elapsed * 1000, loadText))
+    }
+
+    // MARK: - 6. Repository identity digest encoding
+
+    /// `RepositoryIdentity.id(for:)` replaces the per-byte `String(format:)`
+    /// digest encoding with a digit-table encoder. Repository ids are persisted
+    /// in the shared snapshot and used as pin keys, so the encoding must stay
+    /// byte-identical. The reference encoder below is the pre-change
+    /// implementation, kept in the test as an independent oracle.
+    private func referenceID(for canonicalPath: String) -> String {
+        let digest = SHA256.hash(data: Data(canonicalPath.utf8))
+        return "repo-v1-" + digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    @Test func repositoryIdentityDigestEncodingIsByteIdenticalToReference() throws {
+        var inputs: [String] = []
+        for index in 0..<600 {
+            inputs.append("/devpulse-identity/repo-\(index)")
+            inputs.append("/devpulse-identity/\(index)/sub/../sub/repo\(index)")
+            inputs.append("")
+            inputs.append("~/devpulse-identity-\(index)")
+            inputs.append("/devpulse-identity/ünïcode-日本語-\(index)")
+            inputs.append("/devpulse-identity/trailing/\(index)/")
+            inputs.append(String(repeating: "segment\(index)/", count: index % 9 + 1))
+        }
+
+        var mismatches: [String] = []
+        var observedDigestBytes: Set<UInt8> = []
+        for input in inputs {
+            let canonical = RepositoryIdentity.canonicalPath(input)
+            let expected = referenceID(for: canonical)
+            let actual = RepositoryIdentity.id(for: input)
+            if actual != expected {
+                mismatches.append("\(input) -> \(actual) (expected \(expected))")
+            }
+            let digest = SHA256.hash(data: Data(canonical.utf8))
+            digest.withUnsafeBytes { buffer in
+                for byte in buffer { observedDigestBytes.insert(byte) }
+            }
+        }
+
+        print("canonicalization_identity_encoding inputs=\(inputs.count) "
+              + "distinct_digest_bytes=\(observedDigestBytes.count) mismatches=\(mismatches.count)")
+        #expect(mismatches.isEmpty, "digest encoding changed: \(mismatches.prefix(3))")
+        // Every byte value must be exercised, otherwise the comparison above
+        // could pass while leaving part of the digit table unverified.
+        #expect(observedDigestBytes.count == 256, "digest byte coverage=\(observedDigestBytes.count)/256")
+    }
+
+    @Test func repositoryIdentityDigestEncodingHandlesEveryDigestByteValue() throws {
+        // Drive the real encoder with digests whose bytes cover all 256 values,
+        // then compare each encoding against the reference encoder.
+        var candidates: [SHA256Digest] = []
+        var covered: Set<UInt8> = []
+        var index = 0
+        while covered.count < 256 && index < 5_000 {
+            let digest = SHA256.hash(data: Data("devpulse-digest-byte-coverage-\(index)".utf8))
+            candidates.append(digest)
+            digest.withUnsafeBytes { buffer in
+                for byte in buffer { covered.insert(byte) }
+            }
+            index += 1
+        }
+
+        var mismatches = 0
+        for digest in candidates {
+            let reference = digest.map { String(format: "%02x", $0) }.joined()
+            if RepositoryIdentity.hexDigest(digest) != reference { mismatches += 1 }
+        }
+        print("canonicalization_identity_byte_table digests=\(candidates.count) "
+              + "distinct_digest_bytes=\(covered.count) mismatches=\(mismatches)")
+        #expect(covered.count == 256, "digest byte coverage=\(covered.count)/256")
+        #expect(mismatches == 0)
+        #expect(RepositoryIdentity.hexDigest(SHA256.hash(data: Data())).count == 64)
     }
 }

@@ -235,10 +235,34 @@ enum RepositoryIdentity {
         return String(cString: home)
     }
 
+    /// Lowercase hex digits for the digest encoding below.
+    private static let hexDigits: [UInt8] = Array("0123456789abcdef".utf8)
+
+    /// Encode a SHA-256 digest as lowercase hex.
+    ///
+    /// `digest.map { String(format: "%02x", $0) }.joined()` re-enters the C
+    /// varargs formatter once per byte, which measured ~29 µs per identifier —
+    /// about 97% of `id(for:)`. The digit-table encoding below produces the
+    /// byte-identical string for a fraction of that cost, which matters because
+    /// repository identity is recomputed several times per repository on every
+    /// refresh (normalization, identity migration, scope filtering and the
+    /// scan itself).
+    static func hexDigest(_ digest: SHA256Digest) -> String {
+        digest.withUnsafeBytes { buffer in
+            var hex = [UInt8]()
+            hex.reserveCapacity(buffer.count * 2)
+            for byte in buffer {
+                hex.append(hexDigits[Int(byte >> 4)])
+                hex.append(hexDigits[Int(byte & 0x0F)])
+            }
+            return String(decoding: hex, as: UTF8.self)
+        }
+    }
+
     static func id(for rawPath: String) -> String {
         let path = canonicalPath(rawPath)
         let digest = SHA256.hash(data: Data(path.utf8))
-        return prefix + digest.map { String(format: "%02x", $0) }.joined()
+        return prefix + hexDigest(digest)
     }
 
     static func normalize(_ snapshot: RepositorySnapshot) -> RepositorySnapshot {
