@@ -533,8 +533,78 @@ struct SharedSnapshotStoreTests {
         #expect(barrier < fileSync, "the recovery-copy sync must follow the last directory barrier")
         #expect(write < fileSync, "a recovery copy is synchronized before it is renamed")
         #expect(operations.last == .fullFileSync)
+        #expect(
+            !operations.contains(.fileSyncFallback),
+            "this host must take the strong file barrier for the ordering claim to apply"
+        )
         #expect(try Data(contentsOf: snapshotStore.primaryURL)
             == Data(contentsOf: snapshotStore.backupURL))
+    }
+
+    @Test func weakPayloadSyncKeepsTheRecoveryBarrier() throws {
+        let directory = try temporaryDirectory()
+        defer { removeTemporaryDirectory(directory) }
+
+        let gate = InjectionGate()
+        let recorder = SnapshotOperationRecorder()
+        let snapshotStore = SharedSnapshotStore(
+            directoryURL: directory,
+            fileName: "repositories.json",
+            now: { Self.date("2026-07-18T10:00:00Z") },
+            failureInjector: { phase in
+                if phase == .fullSyncUnavailable, gate.isEnabled {
+                    throw InjectedFailure.fullSyncUnavailable
+                }
+            },
+            operationObserver: { recorder.record($0) }
+        )
+        try requireSuccess(
+            snapshotStore.commit(fixture(label: "initial", timestamp: "2026-07-18T09:00:00Z"))
+        )
+
+        // On a filesystem where F_FULLFSYNC is unavailable, `synchronizeFile`
+        // degrades to `fsync`, which is not a device flush. The recovery payload
+        // is then only durable once something after its rename flushes the
+        // device; the commit-point barrier ran before that payload existed, so
+        // the recovery advance must re-open its own barrier instead of riding on
+        // the next commit's. Dropping it here would let a power loss leave a
+        // recovery name pointing at unwritten payload data.
+        gate.isEnabled = true
+        recorder.reset()
+        let committed = try requireSuccess(
+            snapshotStore.commit(fixture(label: "weak-sync", timestamp: "2026-07-18T10:00:00Z"))
+        )
+
+        var operations = recorder.operations()
+        #expect(
+            operations.contains(.fileSyncFallback),
+            "the injected weak path must actually be taken"
+        )
+        #expect(
+            operations.filter { $0 == .fullDirectorySync }.count == 2,
+            "a weak payload sync must add the recovery barrier back"
+        )
+        #expect(
+            operations.last == .fullDirectorySync,
+            "the recovery barrier must be issued after the weak recovery rename"
+        )
+        #expect(try Data(contentsOf: snapshotStore.primaryURL)
+            == Data(contentsOf: snapshotStore.backupURL))
+        let primary = try requireSuccess(snapshotStore.load())
+        #expect(primary.source == .primary)
+        #expect(primary.snapshot == committed)
+
+        // The strong path is restored as soon as the barrier is available
+        // again, so the merge's saving is not traded away permanently.
+        gate.isEnabled = false
+        recorder.reset()
+        try requireSuccess(
+            snapshotStore.commit(fixture(label: "strong-again", timestamp: "2026-07-18T10:30:00Z"))
+        )
+        operations = recorder.operations()
+        #expect(!operations.contains(.fileSyncFallback))
+        #expect(operations.filter { $0 == .fullDirectorySync }.count == 1)
+        #expect(operations.last == .fullFileSync)
     }
 
     @Test func failedCommitPointBarrierKeepsASecondDurabilityChance() throws {
@@ -1138,6 +1208,7 @@ private final class InjectionGate: @unchecked Sendable {
 private enum InjectedFailure: Error {
     case beforePrimaryReplacement
     case beforePrimaryBarrier
+    case fullSyncUnavailable
     case afterPrimaryReplacement
 }
 

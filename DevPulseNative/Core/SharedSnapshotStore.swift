@@ -19,6 +19,10 @@ enum SharedSnapshotCommitPhase: Equatable {
     /// Simulates a failing directory barrier immediately after the commit-point
     /// rename. Throwing here makes the store take its second-chance path.
     case beforePrimaryBarrier
+    /// Simulates a filesystem on which `F_FULLFSYNC` is unavailable, forcing the
+    /// weak `fsync` fallback in `synchronizeFile(at:)`. Throwing here does not
+    /// fail the write; it only makes the store take its fallback path.
+    case fullSyncUnavailable
     case afterPrimaryReplacement
 }
 
@@ -878,17 +882,23 @@ final class SharedSnapshotStore: @unchecked Sendable {
     /// stays on for every write that must be durable before the commit point,
     /// and is turned off only for the post-commit recovery-copy advance, whose
     /// rename is deliberately allowed to ride on the next directory barrier.
+    ///
+    /// Returns whether the payload got a strong file barrier, so a caller that
+    /// skipped the directory barrier can tell whether the payload is durable
+    /// without it. A `false` result never fails the write.
+    @discardableResult
     private func atomicWrite(
         _ bytes: Data,
         to destination: URL,
         synchronizingDirectory: Bool = true
-    ) throws {
+    ) throws -> Bool {
         let temporaryURL = makeTemporaryURL()
         defer { try? fileManager.removeItem(at: temporaryURL) }
+        let payloadIsStronglySynchronized: Bool
         do {
             try bytes.write(to: temporaryURL, options: [.withoutOverwriting])
             operationObserver?(.fileWrite)
-            try synchronizeFile(at: temporaryURL)
+            payloadIsStronglySynchronized = try synchronizeFile(at: temporaryURL)
         } catch {
             throw AppGroupStoreError.writeFailed(
                 "failed to stage \(destination.lastPathComponent): \(error.localizedDescription)"
@@ -899,8 +909,10 @@ final class SharedSnapshotStore: @unchecked Sendable {
                 "failed to replace \(destination.lastPathComponent): \(posixDescription())"
             )
         }
-        guard synchronizingDirectory else { return }
-        try synchronizeDirectory()
+        if synchronizingDirectory {
+            try synchronizeDirectory()
+        }
+        return payloadIsStronglySynchronized
     }
 
     private func prepareRecoveryCopy(
@@ -917,9 +929,11 @@ final class SharedSnapshotStore: @unchecked Sendable {
             try synchronizeFile(at: backupURL)
             try synchronizeDirectory()
         case .preserveIdenticalBackup:
-            // This backup is byte-identical to the verified primary and was
-            // durably published by the preceding commit. It is already a
-            // suitable recovery copy before the next primary rename.
+            // This backup is byte-identical to the verified primary and the
+            // preceding commit published it durably: its payload either reached
+            // the strong file barrier or was covered by a directory barrier
+            // issued after its rename. It is already a suitable recovery copy
+            // before the next primary rename.
             break
         case .publishCandidate:
             try atomicWrite(candidateBytes, to: backupURL)
@@ -942,16 +956,26 @@ final class SharedSnapshotStore: @unchecked Sendable {
     ///
     /// `synchronizingDirectory` re-opens the barrier only when the commit-point
     /// barrier failed, restoring the second chance the merge removed.
+    ///
+    /// It is also re-opened when the payload itself only reached the weak
+    /// `fsync` fallback: that path leaves the recovery file's data dependent on
+    /// a device flush issued after this rename, and the commit-point barrier ran
+    /// before the payload was even written, so it cannot serve as that flush.
+    /// The directory barrier below is then the only thing that makes a recovery
+    /// copy safe to read after a power loss.
     private func refreshRecoveryCopyAfterCommit(
         _ committedBytes: Data,
         synchronizingDirectory: Bool
     ) {
         do {
-            try atomicWrite(
+            let payloadIsStronglySynchronized = try atomicWrite(
                 committedBytes,
                 to: backupURL,
                 synchronizingDirectory: synchronizingDirectory
             )
+            if !payloadIsStronglySynchronized, !synchronizingDirectory {
+                try synchronizeDirectory()
+            }
         } catch {
             // The pre-commit recovery copy remains valid. This is deliberately
             // non-fatal because the primary rename is the sole commit point.
@@ -1008,7 +1032,16 @@ final class SharedSnapshotStore: @unchecked Sendable {
         directoryURL.appendingPathComponent("\(temporaryFilePrefix)\(UUID().uuidString)")
     }
 
-    private func synchronizeFile(at url: URL) throws {
+    /// Synchronize the file's contents against the device.
+    ///
+    /// Returns whether the strong barrier (`F_FULLFSYNC`) was available. The
+    /// weak `fsync` fallback still counts as success here, but it is not a
+    /// device flush: a caller that is allowed to skip a later directory barrier
+    /// must treat `false` as "not durable yet" and keep that barrier, because
+    /// only a strong file barrier makes the payload independent of a subsequent
+    /// directory flush.
+    @discardableResult
+    private func synchronizeFile(at url: URL) throws -> Bool {
         let descriptor = Darwin.open(url.path, O_RDONLY)
         guard descriptor >= 0 else {
             throw AppGroupStoreError.writeFailed(
@@ -1018,14 +1051,27 @@ final class SharedSnapshotStore: @unchecked Sendable {
         defer { Darwin.close(descriptor) }
 
         operationObserver?(.fullFileSync)
-        if Darwin.fcntl(descriptor, F_FULLFSYNC) == 0 {
-            return
+        do {
+            try failureInjector?(.fullSyncUnavailable)
+        } catch {
+            operationObserver?(.fileSyncFallback)
+            guard Darwin.fsync(descriptor) == 0 else {
+                throw AppGroupStoreError.writeFailed(
+                    "failed to synchronize staged file: \(posixDescription())"
+                )
+            }
+            return false
         }
+        if Darwin.fcntl(descriptor, F_FULLFSYNC) == 0 {
+            return true
+        }
+        operationObserver?(.fileSyncFallback)
         guard Darwin.fsync(descriptor) == 0 else {
             throw AppGroupStoreError.writeFailed(
                 "failed to synchronize staged file: \(posixDescription())"
             )
         }
+        return false
     }
 
     /// Returns whether the commit-point rename became durable. A failure must
@@ -1177,6 +1223,10 @@ fileprivate enum RecoveryCopyPlan {
 enum SharedSnapshotStoreOperation: Equatable {
     case fileWrite
     case fullFileSync
+    /// The strong barrier was unavailable, so the payload was synchronized with
+    /// the weak `fsync` fallback instead. Recorded before that call, like the
+    /// other sync events, so it marks the attempt rather than its outcome.
+    case fileSyncFallback
     case fullDirectorySync
     case jsonDecode
     case jsonEncode

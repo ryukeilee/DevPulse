@@ -67,6 +67,42 @@ copy 对照路径由 `3 写 + 6 屏障` 变为 `3 写 + 5 屏障`。
 ——两者均已修正（门禁增加逐变体断言并已用合成输入验证；失败路径测试改为在同一测试内同时断言
 失败与成功两种顺序）。
 
+### 2.2 修正：弱文件同步不得跳过 recovery 屏障（独立复核发现）
+
+上面的 §2.1 排序论证只覆盖**元数据**顺序，没有覆盖 payload **数据**的持久性，而
+`synchronizeFile(at:)` 在 `F_FULLFSYNC` 不可用时会降级为 `fsync` 并仍算成功。`fsync` 不保证
+设备缓存落盘，因此存在如下最小序列：
+
+1. staging 强同步成功；提交点 rename 与目录 `F_FULLFSYNC` 成功 → `primary=N` 已持久。
+2. 写 recovery 临时文件；其 `F_FULLFSYNC` 失败、`fsync` 成功（弱同步）。
+3. rename 覆盖 `backupURL`；因为提交点屏障成功，尾部屏障被跳过。
+4. recovery 的 rename 元数据落盘、payload 数据未落盘时掉电 →
+   `(primary=N 可读, backup=不可解码的新文件)`，旧 backup 已被替换。
+
+旧实现在 recovery rename 之后还有一次**强**目录屏障，本来可以补齐这次弱文件同步；本改动删除
+了它，并且只根据提交点屏障的成功与否决定是否恢复，因此没有识别弱同步。
+
+修正（`SharedSnapshotStore.swift`）：
+
+1. `synchronizeFile(at:)` 现在返回「是否拿到强屏障（`F_FULLFSYNC`）」，弱 `fsync` 回落仍算成功
+   但返回 `false`；`atomicWrite(_:to:synchronizingDirectory:)` 把该结果向上传递。
+2. `refreshRecoveryCopyAfterCommit` 在 **payload 只拿到弱同步** 且自己跳过了屏障时，重新发出
+   目录屏障。这是原实现唯一被本改动削弱的地方，现在按条件原样还回去。
+3. 新增观察事件 `SharedSnapshotStoreOperation.fileSyncFallback`（记录弱回落的**尝试**，与其它
+   同步事件一样记在系统调用之前）与注入 phase `SharedSnapshotCommitPhase.fullSyncUnavailable`
+   （抛出即模拟 `F_FULLFSYNC` 不可用的文件系统，不影响写入成败）。
+4. 新测试 `weakPayloadSyncKeepsTheRecoveryBarrier()` 钉住：弱路径下 `fileSyncFallback` 出现、
+   目录屏障由 1 次变为 2 次且最后一次操作是 `.fullDirectorySync`（即发生在 recovery rename
+   之后）、`primary == backup` 且 `load()` 仍返回刚提交的快照；同一测试随后关闭注入，验证强
+   路径恢复为「1 次目录屏障、末尾文件同步」。已有
+   `steadyStateCommitEndsWithoutASecondDirectoryBarrier()` 增加断言：强路径下不得出现
+   `fileSyncFallback`，即 §2.1 的排序论证确实运行在强同步之上。
+
+ledger 影响：强路径不变（稳态 `2 写 + 3 屏障`、非 identical `3 写 + 5 屏障`），因此 §4 的 A/B
+数据与 §3 的指纹门禁全部保持有效；**仅在弱同步的退化路径**上回到原行为（稳态 `2 写 + 4 屏障`），
+即用一次屏障换回 payload 数据的持久性。APFS 启动卷上 `F_FULLFSYNC` 正常可用，该退化路径属容错
+分支；测试用注入 phase 确定性覆盖，不依赖宿主文件系统真的拒绝 `F_FULLFSYNC`。
+
 ## 3. 行为等价证据
 
 `scripts/benchmark-snapshot-persistence.sh` 现在把等价性做成**退出码门禁**，不再是人工目视：
@@ -181,7 +217,8 @@ CPU 列两版一致（如 `commit_only` 240 仓库 13.28 → 12.95 ms），说�
 - 未在真实掉电条件下验证 APFS 目录 `F_FULLFSYNC` 的取舍顺序。§2.1 的排序论证依赖「目录屏障
   覆盖该目录内全部 pending 元数据」，属代码级论证 + 确定性 ledger 证据，不是掉电实测。
 - 提交点屏障失败时的「第二次机会」只有定向注入测试覆盖（`beforePrimaryBarrier`）；真实
-  `open`/`fcntl` 失败路径未能构造。
+  `open`/`fcntl` 失败路径未能构造。同样，弱文件同步回落（`fullSyncUnavailable`）只有注入覆盖，
+  未在真会拒绝 `F_FULLFSYNC` 的卷上验证。
 - 未安装或改动用户正在运行的 App，未验证桌面上已注册 Widget 的实际唤起与呈现时延。
 - 性能数字来自本机隔离合成 Git 仓库与临时目录（同一 APFS 卷），不能外推为所有用户仓库的收益；
   240 仓库以上的收益显著小于小规模场景。
