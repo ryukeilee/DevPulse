@@ -159,6 +159,13 @@ git show hp/devpulse/t-0008-main:docs/main-test-baseline.md
 
 ## 2. A —— 确定性计数（主证据，全部由本线程重跑复现）
 
+> **后续修订（2026-10-14，`docs/snapshot-commit-barrier-performance.md`）**：本节及其后各节
+> 记录的 ledgers 是针对 commit `2db9218` 的历史证据。此后提交尾部那次冗余目录屏障被移除，
+> 当前期望值为 `non-identical writes=3, F_FULLFSYNC=5`、`steady-state writes=2,
+> F_FULLFSYNC=3`；`refreshRecoveryCopyAfterCommit` 也不再带头部列出的
+> `rename → synchronizeDirectory` 链（同一提交点的 longevity 由条件回退保证）。本节其余
+> 论证与历史数据保持原样，不改写。
+
 ### 2.1 A.1 共享快照 commit 的稳态 I/O
 
 `verify.sh test` 在成功时会删除自身日志，为取得测试内的原始 `print` 行，这里直接运行它内部

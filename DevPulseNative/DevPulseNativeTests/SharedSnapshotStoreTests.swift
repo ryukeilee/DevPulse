@@ -451,7 +451,7 @@ struct SharedSnapshotStoreTests {
         let jsonEncodeCount = operations.filter { $0 == .jsonEncode }.count
         print("SharedSnapshotStore non-identical recovery operations: writes=\(writeCount), F_FULLFSYNC=\(fullSyncCount), json_decodes=\(jsonDecodeCount), json_encodes=\(jsonEncodeCount)")
         #expect(writeCount == 3)
-        #expect(fullSyncCount == 6)
+        #expect(fullSyncCount == 5)
         #expect(jsonDecodeCount == 9)
         #expect(jsonEncodeCount == 1)
         #expect(try Data(contentsOf: snapshotStore.primaryURL)
@@ -489,11 +489,114 @@ struct SharedSnapshotStoreTests {
         let jsonEncodeCount = operations.filter { $0 == .jsonEncode }.count
         print("SharedSnapshotStore steady-state operations: writes=\(writeCount), F_FULLFSYNC=\(fullSyncCount), json_decodes=\(jsonDecodeCount), json_encodes=\(jsonEncodeCount)")
         #expect(writeCount == 2)
-        #expect(fullSyncCount == 4)
+        #expect(fullSyncCount == 3)
         #expect(jsonDecodeCount == 6)
         #expect(jsonEncodeCount == 1)
         #expect(try Data(contentsOf: snapshotStore.primaryURL)
             == Data(contentsOf: snapshotStore.backupURL))
+    }
+
+    @Test func steadyStateCommitEndsWithoutASecondDirectoryBarrier() throws {
+        let directory = try temporaryDirectory()
+        defer { removeTemporaryDirectory(directory) }
+
+        let recorder = SnapshotOperationRecorder()
+        let snapshotStore = SharedSnapshotStore(
+            directoryURL: directory,
+            fileName: "repositories.json",
+            now: { Self.date("2026-07-18T10:00:00Z") },
+            operationObserver: { recorder.record($0) }
+        )
+        try requireSuccess(
+            snapshotStore.commit(fixture(label: "initial", timestamp: "2026-07-18T09:00:00Z"))
+        )
+
+        recorder.reset()
+        try requireSuccess(
+            snapshotStore.commit(fixture(label: "next", timestamp: "2026-07-18T10:00:00Z"))
+        )
+
+        // The commit-point rename is followed by one directory barrier. The
+        // recovery-copy advance that runs afterwards renames its verified
+        // payload into place but opens no barrier of its own, so it can only
+        // ever lag the primary; on a crash the previous verified recovery copy
+        // survives instead of a name whose content was never synchronized.
+        let operations = recorder.operations()
+        let lastBarrier = operations.lastIndex { $0 == .fullDirectorySync }
+        let lastWrite = operations.lastIndex { $0 == .fileWrite }
+        let lastFileSync = operations.lastIndex { $0 == .fullFileSync }
+        #expect(operations.filter { $0 == .fullDirectorySync }.count == 1)
+        let barrier = try #require(lastBarrier)
+        let write = try #require(lastWrite)
+        let fileSync = try #require(lastFileSync)
+        #expect(barrier < write, "the recovery-copy write must follow the last directory barrier")
+        #expect(barrier < fileSync, "the recovery-copy sync must follow the last directory barrier")
+        #expect(write < fileSync, "a recovery copy is synchronized before it is renamed")
+        #expect(operations.last == .fullFileSync)
+        #expect(try Data(contentsOf: snapshotStore.primaryURL)
+            == Data(contentsOf: snapshotStore.backupURL))
+    }
+
+    @Test func failedCommitPointBarrierKeepsASecondDurabilityChance() throws {
+        let directory = try temporaryDirectory()
+        defer { removeTemporaryDirectory(directory) }
+
+        let gate = InjectionGate()
+        let recorder = SnapshotOperationRecorder()
+        let snapshotStore = SharedSnapshotStore(
+            directoryURL: directory,
+            fileName: "repositories.json",
+            now: { Self.date("2026-07-18T10:00:00Z") },
+            failureInjector: { phase in
+                if phase == .beforePrimaryBarrier, gate.isEnabled {
+                    throw InjectedFailure.beforePrimaryBarrier
+                }
+            },
+            operationObserver: { recorder.record($0) }
+        )
+        try requireSuccess(
+            snapshotStore.commit(fixture(label: "initial", timestamp: "2026-07-18T09:00:00Z"))
+        )
+
+        // A failed commit-point barrier must not turn the commit into a
+        // reported failure, and the recovery-copy advance has to re-open the
+        // barrier so the commit point still gets a second chance to become
+        // durable. The circuit is conditional, which both halves below pin: the
+        // failure path ends on a directory barrier, the success path ends on the
+        // recovery payload's own synchronization with no barrier after it.
+        // `steadyStateCommitEndsWithoutASecondDirectoryBarrier()` pins the same
+        // success-path ordering on a store without an injector.
+        gate.isEnabled = true
+        recorder.reset()
+        let committed = try requireSuccess(
+            snapshotStore.commit(fixture(label: "published", timestamp: "2026-07-18T10:00:00Z"))
+        )
+
+        #expect(committed.repositories.first?.id == "published")
+        var operations = recorder.operations()
+        #expect(operations.filter { $0 == .fullDirectorySync }.count == 1)
+        #expect(operations.filter { $0 == .fullFileSync || $0 == .fullDirectorySync }.count == 3)
+        #expect(
+            operations.last == .fullDirectorySync,
+            "a failed commit-point barrier must be re-established by the recovery barrier"
+        )
+        #expect(try Data(contentsOf: snapshotStore.primaryURL)
+            == Data(contentsOf: snapshotStore.backupURL))
+        let primary = try requireSuccess(snapshotStore.load())
+        #expect(primary.source == .primary)
+        #expect(primary.snapshot == committed)
+
+        gate.isEnabled = false
+        recorder.reset()
+        try requireSuccess(
+            snapshotStore.commit(fixture(label: "settled", timestamp: "2026-07-18T10:30:00Z"))
+        )
+        operations = recorder.operations()
+        #expect(operations.filter { $0 == .fullDirectorySync }.count == 1)
+        #expect(
+            operations.last == .fullFileSync,
+            "a successful commit-point barrier leaves the recovery rename unbarriered"
+        )
     }
 
     @Test func byteIdenticalPrimaryAndBackupShareOneDecodeOnLoad() throws {
@@ -1028,8 +1131,13 @@ private actor ConcurrentReadCollector {
     }
 }
 
+private final class InjectionGate: @unchecked Sendable {
+    var isEnabled = false
+}
+
 private enum InjectedFailure: Error {
     case beforePrimaryReplacement
+    case beforePrimaryBarrier
     case afterPrimaryReplacement
 }
 

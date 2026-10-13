@@ -230,9 +230,13 @@ apply_baseline_isolation_shim() {
 
     # The benchmark's scheduler probe is measurement-only instrumentation;
     # apply that exact diff to the archived baseline so both variants expose
-    # the same observer without importing unrelated production changes.
-    git diff "$BASELINE_REV" -- DevPulseNative/Core/ScanScheduler.swift DevPulseNative/Core/RefreshEngine.swift \
-        | (cd "$tree" && git apply --directory=.)
+    # the same observer without importing unrelated production changes. An
+    # empty diff (baseline already carries the probe, e.g. a same-revision
+    # comparison of an unrelated file) means there is nothing to inject.
+    if ! git diff --quiet "$BASELINE_REV" -- DevPulseNative/Core/ScanScheduler.swift DevPulseNative/Core/RefreshEngine.swift; then
+        git diff "$BASELINE_REV" -- DevPulseNative/Core/ScanScheduler.swift DevPulseNative/Core/RefreshEngine.swift \
+            | (cd "$tree" && git apply --directory=.)
+    fi
 
     cp "$ROOT_DIR/$TEST_SOURCE" "$tree/$TEST_SOURCE"
     if grep -R -n -E 'FileManager\.default\.containerURL\(|UserDefaults\(suiteName: AppGroupStore\.appGroupIdentifier' \

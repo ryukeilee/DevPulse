@@ -16,6 +16,9 @@ struct SharedSnapshotRead: Equatable {
 enum SharedSnapshotCommitPhase: Equatable {
     case afterStaging
     case beforePrimaryReplacement
+    /// Simulates a failing directory barrier immediately after the commit-point
+    /// rename. Throwing here makes the store take its second-chance path.
+    case beforePrimaryBarrier
     case afterPrimaryReplacement
 }
 
@@ -496,7 +499,14 @@ final class SharedSnapshotStore: @unchecked Sendable {
                 "atomic primary replacement failed: \(posixDescription())"
             )
         }
-        synchronizeDirectoryBestEffort()
+
+        // A single directory barrier is enough once it succeeds: the recovery
+        // rename below is issued strictly after it, so the recovery entry can
+        // only ever lag the primary. A failed barrier is not fatal (the rename
+        // has already happened), but it must not cost the commit point its
+        // second chance, so the recovery advance re-opens the barrier in that
+        // case.
+        let commitPointIsDurable = synchronizeDirectoryBestEffort()
 
         do {
             try failureInjector?(.afterPrimaryReplacement)
@@ -510,7 +520,10 @@ final class SharedSnapshotStore: @unchecked Sendable {
         // Advance the backup when possible. A failure cannot invalidate the
         // commit: `prepareRecoveryCopy` already left a verified fallback, and
         // `atomicWrite` never exposes a partial destination.
-        refreshRecoveryCopyAfterCommit(encoded)
+        refreshRecoveryCopyAfterCommit(
+            encoded,
+            synchronizingDirectory: !commitPointIsDurable
+        )
         return prepared
     }
 
@@ -859,7 +872,17 @@ final class SharedSnapshotStore: @unchecked Sendable {
 
     // MARK: - File transaction helpers
 
-    private func atomicWrite(_ bytes: Data, to destination: URL) throws {
+    /// Publish `bytes` at `destination` through one atomic rename.
+    ///
+    /// `synchronizingDirectory` is the durability barrier for that rename. It
+    /// stays on for every write that must be durable before the commit point,
+    /// and is turned off only for the post-commit recovery-copy advance, whose
+    /// rename is deliberately allowed to ride on the next directory barrier.
+    private func atomicWrite(
+        _ bytes: Data,
+        to destination: URL,
+        synchronizingDirectory: Bool = true
+    ) throws {
         let temporaryURL = makeTemporaryURL()
         defer { try? fileManager.removeItem(at: temporaryURL) }
         do {
@@ -876,6 +899,7 @@ final class SharedSnapshotStore: @unchecked Sendable {
                 "failed to replace \(destination.lastPathComponent): \(posixDescription())"
             )
         }
+        guard synchronizingDirectory else { return }
         try synchronizeDirectory()
     }
 
@@ -902,9 +926,32 @@ final class SharedSnapshotStore: @unchecked Sendable {
         }
     }
 
-    private func refreshRecoveryCopyAfterCommit(_ committedBytes: Data) {
+    /// Move the recovery copy onto the generation that was just committed.
+    ///
+    /// This rename is issued strictly after the commit-point rename and its
+    /// directory barrier, and no barrier exists between the two renames, so the
+    /// recovery entry can only ever lag the primary: any barrier that could make
+    /// this rename durable is itself issued after the commit-point rename and
+    /// therefore flushes that one too. Dropping the rename on a crash leaves the
+    /// previous verified recovery copy in place — exactly the fallback
+    /// `prepareRecoveryCopy` already guaranteed before the commit point — and
+    /// the next commit's directory barrier, or the filesystem's own journal
+    /// commit, publishes it. The payload is still synchronized before `rename`,
+    /// because a recovery copy whose name is durable but whose content is not
+    /// would be worse than a stale one.
+    ///
+    /// `synchronizingDirectory` re-opens the barrier only when the commit-point
+    /// barrier failed, restoring the second chance the merge removed.
+    private func refreshRecoveryCopyAfterCommit(
+        _ committedBytes: Data,
+        synchronizingDirectory: Bool
+    ) {
         do {
-            try atomicWrite(committedBytes, to: backupURL)
+            try atomicWrite(
+                committedBytes,
+                to: backupURL,
+                synchronizingDirectory: synchronizingDirectory
+            )
         } catch {
             // The pre-commit recovery copy remains valid. This is deliberately
             // non-fatal because the primary rename is the sole commit point.
@@ -981,8 +1028,20 @@ final class SharedSnapshotStore: @unchecked Sendable {
         }
     }
 
-    private func synchronizeDirectoryBestEffort() {
-        try? synchronizeDirectory()
+    /// Returns whether the commit-point rename became durable. A failure must
+    /// not be fatal here, but the caller has to know about it so the next
+    /// barrier stays available as a second chance.
+    private func synchronizeDirectoryBestEffort() -> Bool {
+        do {
+            try failureInjector?(.beforePrimaryBarrier)
+            try synchronizeDirectory()
+            return true
+        } catch {
+            logger.warning(
+                "Snapshot directory barrier failed after the commit point: \(error.localizedDescription)"
+            )
+            return false
+        }
     }
 
     private func synchronizeDirectory() throws {

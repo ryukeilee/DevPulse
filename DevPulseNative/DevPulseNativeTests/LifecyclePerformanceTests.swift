@@ -112,10 +112,10 @@ struct LifecyclePerformanceTests {
                     + "optimized_full_syncs=\(operations.optimizedFullSyncs)"
             )
             #expect(operations.redundantWrites == 3)
-            #expect(operations.redundantFullSyncs == 6)
+            #expect(operations.redundantFullSyncs == 5)
             #expect(operations.redundantPrimaryEqualsBackup)
             #expect(operations.optimizedWrites == 2)
-            #expect(operations.optimizedFullSyncs == 4)
+            #expect(operations.optimizedFullSyncs == 3)
             #expect(operations.optimizedPrimaryEqualsBackup)
 
             // Wall clock: interleaved paired sampling. Both variants are
