@@ -84,6 +84,228 @@ struct ScanPerformanceTests {
         #expect(result == .outputLimit)
     }
 
+    @Test func processRunnerDrainsMultiMegabyteStdoutWithoutTruncation() async {
+        // Far above the drain buffer (64 KiB) and below the default limit, so a
+        // truncated or partially drained pipe cannot pass as a success.
+        let lineCount = 120_000
+        let payload = "0123456789012345678901234567890123456789"
+        let expectedByteCount = lineCount * payload.utf8.count
+
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let result = await Task.detached {
+            ProcessRunner.runDetailed(
+                executable: "/bin/sh",
+                arguments: [
+                    "-c",
+                    "i=0; while [ $i -lt \(lineCount) ]; do printf '\(payload)'; i=$((i+1)); done"
+                ],
+                workingDirectory: "/tmp",
+                timeout: 30
+            )
+        }.value
+        let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+
+        guard case .success(let output) = result else {
+            Issue.record("large stdout command failed: \(result)")
+            return
+        }
+        #expect(output.utf8.count == expectedByteCount)
+        #expect(output.hasPrefix(payload))
+        #expect(output.hasSuffix(payload))
+        #expect(elapsed < 30, "multi-megabyte drain must not wait for the drain deadline")
+    }
+
+    @Test func processRunnerKeepsConcurrentStreamsIsolated() async {
+        // Every command emits a payload that only it can produce, so a shared
+        // drain that mixes streams, interleaves commands or drops bytes is
+        // detectable. The wait before writing is best effort: the scan pipeline
+        // blocks its cooperative threads, so the test cannot coordinate between
+        // commands without depending on pool width. Command-level overlap is
+        // therefore not asserted here; `benchmark-git-command-execution.sh` and
+        // the mixed-load test below cover concurrent drain pressure.
+        let commandCount = 8
+        let stdoutByteCount = 200_000
+        let stderrByteCount = 20_000
+
+        let results = await withTaskGroup(of: (Int, ProcessRunResult, String).self) { group in
+            for index in 0..<commandCount {
+                group.addTask {
+                    let stdoutPayload = String(repeating: "\(index % 10)", count: stdoutByteCount)
+                    let stderrPayload = String(repeating: "s", count: stderrByteCount)
+                    let result = ProcessRunner.runDetailed(
+                        executable: "/bin/sh",
+                        arguments: [
+                            "-c",
+                            "sleep 0.25; printf '%s' '\(stdoutPayload)'; printf '%s' '\(stderrPayload)' >&2"
+                        ],
+                        workingDirectory: "/tmp",
+                        timeout: 30
+                    )
+                    var output = ""
+                    if case .success(let text) = result { output = text }
+                    return (index, result, output)
+                }
+            }
+
+            var collected: [(Int, ProcessRunResult, String)] = []
+            while let result = await group.next() {
+                collected.append(result)
+            }
+            return collected
+        }
+
+        #expect(results.count == commandCount)
+        for (index, result, output) in results {
+            guard case .success = result else {
+                Issue.record("command \(index) failed while draining concurrently: \(result)")
+                continue
+            }
+            #expect(output == String(repeating: "\(index % 10)", count: stdoutByteCount),
+                    "command \(index) received another command's stream or a partial drain")
+            #expect(!output.contains("s"), "stderr must never reach the stdout payload")
+        }
+    }
+
+    @Test func processRunnerKeepsShortCommandsResponsiveBehindSustainedOutput() async {
+        // Sustained producers and short commands share one drain queue. Short
+        // commands must observe their own end of stream instead of being pushed
+        // onto the drain deadline by a producer that is still writing, and every
+        // producer must still deliver its output complete and byte exact.
+        let heavyCommandCount = 4
+        let shortCommandCount = 8
+        let heavyLineCount = 30_000
+        let payload = "0123456789012345678901234567890123456789"
+        let expectedHeavyByteCount = heavyLineCount * payload.utf8.count
+
+        let results = await withTaskGroup(of: ProcessRunResult.self) { group in
+            for _ in 0..<heavyCommandCount {
+                group.addTask {
+                    ProcessRunner.runDetailed(
+                        executable: "/bin/sh",
+                        arguments: [
+                            "-c",
+                            "i=0; while [ $i -lt \(heavyLineCount) ]; "
+                                + "do printf '\(payload)'; i=$((i+1)); done"
+                        ],
+                        workingDirectory: "/tmp",
+                        timeout: 30
+                    )
+                }
+            }
+            for index in 0..<shortCommandCount {
+                group.addTask {
+                    ProcessRunner.runDetailed(
+                        executable: "/bin/sh",
+                        arguments: [
+                            "-c",
+                            "sleep 0.1; printf 'short-\(index)'"
+                        ],
+                        workingDirectory: "/tmp",
+                        timeout: 30
+                    )
+                }
+            }
+
+            var collected: [ProcessRunResult] = []
+            while let result = await group.next() {
+                collected.append(result)
+            }
+            return collected
+        }
+
+        #expect(results.count == heavyCommandCount + shortCommandCount)
+        var shortOutputs: [String] = []
+        var heavyByteCounts: [Int] = []
+        for result in results {
+            guard case .success(let output) = result else {
+                Issue.record("mixed drain command failed: \(result)")
+                continue
+            }
+            if output.hasPrefix("short-") {
+                shortOutputs.append(output)
+            } else {
+                heavyByteCounts.append(output.utf8.count)
+            }
+        }
+        #expect(Set(shortOutputs) == Set((0..<shortCommandCount).map { "short-\($0)" }),
+                "short commands must return their own payload: \(shortOutputs.sorted())")
+        #expect(heavyByteCounts.count == heavyCommandCount)
+        #expect(heavyByteCounts.allSatisfy { $0 == expectedHeavyByteCount },
+                "sustained output must arrive complete: \(heavyByteCounts)")
+    }
+
+    @Test func processRunnerEnforcesOutputLimitUnderConcurrency() async {
+        let commandCount = 8
+        let outputLimit = 256 * 1024
+
+        let results = await withTaskGroup(of: ProcessRunResult.self) { group in
+            for _ in 0..<commandCount {
+                group.addTask {
+                    ProcessRunner.runDetailed(
+                        executable: "/bin/sh",
+                        arguments: [
+                            "-c",
+                            "while :; do printf 1234567890; printf 1234567890 >&2; done"
+                        ],
+                        workingDirectory: "/tmp",
+                        timeout: 20,
+                        outputLimit: outputLimit
+                    )
+                }
+            }
+
+            var collected: [ProcessRunResult] = []
+            while let result = await group.next() {
+                collected.append(result)
+            }
+            return collected
+        }
+
+        #expect(results.count == commandCount)
+        // A saturated drain queue must not turn an over-limit command into a
+        // timeout, which would be reported as a scan timeout instead.
+        #expect(results.allSatisfy { $0 == .outputLimit })
+    }
+
+    @Test func processRunnerDoesNotLeakPipeDescriptors() async {
+        func openDescriptorCount() -> Int {
+            var count = 0
+            for descriptor in 0..<4096 where fcntl(Int32(descriptor), F_GETFD) != -1 {
+                count += 1
+            }
+            return count
+        }
+
+        // Let any in-flight drains from earlier tests finish before sampling.
+        try? await Task.sleep(for: .milliseconds(50))
+        let baseline = openDescriptorCount()
+
+        // 25 commands own 100 pipe descriptors in total, so a drain that never
+        // releases them is far above the noise of neighbouring suites.
+        for _ in 0..<25 {
+            let result = await Task.detached {
+                ProcessRunner.runDetailed(
+                    executable: "/bin/sh",
+                    arguments: ["-c", "printf 'descriptor probe'"],
+                    workingDirectory: "/tmp",
+                    timeout: 5
+                )
+            }.value
+            #expect(result == .success(output: "descriptor probe"))
+        }
+
+        // The read end is closed by the drain source's cancel handler, so give
+        // the shared queue a bounded moment to run its cancel handlers.
+        var descriptorCount = openDescriptorCount()
+        for _ in 0..<100 where descriptorCount > baseline {
+            try? await Task.sleep(for: .milliseconds(20))
+            descriptorCount = openDescriptorCount()
+        }
+
+        #expect(descriptorCount <= baseline + 2,
+                "every command must release its own pipe descriptors (before: \(baseline), after: \(descriptorCount))")
+    }
+
     @Test func porcelainV2ParserPreservesBranchAndChangeSemantics() {
         let output = """
         # branch.oid 0123456789abcdef0123456789abcdef01234567

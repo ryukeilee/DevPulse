@@ -329,21 +329,27 @@ enum ProcessRunner {
         process.standardError = stderrPipe
 
         let outputCollector = ProcessOutputCollector(limit: outputLimit)
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            outputCollector.consume(handle.availableData, stream: .stdout)
-        }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            outputCollector.consume(handle.availableData, stream: .stderr)
-        }
+        let stdoutDrain = ProcessPipeDrain(
+            pipe: stdoutPipe,
+            stream: .stdout,
+            collector: outputCollector
+        )
+        let stderrDrain = ProcessPipeDrain(
+            pipe: stderrPipe,
+            stream: .stderr,
+            collector: outputCollector
+        )
 
         do {
             guard !isCancelled() else {
-                stopDraining(stdoutPipe: stdoutPipe, stderrPipe: stderrPipe)
+                stdoutDrain.stop()
+                stderrDrain.stop()
                 return .cancelled
             }
             try process.run()
         } catch {
-            stopDraining(stdoutPipe: stdoutPipe, stderrPipe: stderrPipe)
+            stdoutDrain.stop()
+            stderrDrain.stop()
             Logger(subsystem: "local.devpulse.app", category: "ProcessRunner").error("Git process launch failed: \(error.localizedDescription) (path: \(gitExecutablePath() ?? "nil"))")
             return .launch
         }
@@ -353,7 +359,8 @@ enum ProcessRunner {
         stderrPipe.fileHandleForWriting.closeFile()
         let processGroupID = isolatedProcessGroupID(for: process)
         defer {
-            stopDraining(stdoutPipe: stdoutPipe, stderrPipe: stderrPipe)
+            stdoutDrain.stop()
+            stderrDrain.stop()
         }
 
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
@@ -391,7 +398,7 @@ enum ProcessRunner {
         // A successful direct child is not enough: descendants may still hold
         // inherited pipe descriptors. Never report a truncated output as a
         // successful Git result.
-        guard finalOutput.didReachEOF else {
+        guard finalOutput.didReachEOF, !finalOutput.didFailStream else {
             terminateDescendants(in: processGroupID)
             return .timeout
         }
@@ -466,14 +473,101 @@ enum ProcessRunner {
         if Darwin.kill(-processGroupID, 0) == 0 { return true }
         return errno == EPERM
     }
+}
 
-    private static func stopDraining(stdoutPipe: Pipe, stderrPipe: Pipe) {
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
-        stdoutPipe.fileHandleForReading.closeFile()
-        stderrPipe.fileHandleForReading.closeFile()
-        stdoutPipe.fileHandleForWriting.closeFile()
-        stderrPipe.fileHandleForWriting.closeFile()
+/// Drains one process pipe read end on a shared dispatch queue.
+///
+/// `FileHandle.readabilityHandler` installs a dedicated serial monitoring
+/// queue per file handle, so the two pipes of every Git command cost four
+/// queues and four worker threads. At the scanner's concurrency limit the
+/// main process spends most of its CPU creating, waking and tearing those
+/// queues down. One dispatch read source per pipe on a shared queue keeps the
+/// same drain semantics — byte accounting, EOF detection and the combined
+/// output limit — without that per-command machinery.
+///
+/// The read end is closed by the source's cancel handler. The drain queue is
+/// serial, so a cancel is ordered after any in-flight read of the same
+/// source: no close can race a read on that descriptor. The write end stays
+/// owned by `ProcessRunner`.
+private final class ProcessPipeDrain: @unchecked Sendable {
+    private static let queue = DispatchQueue(label: "local.devpulse.app.ProcessRunner.pipe-drain")
+    private static let bufferSize = 64 * 1024
+    /// Bytes one handler invocation may copy before returning to the shared
+    /// queue. The read source stays armed while the descriptor is readable, so
+    /// a bounded pass keeps a continuously writing child from monopolizing the
+    /// queue that reports every other command's end of stream.
+    private static let bytesPerPass = 4 * bufferSize
+
+    private let readHandle: FileHandle
+    private let writeHandle: FileHandle
+    private let source: DispatchSourceRead
+    private let lock = NSLock()
+    private var didStop = false
+
+    init(pipe: Pipe,
+         stream: ProcessOutputCollector.Stream,
+         collector: ProcessOutputCollector) {
+        let readHandle = pipe.fileHandleForReading
+        self.readHandle = readHandle
+        self.writeHandle = pipe.fileHandleForWriting
+
+        let descriptor = readHandle.fileDescriptor
+        _ = fcntl(descriptor, F_SETFL, O_NONBLOCK)
+        let bufferSize = Self.bufferSize
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        let source = DispatchSource.makeReadSource(fileDescriptor: descriptor, queue: Self.queue)
+        self.source = source
+        source.setEventHandler {
+            var consumedByteCount = 0
+            while consumedByteCount < Self.bytesPerPass {
+                let byteCount = read(descriptor, buffer, bufferSize)
+                if byteCount > 0 {
+                    consumedByteCount += byteCount
+                    collector.consume(Data(bytes: buffer, count: byteCount), stream: stream)
+                    if collector.didExceedLimit {
+                        // The runner observes the limit and terminates the
+                        // process; keeping the drain armed would only keep the
+                        // pipe open for a child that can no longer be reported
+                        // as successful.
+                        source.cancel()
+                        return
+                    }
+                } else if byteCount == 0 {
+                    collector.consume(Data(), stream: stream)
+                    source.cancel()
+                    return
+                } else if errno == EINTR {
+                    continue
+                } else if errno == EAGAIN || errno == EWOULDBLOCK {
+                    return
+                } else {
+                    // End the stream so the runner cannot sit on the drain
+                    // deadline, but record the failure: partial output must
+                    // never be reported as a successful Git result.
+                    collector.markStreamFailure(stream)
+                    source.cancel()
+                    return
+                }
+            }
+        }
+        source.setCancelHandler {
+            buffer.deallocate()
+            readHandle.closeFile()
+        }
+        source.resume()
+    }
+
+    /// Stop monitoring the read end and close the parent's write end.
+    /// Idempotent, because callers stop drains both on a launch failure and on
+    /// process exit.
+    func stop() {
+        lock.lock()
+        let shouldStop = !didStop
+        didStop = true
+        lock.unlock()
+        guard shouldStop else { return }
+        source.cancel()
+        writeHandle.closeFile()
     }
 }
 
@@ -490,6 +584,7 @@ private final class ProcessOutputCollector: @unchecked Sendable {
     private var stdoutReachedEOF = false
     private var stderrReachedEOF = false
     private var exceededLimit = false
+    private var didFailStream = false
 
     init(limit: Int) {
         self.limit = limit
@@ -500,12 +595,7 @@ private final class ProcessOutputCollector: @unchecked Sendable {
         defer { lock.unlock() }
 
         guard !data.isEmpty else {
-            switch stream {
-            case .stdout:
-                stdoutReachedEOF = true
-            case .stderr:
-                stderrReachedEOF = true
-            }
+            markStreamEnded(stream)
             return
         }
 
@@ -519,6 +609,26 @@ private final class ProcessOutputCollector: @unchecked Sendable {
         receivedByteCount += data.count
         if stream == .stdout {
             stdoutData.append(data)
+        }
+    }
+
+    /// A descriptor that failed mid-read ends its stream but can never prove
+    /// that the collected bytes are complete. The failure flag is recorded
+    /// under the same lock acquisition that ends the stream, so the runner can
+    /// never observe the end of stream without the failure.
+    func markStreamFailure(_ stream: Stream) {
+        lock.lock()
+        didFailStream = true
+        markStreamEnded(stream)
+        lock.unlock()
+    }
+
+    private func markStreamEnded(_ stream: Stream) {
+        switch stream {
+        case .stdout:
+            stdoutReachedEOF = true
+        case .stderr:
+            stderrReachedEOF = true
         }
     }
 
@@ -540,12 +650,13 @@ private final class ProcessOutputCollector: @unchecked Sendable {
         return stdoutData
     }
 
-    func finalState() -> (didReachEOF: Bool, didExceedLimit: Bool, stdout: Data) {
+    func finalState() -> (didReachEOF: Bool, didExceedLimit: Bool, didFailStream: Bool, stdout: Data) {
         lock.lock()
         defer { lock.unlock() }
         return (
             stdoutReachedEOF && stderrReachedEOF,
             exceededLimit,
+            didFailStream,
             stdoutData
         )
     }
