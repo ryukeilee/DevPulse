@@ -518,6 +518,162 @@ struct WorkspaceAggregationTests {
         #expect(aggs.keys.contains(workspaces[1].id))
     }
 
+    /// `aggregateAll` resolves workspace membership in one pass over the scan
+    /// result, so it must still produce exactly what one `aggregate` call per
+    /// workspace produces — including repositories shared by several
+    /// workspaces, ids no scan result contains, and empty workspaces.
+    @Test func testAggregateAllMatchesPerWorkspaceAggregate() throws {
+        let shared = "shared"
+        let workspaces = [
+            Workspace(name: "Alpha", repositoryIDs: [shared, "a1", "missing"]),
+            Workspace(name: "Beta", repositoryIDs: [shared, "b1"]),
+            Workspace(name: "Empty", repositoryIDs: []),
+            Workspace(name: "OrphanFree", repositoryIDs: ["o1"])
+        ]
+        let repositories = [
+            RepositorySnapshot.mock(id: shared, name: "Shared", path: "/test/Shared",
+                                   status: .changed, modified: 4, changed: 4, conflicted: 1,
+                                   ahead: 2, behind: 1, hasUpstream: false, risk: .high),
+            RepositorySnapshot.mock(id: "a1", name: "A1", path: "/test/A1"),
+            RepositorySnapshot.mock(id: "b1", name: "B1", path: "/test/B1",
+                                   status: .changed, modified: 2, risk: .medium),
+            RepositorySnapshot.mock(id: "o1", name: "O1", path: "/test/O1"),
+            RepositorySnapshot.mock(id: "unowned", name: "Unowned", path: "/test/Unowned",
+                                   status: .error, dataSource: .unknown)
+        ]
+
+        let combined = WorkspaceAggregationEngine.aggregateAll(
+            workspaces: workspaces,
+            allRepositories: repositories
+        )
+
+        #expect(combined.count == workspaces.count)
+        for workspace in workspaces {
+            let expected = WorkspaceAggregationEngine.aggregate(
+                workspace: workspace,
+                allRepositories: repositories
+            )
+            let actual = try #require(combined[workspace.id])
+            #expect(try aggregationPayload(actual) == aggregationPayload(expected))
+        }
+    }
+
+    /// Repository identity and order survive the single membership pass: a
+    /// repeated id contributes one repository, an unknown id contributes none,
+    /// and drill-down lists keep scan-result order.
+    @Test func testAggregateAllPreservesRepositoryOrderAndMembership() throws {
+        let duplicated = Workspace(name: "Duplicated", repositoryIDs: ["r1", "r1", "r2", "unknown"])
+        let sharing = Workspace(name: "Sharing", repositoryIDs: ["r2"])
+        let repositories = [
+            RepositorySnapshot.mock(id: "r1", name: "First", path: "/test/First", conflicted: 1),
+            RepositorySnapshot.mock(id: "r2", name: "Second", path: "/test/Second", conflicted: 1),
+            RepositorySnapshot.mock(id: "r3", name: "Unowned", path: "/test/Unowned")
+        ]
+
+        let aggregations = WorkspaceAggregationEngine.aggregateAll(
+            workspaces: [duplicated, sharing],
+            allRepositories: repositories
+        )
+
+        let duplicateAggregation = try #require(aggregations[duplicated.id])
+        #expect(duplicateAggregation.totalRepositories == 2)
+        #expect(duplicateAggregation.repositorySummaries.keys.sorted() == ["r1", "r2"])
+        #expect(duplicateAggregation.conflictRepositoryNames == ["First", "Second"])
+
+        // A repository two workspaces claim is aggregated into both.
+        let sharedAggregation = try #require(aggregations[sharing.id])
+        #expect(sharedAggregation.totalRepositories == 1)
+        #expect(sharedAggregation.conflictCount == 1)
+
+        // Repositories no workspace claims are not attributed to any of them.
+        for aggregation in aggregations.values {
+            #expect(aggregation.repositorySummaries["r3"] == nil)
+        }
+    }
+
+    /// Aggregating all workspaces in one call must equal aggregating the
+    /// confirmed and unconfirmed subsets separately and merging them, which is
+    /// why the scheduler no longer splits its refresh into two engine calls.
+    /// A workspace id present in both subsets is included so the duplicated-id
+    /// precedence (the unconfirmed entry wins) stays pinned as well.
+    @Test func testAggregateAllIsIndependentOfWorkspacePartitioning() throws {
+        let fixedNow = Date(timeIntervalSince1970: 1_770_000_000)
+        let duplicatedID = "duplicated-workspace"
+        let confirmedWorkspaces = [
+            Workspace(id: duplicatedID, name: "DuplicatedConfirmed", repositoryIDs: ["r1"]),
+            Workspace(name: "Confirmed", repositoryIDs: ["r1", "r2"]),
+            Workspace(name: "Empty", repositoryIDs: [])
+        ]
+        let unconfirmedWorkspaces = [
+            Workspace(id: duplicatedID, name: "DuplicatedUnconfirmed", repositoryIDs: ["r2"],
+                      autoSuggestConfirmed: false),
+            Workspace(name: "Unconfirmed", repositoryIDs: ["r2", "r3"], autoSuggestConfirmed: false)
+        ]
+        let repositories = [
+            RepositorySnapshot.mock(id: "r1", name: "R1", path: "/test/R1",
+                                   status: .changed, modified: 3, risk: .high),
+            RepositorySnapshot.mock(id: "r2", name: "R2", path: "/test/R2", conflicted: 1),
+            RepositorySnapshot.mock(id: "r3", name: "R3", path: "/test/R3",
+                                   status: .error, dataSource: .unknown)
+        ]
+
+        // The scheduler aggregates confirmed workspaces first and unconfirmed
+        // workspaces second.
+        let combined = WorkspaceAggregationEngine.aggregateAll(
+            workspaces: confirmedWorkspaces + unconfirmedWorkspaces,
+            allRepositories: repositories,
+            now: fixedNow
+        )
+        let confirmed = WorkspaceAggregationEngine.aggregateAll(
+            workspaces: confirmedWorkspaces,
+            allRepositories: repositories,
+            now: fixedNow
+        )
+        let unconfirmed = WorkspaceAggregationEngine.aggregateAll(
+            workspaces: unconfirmedWorkspaces,
+            allRepositories: repositories,
+            now: fixedNow
+        )
+        var merged = confirmed
+        for (key, value) in unconfirmed { merged[key] = value }
+
+        #expect(merged.count == combined.count)
+        for (workspaceID, aggregation) in combined {
+            let mergedAggregation = try #require(merged[workspaceID])
+            #expect(try aggregationPayload(aggregation) == aggregationPayload(mergedAggregation))
+        }
+        #expect(combined[duplicatedID]?.workspaceName == "DuplicatedUnconfirmed")
+    }
+
+    /// Empty input stays explicit: no workspaces yields no aggregations, and a
+    /// workspace without repositories still reports an empty `.unknown` result.
+    @Test func testAggregateAllHandlesEmptyInputs() throws {
+        let unclaimed = RepositorySnapshot.mock(id: "r1", name: "R1", path: "/test/R1")
+        #expect(WorkspaceAggregationEngine.aggregateAll(
+            workspaces: [], allRepositories: [unclaimed]
+        ).isEmpty)
+
+        let workspace = Workspace(name: "Empty", repositoryIDs: ["r1"])
+        let aggregations = WorkspaceAggregationEngine.aggregateAll(
+            workspaces: [workspace], allRepositories: []
+        )
+        let aggregation = try #require(aggregations[workspace.id])
+        #expect(aggregation.totalRepositories == 0)
+        #expect(aggregation.overallHealth == .unknown)
+    }
+
+    /// Every field except the wall-clock duration, so two aggregations can be
+    /// compared for identical output without depending on timing.
+    private func aggregationPayload(_ aggregation: WorkspaceAggregation) throws -> String {
+        let encoded = try JSONEncoder().encode(aggregation)
+        guard var object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
+            return String(decoding: encoded, as: UTF8.self)
+        }
+        object.removeValue(forKey: "computationDurationMs")
+        let normalized = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        return String(decoding: normalized, as: UTF8.self)
+    }
+
     @Test func testOrphanRepositories() {
         let ws = Workspace(name: "WS", repositoryIDs: ["r1"])
         let repos = [

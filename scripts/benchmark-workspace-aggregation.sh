@@ -14,7 +14,13 @@
 #   ./scripts/benchmark-workspace-aggregation.sh --baseline-git <ref>
 #
 # Tunables (env): BENCH_WORKSPACES, BENCH_REPOS_PER_WORKSPACE, BENCH_ITERATIONS,
-#                 BENCH_WARMUP
+#                 BENCH_WARMUP, BENCH_TIMESTAMP_SHAPE
+#
+# BENCH_TIMESTAMP_SHAPE=mixed (default) keeps the fixture's fractional-second
+# timestamps, which still take the Foundation formatter path. Set it to
+# `canonical` to hold every timestamp in the `YYYY-MM-DDTHH:MM:SSZ` shape the app
+# itself writes; the two shapes give very different cost profiles, so measure the
+# one matching the data under investigation.
 #
 # The harness also emits a content fingerprint of every aggregation (excluding
 # the wall-clock computationDurationMs field) so an optimization can be proved
@@ -78,6 +84,10 @@ let reposPerWorkspace = envInt("BENCH_REPOS_PER_WORKSPACE", 25)
 let iterations = envInt("BENCH_ITERATIONS", 20)
 let warmupIterations = envInt("BENCH_WARMUP", 3)
 
+/// `mixed` (default) keeps the fixture's fractional-second timestamps; `canonical`
+/// holds every timestamp in the `YYYY-MM-DDTHH:MM:SSZ` shape the app writes.
+let canonicalTimestamps = ProcessInfo.processInfo.environment["BENCH_TIMESTAMP_SHAPE"] == "canonical"
+
 // MARK: - Fixture
 
 /// Fixed reference instant so staleness classification is deterministic.
@@ -86,7 +96,7 @@ let day: TimeInterval = 24 * 60 * 60
 
 func iso(_ date: Date, fractionalSeconds: Bool) -> String {
     let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = fractionalSeconds
+    formatter.formatOptions = (fractionalSeconds && !canonicalTimestamps)
         ? [.withInternetDateTime, .withFractionalSeconds]
         : [.withInternetDateTime]
     return formatter.string(from: date)
@@ -274,8 +284,9 @@ struct Main {
         let totalMs = Double(elapsed) / 1_000_000.0
         let meanMs = totalMs / Double(iterations)
         print(String(
-            format: "BENCH label=%@ repos=%d workspaces=%d iterations=%d total_ms=%.3f mean_ms=%.3f fingerprint=%@",
-            label, repositories.count, workspaces.count, iterations, totalMs, meanMs, digest
+            format: "BENCH label=%@ repos=%d workspaces=%d iterations=%d total_ms=%.3f mean_ms=%.3f fingerprint=%@ timestamps=%@",
+            label, repositories.count, workspaces.count, iterations, totalMs, meanMs, digest,
+            canonicalTimestamps ? "canonical" : "mixed"
         ))
     }
 }
@@ -310,7 +321,7 @@ compile_and_run() {
 }
 
 echo "Workspace aggregation benchmark"
-echo "  workspaces=${BENCH_WORKSPACES:-8} repos/workspace=${BENCH_REPOS_PER_WORKSPACE:-25} iterations=${BENCH_ITERATIONS:-20}"
+echo "  workspaces=${BENCH_WORKSPACES:-8} repos/workspace=${BENCH_REPOS_PER_WORKSPACE:-25} iterations=${BENCH_ITERATIONS:-20} timestamps=${BENCH_TIMESTAMP_SHAPE:-mixed}"
 echo
 
 if [[ -z "$BASELINE_ENGINE" ]]; then

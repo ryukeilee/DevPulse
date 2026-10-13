@@ -854,7 +854,6 @@ final class ScanScheduler: ObservableObject {
     @Published var pendingItemWidgetSummary: PendingItemWidgetSummary = .empty()
     @Published var pendingItemEvaluationDurationMs: Double = 0
     private let workspaceStore: WorkspaceStore
-    private let workspaceAggregationCache: WorkspaceAggregationCache
     let pendingItemStore: PendingItemStore
     let pendingItemNotificationStore: PendingItemNotificationStore
 
@@ -975,24 +974,20 @@ final class ScanScheduler: ObservableObject {
     /// Recompute workspace aggregations after a scan completes.
     private func refreshWorkspaceAggregations() {
         let repos = lastResult.repositories
-        let confirmedWorkspaces = workspaces.filter { $0.autoSuggestConfirmed }
-        let unconfirmed = workspaces.filter { !$0.autoSuggestConfirmed }
+        // One `aggregateAll` call resolves repository membership once for both
+        // sets instead of once per set. Confirmed workspaces stay first so a
+        // duplicated workspace id still resolves to its unconfirmed entry, which
+        // is the precedence the previous two-call merge produced.
+        let allWorkspaces = workspaces.filter(\.autoSuggestConfirmed)
+            + workspaces.filter { !$0.autoSuggestConfirmed }
         workspaceAggregationGeneration &+= 1
         let generation = workspaceAggregationGeneration
 
         Task.detached(priority: .utility) { @Sendable [weak self] in
-            let aggregations = WorkspaceAggregationEngine.aggregateAll(
-                workspaces: confirmedWorkspaces,
+            let all = WorkspaceAggregationEngine.aggregateAll(
+                workspaces: allWorkspaces,
                 allRepositories: repos
             )
-            let unconfirmedAggregations = WorkspaceAggregationEngine.aggregateAll(
-                workspaces: unconfirmed,
-                allRepositories: repos
-            )
-            var all = aggregations
-            for (key, value) in unconfirmedAggregations {
-                all[key] = value
-            }
             await MainActor.run { [weak self] in
                 guard let self,
                       !self.terminating,
@@ -1391,7 +1386,6 @@ final class ScanScheduler: ObservableObject {
         self.workspaceStore = commandMode ? WorkspaceStore(fileURL: URL(fileURLWithPath: "/dev/null")) : WorkspaceStore.live()
         self.pendingItemStore = commandMode ? PendingItemStore(fileURL: URL(fileURLWithPath: "/dev/null")) : PendingItemStore.live()
         self.pendingItemNotificationStore = commandMode ? PendingItemNotificationStore(fileURL: URL(fileURLWithPath: "/dev/null")) : PendingItemNotificationStore.live()
-        self.workspaceAggregationCache = WorkspaceAggregationCache()
         if commandMode {
             appGroupAvailable = AppGroupStore.isAvailable
             gitAvailable = ProcessRunner.isGitAvailable()

@@ -163,16 +163,29 @@ enum WorkspaceAggregationEngine {
         allRepositories: [RepositorySnapshot],
         now: Date = Date()
     ) -> WorkspaceAggregation {
-        let startTime = Date()
-
         // Filter to the repositories belonging to this workspace. A Set keeps the
         // membership test O(1) instead of rescanning the id list once per
         // repository in the scan result.
         let workspaceRepositoryIDs = Set(workspace.repositoryIDs)
         let workspaceRepos = allRepositories.filter { workspaceRepositoryIDs.contains($0.id) }
+        return aggregate(workspace: workspace, repositories: workspaceRepos, now: now)
+    }
+
+    /// Compute the full aggregation for one workspace from repositories that are
+    /// already known to belong to it.
+    ///
+    /// Membership filtering is the caller's job so that `aggregateAll` can resolve
+    /// membership for every workspace in one pass over the scan result instead of
+    /// one pass per workspace.
+    private static func aggregate(
+        workspace: Workspace,
+        repositories: [RepositorySnapshot],
+        now: Date
+    ) -> WorkspaceAggregation {
+        let startTime = Date()
 
         var summaries: [RepositoryAggregationSummary] = []
-        summaries.reserveCapacity(workspaceRepos.count)
+        summaries.reserveCapacity(repositories.count)
         var staleRepos: [RepositoryAggregationSummary] = []
 
         // Health counts
@@ -203,7 +216,7 @@ enum WorkspaceAggregationEngine {
         // Single pass over the workspace repositories: health bucketing,
         // aggregate counters and staleness all share one traversal, and every
         // timestamp is parsed at most once.
-        for repo in workspaceRepos {
+        for repo in repositories {
             // `decision` runs the readiness rule engine, so evaluate it once and
             // reuse it for both the health bucket and the drill-down summary.
             let readiness = repo.decision.commitReadiness.level
@@ -314,12 +327,12 @@ enum WorkspaceAggregationEngine {
         return WorkspaceAggregation(
             workspaceID: workspace.id,
             workspaceName: workspace.name,
-            computedAt: ISO8601DateFormatter().string(from: now),
+            computedAt: DateFormatting.isoString(from: now),
             overallHealth: health,
             healthyCount: healthy,
             warningCount: warnings,
             errorCount: errors,
-            totalRepositories: workspaceRepos.count,
+            totalRepositories: repositories.count,
             activeRepositories: activeRepos,
             totalChangedFiles: totalChanged,
             totalCommittedFiles: totalCommitted,
@@ -357,10 +370,44 @@ enum WorkspaceAggregationEngine {
     ) -> [String: WorkspaceAggregation] {
         var results: [String: WorkspaceAggregation] = [:]
         results.reserveCapacity(workspaces.count)
-        for workspace in workspaces {
+        guard !workspaces.isEmpty else { return results }
+
+        // Resolve membership once for every workspace, then bucket the scan
+        // result in a single pass over it. Filtering per workspace walked the
+        // whole scan result once per workspace, so that work grew with
+        // workspaces × repositories; it now grows with the number of workspace
+        // memberships plus one lookup per repository.
+        var workspaceIndicesByRepositoryID: [String: [Int]] = [:]
+        workspaceIndicesByRepositoryID.reserveCapacity(allRepositories.count)
+        for (workspaceIndex, workspace) in workspaces.enumerated() {
+            for repositoryID in workspace.repositoryIDs {
+                var indices = workspaceIndicesByRepositoryID[repositoryID] ?? []
+                // A repeated id in one workspace still contributes that
+                // repository once, matching what the per-workspace filter did.
+                if indices.last != workspaceIndex {
+                    indices.append(workspaceIndex)
+                }
+                workspaceIndicesByRepositoryID[repositoryID] = indices
+            }
+        }
+
+        var repositoriesByWorkspaceIndex = [[RepositorySnapshot]](
+            repeating: [], count: workspaces.count
+        )
+        for repository in allRepositories {
+            guard let indices = workspaceIndicesByRepositoryID[repository.id] else { continue }
+            for index in indices {
+                repositoriesByWorkspaceIndex[index].append(repository)
+            }
+        }
+
+        for (workspaceIndex, workspace) in workspaces.enumerated() {
+            // Bucket order follows `allRepositories`, which is the order the
+            // per-workspace filter produced, so every order-dependent field
+            // (drill-down lists, conflict names) is unchanged.
             results[workspace.id] = aggregate(
                 workspace: workspace,
-                allRepositories: allRepositories,
+                repositories: repositoriesByWorkspaceIndex[workspaceIndex],
                 now: now
             )
         }
