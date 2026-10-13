@@ -2081,7 +2081,15 @@ final class ScanScheduler: ObservableObject {
                 let previous = self.lastResult
                 let discoveryWasIncomplete = GitRepositoryScanner.discoveryWasIncomplete(result.warnings)
                 let applyPinsStartedAt = ProcessInfo.processInfo.systemUptime
-                let pinned = self.applyPins(result.data).withDiscoveryWasIncomplete(
+                // One canonical-path reuse map for this scan's whole derivation
+                // sequence: the scan result, the expected pre-write snapshot,
+                // the post-write read-back, the widget projection and the
+                // shared-snapshot sync all derive from the same repositories
+                // inside one scan generation. The passes themselves are
+                // unchanged; only the filesystem resolution of a path they
+                // share is reused.
+                let derivationScope = RepositoryIdentity.CanonicalizationScope()
+                let pinned = self.applyPins(result.data, using: derivationScope).withDiscoveryWasIncomplete(
                     discoveryWasIncomplete ? true : nil
                 )
                 self.measurementObserver?.record(name: "scheduler_apply_pins", duration: ProcessInfo.processInfo.systemUptime - applyPinsStartedAt, calls: 1)
@@ -2176,12 +2184,22 @@ final class ScanScheduler: ObservableObject {
                 // updateScanInterval() bounds the cadence to the stale
                 // threshold in every power state.
                 if hadChanges {
-                    self.syncSharedSnapshot(from: recorded, previousSnapshot: previous, reason: "scan")
+                    self.syncSharedSnapshot(
+                        from: recorded,
+                        previousSnapshot: previous,
+                        reason: "scan",
+                        canonicalizationScope: derivationScope
+                    )
                 } else {
                     // Even when no data changed we must still write back the snapshot
                     // to clear the isRefreshing flag that was set at scan start;
                     // otherwise the Widget sees isRefreshing == true forever.
-                    self.syncSharedSnapshot(from: recorded, previousSnapshot: previous, reason: "scan-nochanges")
+                    self.syncSharedSnapshot(
+                        from: recorded,
+                        previousSnapshot: previous,
+                        reason: "scan-nochanges",
+                        canonicalizationScope: derivationScope
+                    )
                     self.diagnostics.lastRefreshCompletedAt = Date()
                     self.diagnostics.lastSnapshotStoreTrigger = "scan-nochanges"
                     self.diagnostics.lastSnapshotStoreState = .verified
@@ -3162,13 +3180,22 @@ final class ScanScheduler: ObservableObject {
     private func syncSharedSnapshot(
         from snapshot: AppGroupData,
         previousSnapshot: AppGroupData? = nil,
-        reason: String
+        reason: String,
+        canonicalizationScope: RepositoryIdentity.CanonicalizationScope? = nil
     ) {
+        // Every sync derives the same payload several times: the pre-write
+        // pass here, the post-write read-back pass and the widget projection.
+        // One reuse map per sequence resolves each repository path once for all
+        // of them. A caller that already owns a map for its own sequence (the
+        // scan-completion path, whose first pass has run before this call)
+        // passes it so that pass joins the same map; every other caller gets a
+        // map that lives exactly as long as this sequence.
+        let derivationScope = canonicalizationScope ?? RepositoryIdentity.CanonicalizationScope()
         let writtenAt = DateFormatting.nowISO()
         // Always clear isRefreshing before writing so the Widget never
         // sees a stale "refreshing" flag from a killed or crashed scan.
         let applyPinsStartedAt = ProcessInfo.processInfo.systemUptime
-        let pinnedSnapshot = applyPins(snapshot)
+        let pinnedSnapshot = applyPins(snapshot, using: derivationScope)
         measurementObserver?.record(name: "snapshot_prepare_apply_pins", duration: ProcessInfo.processInfo.systemUptime - applyPinsStartedAt, calls: 1)
         let snapshotToWrite = pinnedSnapshot
             .withWrittenAt(writtenAt)
@@ -3238,7 +3265,8 @@ final class ScanScheduler: ObservableObject {
                     self.handleSyncSnapshotSuccess(
                         readBack: readBack,
                         prevSnapshot: prevSnapshot,
-                        reason: reason
+                        reason: reason,
+                        canonicalizationScope: derivationScope
                     )
                 case .failure(let error):
                     self.handleSyncSnapshotFailure(
@@ -3254,7 +3282,8 @@ final class ScanScheduler: ObservableObject {
     private func handleSyncSnapshotSuccess(
         readBack: AppGroupData,
         prevSnapshot: AppGroupData?,
-        reason: String
+        reason: String,
+        canonicalizationScope: RepositoryIdentity.CanonicalizationScope
     ) {
         let now = Date()
         sharedSnapshotSyncFailureMessage = nil
@@ -3272,14 +3301,18 @@ final class ScanScheduler: ObservableObject {
         diagnostics.sharedDataReadAt = Date()
         diagnostics.sharedDataSnapshot = readBack
         diagnostics.sharedDataReadError = nil
-        setWidgetReadableSnapshot(readBack, readAt: Date())
+        setWidgetReadableSnapshot(
+            readBack,
+            readAt: Date(),
+            canonicalizationScope: canonicalizationScope
+        )
         validateConsistency(
             expected: readBack,
             shared: readBack,
             widget: diagnostics.widgetSnapshot,
             reason: reason
         )
-        lastResult = applyPins(readBack)
+        lastResult = applyPins(readBack, using: canonicalizationScope)
         let prev = prevSnapshot ?? lastResult
         let reloadDecision = ScanSchedulerPolicy.widgetReloadDecision(
             previousSnapshot: prev,
@@ -3360,9 +3393,13 @@ final class ScanScheduler: ObservableObject {
         }
     }
 
-    private func setWidgetReadableSnapshot(_ snapshot: AppGroupData, readAt: Date) {
+    private func setWidgetReadableSnapshot(
+        _ snapshot: AppGroupData,
+        readAt: Date,
+        canonicalizationScope: RepositoryIdentity.CanonicalizationScope = RepositoryIdentity.CanonicalizationScope()
+    ) {
         diagnostics.widgetSnapshot = RepositoryIdentity.withCanonicalizationScopeSync(
-            RepositoryIdentity.CanonicalizationScope()
+            canonicalizationScope
         ) {
             RepositoryScope.filtering(
                 snapshot,
@@ -3939,9 +3976,22 @@ final class ScanScheduler: ObservableObject {
     // MARK: - Pins
 
     private func applyPins(_ data: AppGroupData) -> AppGroupData {
-        RepositoryIdentity.withCanonicalizationScopeSync(
-            RepositoryIdentity.CanonicalizationScope()
-        ) {
+        applyPins(data, using: RepositoryIdentity.CanonicalizationScope())
+    }
+
+    /// Apply ignore filtering, identity migration, pin state and ordering.
+    ///
+    /// `scope` is the canonical-path reuse map for this derivation. Callers
+    /// that perform several derivations over one payload — the scan-completion
+    /// sequence and every shared-snapshot sync sequence — pass one map to all
+    /// of them, because those derivations ask about the same repository paths
+    /// and a map per derivation only repeated the same filesystem resolution.
+    /// Each map's lifetime is exactly the sequence that owns it.
+    private func applyPins(
+        _ data: AppGroupData,
+        using scope: RepositoryIdentity.CanonicalizationScope
+    ) -> AppGroupData {
+        RepositoryIdentity.withCanonicalizationScopeSync(scope) {
             let scopedData = RepositoryScope.filtering(
                 data,
                 excluding: ignoredRepositoryPaths

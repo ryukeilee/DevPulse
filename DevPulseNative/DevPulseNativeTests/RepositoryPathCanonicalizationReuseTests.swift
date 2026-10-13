@@ -440,8 +440,40 @@ struct RepositoryPathCanonicalizationReuseTests {
     // MARK: - 4. Known remainder
 
     /// Mirrors `ScanScheduler.applyPins()` exactly at its path-processing seam:
-    /// filtering, identity migration and sort. Reuse is scoped to that one
-    /// synchronous operation and cannot observe later pin/ignore mutations.
+    /// filtering, identity migration and sort.
+    private func applyPinsLike(_ input: AppGroupData, pinnedIDs: Set<String>) -> AppGroupData {
+        let scoped = RepositoryScope.filtering(input, excluding: [])
+        let migration = RepositoryIdentityMigration.migrate(snapshot: scoped, pinnedIDs: pinnedIDs)
+        var repositories = migration.snapshot.repositories.map { repository -> RepositorySnapshot in
+            var copy = repository
+            copy.isPinned = migration.pinnedIDs.contains(repository.id)
+            return copy
+        }
+        repositories = RepositorySorter.sort(repositories)
+        let snapshot = migration.snapshot
+        return AppGroupData(
+            schemaVersion: snapshot.schemaVersion,
+            generatedAt: snapshot.generatedAt,
+            writtenAt: snapshot.writtenAt,
+            lastSuccessfulRefreshAt: snapshot.lastSuccessfulRefreshAt,
+            historySchemaVersion: snapshot.historySchemaVersion,
+            historyRecordingEnabled: snapshot.historyRecordingEnabled,
+            scanSummary: snapshot.scanSummary,
+            repositories: repositories,
+            recentActivityEvents: snapshot.recentActivityEvents,
+            repositoryUnavailableSinceByPath: snapshot.repositoryUnavailableSinceByPath,
+            storageRevision: snapshot.storageRevision,
+            persistenceState: snapshot.persistenceState,
+            pendingItemWidgetSummary: snapshot.pendingItemWidgetSummary,
+            isRefreshing: snapshot.isRefreshing,
+            discoveryWasIncomplete: snapshot.discoveryWasIncomplete,
+            appVersion: snapshot.appVersion,
+            storageFormatVersion: snapshot.storageFormatVersion
+        )
+    }
+
+    /// Mirrors `ScanScheduler.applyPins()` at its path-processing seam for the
+    /// pining/ignore assertions above and for the post-scan sequence below.
     @Test func applyPinsCanonicalizationIsLocalAndEquivalent() async throws {
         let timestamp = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-3600))
         let repoCount = 20
@@ -451,29 +483,7 @@ struct RepositoryPathCanonicalizationReuseTests {
         func process(reuseEnabled: Bool) -> (RepositoryIdentity.CanonicalizationScope.Metrics, AppGroupData) {
             let scope = RepositoryIdentity.CanonicalizationScope(reuseEnabled: reuseEnabled)
             let result = RepositoryIdentity.withCanonicalizationScopeSync(scope) {
-                let scoped = RepositoryScope.filtering(data, excluding: [])
-                let migration = RepositoryIdentityMigration.migrate(snapshot: scoped, pinnedIDs: [])
-                var repositories = migration.snapshot.repositories
-                repositories = RepositorySorter.sort(repositories)
-                return AppGroupData(
-                    schemaVersion: migration.snapshot.schemaVersion,
-                    generatedAt: migration.snapshot.generatedAt,
-                    writtenAt: migration.snapshot.writtenAt,
-                    lastSuccessfulRefreshAt: migration.snapshot.lastSuccessfulRefreshAt,
-                    historySchemaVersion: migration.snapshot.historySchemaVersion,
-                    historyRecordingEnabled: migration.snapshot.historyRecordingEnabled,
-                    scanSummary: migration.snapshot.scanSummary,
-                    repositories: repositories,
-                    recentActivityEvents: migration.snapshot.recentActivityEvents,
-                    repositoryUnavailableSinceByPath: migration.snapshot.repositoryUnavailableSinceByPath,
-                    storageRevision: migration.snapshot.storageRevision,
-                    persistenceState: migration.snapshot.persistenceState,
-                    pendingItemWidgetSummary: migration.snapshot.pendingItemWidgetSummary,
-                    isRefreshing: migration.snapshot.isRefreshing,
-                    discoveryWasIncomplete: migration.snapshot.discoveryWasIncomplete,
-                    appVersion: migration.snapshot.appVersion,
-                    storageFormatVersion: migration.snapshot.storageFormatVersion
-                )
+                applyPinsLike(data, pinnedIDs: [])
             }
             return (scope.metrics, result)
         }
@@ -499,6 +509,78 @@ struct RepositoryPathCanonicalizationReuseTests {
         }
         #expect(next.repositories.count == repoCount - 1)
         #expect(!next.repositories.contains { $0.path == paths[0] })
+    }
+
+    /// The post-scan sequence derives one scan result several times: the
+    /// scan-completion pass, the pre-write pass, the post-write read-back pass
+    /// and the widget projection. One reuse map per sequence resolves each
+    /// distinct repository path once for all four passes, instead of once per
+    /// pass, while every pass itself stays unchanged.
+    @Test func postScanDerivationSequenceSharesOneReuseMap() async throws {
+        let timestamp = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-3600))
+        let repoCount = 20
+        let paths = (0..<repoCount).map { "/devpulse-remainder/repo-\($0)" }
+        let data = previousSnapshot(for: paths, timestamp: timestamp)
+
+        /// Runs the production pass order: three `applyPins` derivations plus
+        /// the widget projection that `setWidgetReadableSnapshot` performs.
+        func sequence(
+            sharingOneMap: Bool
+        ) -> (metrics: RepositoryIdentity.CanonicalizationScope.Metrics, result: AppGroupData) {
+            let sharedScope = sharingOneMap ? RepositoryIdentity.CanonicalizationScope() : nil
+            var computed = 0
+            var reused = 0
+            var lookups = 0
+            var result = data
+            func run(_ body: (AppGroupData) -> AppGroupData) {
+                let scope = sharedScope ?? RepositoryIdentity.CanonicalizationScope()
+                result = RepositoryIdentity.withCanonicalizationScopeSync(scope) { body(result) }
+                if sharedScope == nil {
+                    let metrics = scope.metrics
+                    computed += metrics.computations
+                    reused += metrics.reuses
+                    lookups += metrics.lookups
+                }
+            }
+            for _ in 0..<3 { run { applyPinsLike($0, pinnedIDs: []) } }
+            run { RepositoryScope.filtering($0, excluding: []) }
+            let metrics = sharedScope?.metrics
+                ?? RepositoryIdentity.CanonicalizationScope.Metrics(
+                    lookups: lookups,
+                    computations: computed,
+                    reuses: reused,
+                    distinctInputs: computed
+                )
+            return (metrics, result)
+        }
+
+        let perPass = sequence(sharingOneMap: false)
+        let shared = sequence(sharingOneMap: true)
+        print("canonicalization_post_scan_sequence repos=\(repoCount) "
+              + "perPass{lookups=\(perPass.metrics.lookups),computations=\(perPass.metrics.computations),reuses=\(perPass.metrics.reuses)} "
+              + "shared{lookups=\(shared.metrics.lookups),computations=\(shared.metrics.computations),reuses=\(shared.metrics.reuses)}")
+
+        #expect(
+            shared.metrics.lookups == perPass.metrics.lookups,
+            "the passes must ask the same questions, only the reuse changes"
+        )
+        #expect(perPass.metrics.computations == repoCount * 4)
+        #expect(shared.metrics.computations == repoCount)
+        #expect(shared.metrics.computations == shared.metrics.distinctInputs)
+        #expect(shared.metrics.reuses > perPass.metrics.reuses)
+        #expect(
+            shared.result == perPass.result,
+            "one map per sequence must not change any derivation's output"
+        )
+        // The repeated derivations and the widget projection are idempotent on
+        // an already-derived scan result, which is why sharing the map removes
+        // work instead of changing any of it.
+        let single = RepositoryIdentity.withCanonicalizationScopeSync(
+            RepositoryIdentity.CanonicalizationScope()
+        ) {
+            applyPinsLike(data, pinnedIDs: [])
+        }
+        #expect(shared.result == single)
     }
 
     @Test func widgetSnapshotFilteringReusesRepeatedCanonicalPaths() throws {
