@@ -1184,12 +1184,12 @@ struct SnapshotVersionHeader: Decodable {
 
 /// Top-level header of a stored snapshot, read in one pass.
 ///
-/// `schemaVersion` is required so a future artifact is still recognized, so
-/// every other field is read tolerantly: a schema that changes a field shape
-/// leaves that field nil here, and the version guard rejects the artifact with
-/// `futureSchema` instead of a decode failure. For the current schema
-/// `decodeSnapshotBytes` still requires the metadata fields before decoding the
-/// payload body.
+/// `schemaVersion` and the two version fields keep `SnapshotVersionHeader`'s
+/// strict typing, so a malformed or future envelope is classified exactly as it
+/// was when the header was decoded on its own. The metadata fields are read
+/// tolerantly: a schema may reshape them before the `schemaVersion` guard
+/// rejects the artifact, and `decodeSnapshotBytes` still requires them for the
+/// current schema before decoding the payload body.
 struct SnapshotFileHeader: Decodable {
     let schemaVersion: Int
     let storageFormatVersion: Int?
@@ -1201,8 +1201,14 @@ struct SnapshotFileHeader: Decodable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
-        storageFormatVersion = try? container.decode(Int.self, forKey: .storageFormatVersion)
-        appVersion = try? container.decode(String.self, forKey: .appVersion)
+        // The version fields keep the strict typing `SnapshotVersionHeader`
+        // used: a wrong type here must stay a decode failure, not a tolerant nil,
+        // so a future artifact is classified exactly as before.
+        storageFormatVersion = try container.decodeIfPresent(Int.self, forKey: .storageFormatVersion)
+        appVersion = try container.decodeIfPresent(String.self, forKey: .appVersion)
+        // The metadata fields are read tolerantly: they are only decoded for the
+        // current schema, but a future schema may reshape them before the
+        // `schemaVersion` guard rejects the artifact.
         writtenAt = try? container.decode(String.self, forKey: .writtenAt)
         storageRevision = try? container.decode(UInt64.self, forKey: .storageRevision)
         persistenceState = try? container.decode(String.self, forKey: .persistenceState)
