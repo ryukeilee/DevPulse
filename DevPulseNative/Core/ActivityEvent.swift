@@ -187,7 +187,66 @@ struct ActivityEventSummary: Codable, Identifiable, Equatable {
 
 enum ActivityEventOrdering {
     static func sorted(_ events: [ActivityEvent]) -> [ActivityEvent] {
-        events.sorted(by: precedes(_:_:))
+        guard events.count > 1 else { return events }
+        // `precedes` parses both timestamps on every comparison, which the sort
+        // pays `n log n` times. The canonical shape is checked in one pass
+        // below, and for it the timestamp strings already order
+        // chronologically, so this path compares them directly. Every other
+        // input keeps the general path.
+        if hasCanonicalUTCTimestamps(events) {
+            return sortedByCanonicalTimestamps(events)
+        }
+        return events.sorted(by: precedes(_:_:))
+    }
+
+    /// Whether `events` is already the exact list `sorted(_:)` returns for it:
+    /// strictly ordered by `precedes`, with no duplicate ids. A list of fewer
+    /// than two events is trivially both.
+    ///
+    /// Otherwise this only answers `true` when every timestamp takes the
+    /// canonical-UTC path, which is what makes `precedes` a strict total order
+    /// and its sorted result unique. Every other input answers `false`, so its
+    /// caller re-sorts it instead of trusting the order it holds.
+    static func isStrictlyOrdered(_ events: [ActivityEvent]) -> Bool {
+        guard events.count > 1 else { return true }
+        guard hasCanonicalUTCTimestamps(events) else { return false }
+        var seenIDs = Set<String>(minimumCapacity: events.count)
+        for index in events.indices {
+            guard seenIDs.insert(events[index].id).inserted else { return false }
+            guard index > events.startIndex else { continue }
+            guard canonicalPrecedes(events[index - 1], events[index]) else { return false }
+        }
+        return true
+    }
+
+    /// `precedes` for the canonical-UTC case, where the fixed-width timestamp
+    /// strings compare chronologically.
+    private static func canonicalPrecedes(_ lhs: ActivityEvent, _ rhs: ActivityEvent) -> Bool {
+        if lhs.occurredAt != rhs.occurredAt { return lhs.occurredAt > rhs.occurredAt }
+        return tieBreakPrecedes(lhs, rhs)
+    }
+
+    /// The canonical-UTC sort. Sorts a copy in place: this is the same stable
+    /// sort `sorted(by:)` runs, without the second array copy it makes.
+    private static func sortedByCanonicalTimestamps(
+        _ events: [ActivityEvent]
+    ) -> [ActivityEvent] {
+        var sorted = events
+        sorted.sort { canonicalPrecedes($0, $1) }
+        return sorted
+    }
+
+    /// Whether every timestamp is `YYYY-MM-DDTHH:MM:SSZ` (20 bytes, UTC), the
+    /// shape `DateFormatting.nowISO()` writes. Such strings are fixed width and
+    /// zero padded, so their lexicographic order is their chronological order.
+    /// The byte count is checked first because `canonicalDate` answers `nil`
+    /// for it without a parse, and because any other length is rejected by the
+    /// cheaper test alone.
+    private static func hasCanonicalUTCTimestamps(_ events: [ActivityEvent]) -> Bool {
+        events.allSatisfy {
+            $0.occurredAt.utf8.count == 20
+                && DateFormatting.canonicalDate($0.occurredAt) != nil
+        }
     }
 
     static func sortedSummaries(_ summaries: [ActivityEventSummary]) -> [ActivityEventSummary] {
@@ -215,6 +274,12 @@ enum ActivityEventOrdering {
                 rhsFallback: rhs.id
             )
         }
+        return tieBreakPrecedes(lhs, rhs)
+    }
+
+    /// The tail of `precedes` shared by both timestamp paths: what breaks a tie
+    /// once the timestamps are known to be equal.
+    private static func tieBreakPrecedes(_ lhs: ActivityEvent, _ rhs: ActivityEvent) -> Bool {
         if lhs.priority != rhs.priority { return lhs.priority < rhs.priority }
         let nameOrder = lhs.repositoryName.localizedStandardCompare(rhs.repositoryName)
         if nameOrder != .orderedSame { return nameOrder == .orderedAscending }
@@ -698,6 +763,14 @@ struct ActivityEventStore {
         existing: [ActivityEvent],
         newEvents: [ActivityEvent]
     ) -> [ActivityEvent] {
+        // Every steady-state caller merges into a list this store produced
+        // itself, and most rounds detect nothing new. Re-sorting and
+        // re-truncating such a list cannot change it, so the archive is
+        // returned as it stands. `isAlreadyNormalized` only answers `true`
+        // when that identity is provable; see its documentation.
+        if newEvents.isEmpty, isAlreadyNormalized(existing) {
+            return existing
+        }
         var byID = Dictionary(
             existing.map { ($0.id, $0) },
             uniquingKeysWith: { _, latest in latest }
@@ -708,6 +781,18 @@ struct ActivityEventStore {
         return Array(ActivityEventOrdering.sorted(Array(byID.values)).prefix(capacity))
     }
 
+    /// Whether `events` is already exactly what `normalized` would return for
+    /// it: within `capacity`, with unique ids, and in the strict order
+    /// `ActivityEventOrdering.sorted(_:)` produces.
+    ///
+    /// `isStrictlyOrdered` supplies the order and identity checks, and answers
+    /// `true` only for canonical timestamps. There `precedes` is a strict total
+    /// order, so an already ordered list is the single order the sort could
+    /// produce, and re-sorting cannot reorder it.
+    private func isAlreadyNormalized(_ events: [ActivityEvent]) -> Bool {
+        events.count <= capacity && ActivityEventOrdering.isStrictlyOrdered(events)
+    }
+
     func pruning(
         _ events: [ActivityEvent],
         keepingRepositoryIDs repositoryIDs: Set<String>
@@ -716,7 +801,11 @@ struct ActivityEventStore {
     }
 
     private func normalized(_ events: [ActivityEvent]) -> [ActivityEvent] {
-        merging(existing: [], newEvents: events)
+        // The same list folded in as the `existing` side rather than as `new`
+        // events: one pair sequence, one de-duplication rule (the later
+        // occurrence of an id wins), and it shares `merging`'s identity
+        // shortcut instead of re-sorting a list that needs no sort.
+        merging(existing: events, newEvents: [])
     }
 
     private func persistRecovered(

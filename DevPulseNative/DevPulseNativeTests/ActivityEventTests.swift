@@ -593,6 +593,98 @@ struct ActivityEventTests {
         #expect(pruned.map(\.id) == [kept.id])
     }
 
+    // ────────────────────────────────────────────────
+    // MARK: - 排序快路径与归一化恒等
+    // ────────────────────────────────────────────────
+
+    /// 定宽 `YYYY-MM-DDTHH:MM:SSZ` 的字典序等于时间序，快路径据此直接比较字符
+    /// 串。小数秒、带偏移量和不可解析的时间戳不具备该性质，必须继续走通用路径。
+    @Test func orderingKeepsChronologicalOrderForNonCanonicalTimestamps() {
+        let fractional = [
+            orderedEvent(id: "later", at: "2026-07-16T10:00:01Z"),
+            orderedEvent(id: "fraction", at: "2026-07-16T10:00:00.500Z"),
+            orderedEvent(id: "earlier", at: "2026-07-16T10:00:00Z")
+        ]
+        #expect(ActivityEventOrdering.sorted(fractional).map(\.id) == ["later", "fraction", "earlier"])
+
+        // 同一时刻的两种写法：字符串序与时间序不同，通用路径以字符串序为准。
+        let equalInstants = [
+            orderedEvent(id: "utc", at: "2026-07-16T10:00:00Z"),
+            orderedEvent(id: "offset", at: "2026-07-16T15:30:00+05:30")
+        ]
+        #expect(ActivityEventOrdering.sorted(equalInstants).map(\.id) == ["offset", "utc"])
+
+        let unparseable = [
+            orderedEvent(id: "unparseable", at: "not-a-timestamp"),
+            orderedEvent(id: "canonical", at: "2026-07-16T10:00:00Z")
+        ]
+        #expect(ActivityEventOrdering.sorted(unparseable).map(\.id) == ["unparseable", "canonical"])
+    }
+
+    /// `isStrictlyOrdered` 决定 `ActivityEventStore` 能否跳过重新归一化，所以它
+    /// 只在“已经有序且 id 唯一、时间戳全部规范”时才能为真。
+    @Test func strictlyOrderedAcceptsOnlyCanonicalSortedUniqueLists() {
+        let newest = orderedEvent(id: "newest", at: "2026-07-16T10:00:00Z")
+        let middle = orderedEvent(id: "middle", at: "2026-07-16T09:00:00Z")
+        let oldest = orderedEvent(id: "oldest", at: "2026-07-16T08:00:00Z")
+
+        #expect(ActivityEventOrdering.isStrictlyOrdered([]))
+        #expect(ActivityEventOrdering.isStrictlyOrdered([newest]))
+        #expect(ActivityEventOrdering.isStrictlyOrdered([newest, middle, oldest]))
+        #expect(!ActivityEventOrdering.isStrictlyOrdered([middle, newest, oldest]))
+        #expect(!ActivityEventOrdering.isStrictlyOrdered([oldest, middle, newest]))
+        #expect(!ActivityEventOrdering.isStrictlyOrdered([newest, newest]))
+        #expect(!ActivityEventOrdering.isStrictlyOrdered([
+            orderedEvent(id: "fractional", at: "2026-07-16T10:00:00.500Z"),
+            orderedEvent(id: "canonical", at: "2026-07-16T10:00:00Z")
+        ]))
+    }
+
+    /// 已归一化的归档在“本轮没有新事件”时原样返回：即恒等，而不是另一份等值副本。
+    @Test func eventStoreMergingLeavesAnAlreadyNormalizedArchiveAlone() throws {
+        let store = ActivityEventStore(fileURL: temporaryURL(), capacity: 3)
+        let newest = orderedEvent(id: "newest", at: "2026-07-16T10:00:00Z")
+        let middle = orderedEvent(id: "middle", at: "2026-07-16T09:00:00Z")
+        let oldest = orderedEvent(id: "oldest", at: "2026-07-16T08:00:00Z")
+        let archive = [newest, middle, oldest]
+
+        #expect(store.merging(existing: archive, newEvents: []) == archive)
+
+        // 容量截断与去重不因该恒等被跳过。
+        let beyondCapacity = archive + [orderedEvent(id: "older", at: "2026-07-16T07:00:00Z")]
+        #expect(store.merging(existing: beyondCapacity, newEvents: []).map(\.id)
+            == ["newest", "middle", "oldest"])
+
+        let unsorted = [oldest, newest, middle]
+        #expect(store.merging(existing: unsorted, newEvents: []).map(\.id)
+            == ["newest", "middle", "oldest"])
+
+        let duplicate = [
+            orderedEvent(id: "dup", at: "2026-07-16T09:00:00Z"),
+            newest,
+            orderedEvent(id: "dup", at: "2026-07-16T11:00:00Z")
+        ]
+        let merged = store.merging(existing: duplicate, newEvents: [])
+        #expect(merged.map(\.id) == ["dup", "newest"])
+        #expect(merged.first?.occurredAt == "2026-07-16T11:00:00Z")
+    }
+
+    /// 裁剪只按仓库过滤，但结果仍必须是归一化后的顺序，即使恒等快路径因输入
+    /// 乱序而不可用。
+    @Test func eventStorePruningNormalizesTheKeptEvents() throws {
+        let store = ActivityEventStore(fileURL: temporaryURL())
+        let newest = orderedEvent(id: "newest", repository: "keep", at: "2026-07-16T10:00:00Z")
+        let oldest = orderedEvent(id: "oldest", repository: "keep", at: "2026-07-16T08:00:00Z")
+        let dropped = orderedEvent(id: "dropped", repository: "drop", at: "2026-07-16T09:00:00Z")
+
+        let pruned = store.pruning(
+            [oldest, dropped, newest],
+            keepingRepositoryIDs: ["keep"]
+        )
+
+        #expect(pruned.map(\.id) == ["newest", "oldest"])
+    }
+
     @Test func linkedWorktreesProduceIsolatedEvents() {
         let worktreeA = snapshot(
             modified: 0, id: "worktree-A", path: "/tmp/worktree-A"
@@ -840,6 +932,24 @@ struct ActivityEventTests {
             current: snapshot(modified: newCount),
             at: at,
             kind: .workingTreeChanged
+        )
+    }
+
+    /// 显式指定 id、仓库与时间戳的事件，用于精确锁定排序与去重结果。
+    private func orderedEvent(
+        id: String,
+        repository: String = "repo",
+        at: String,
+        kind: ActivityEventKind = .workingTreeChanged
+    ) -> ActivityEvent {
+        ActivityEvent(
+            id: id,
+            repositoryID: repository,
+            repositoryName: repository,
+            kind: kind,
+            occurredAt: at,
+            before: ActivityEventState(snapshot: snapshot(modified: 0)),
+            after: ActivityEventState(snapshot: snapshot(modified: 1))
         )
     }
 

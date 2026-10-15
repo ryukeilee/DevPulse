@@ -289,6 +289,10 @@ struct TimingCase {
     let history: Int
     let accepted: Int
     let replays: Int
+    /// Hands the archive in the shape the app holds between rounds: the list
+    /// the previous round produced, i.e. already sorted, de-duplicated and
+    /// truncated. `false` keeps the shuffled archive the other cases use.
+    var steadyState: Bool = false
 }
 
 let timingCases: [TimingCase] = [
@@ -297,12 +301,35 @@ let timingCases: [TimingCase] = [
     TimingCase(label: "busy-round", history: 500, accepted: 40, replays: 40),
     TimingCase(label: "bulk-round", history: 500, accepted: 200, replays: 200),
     TimingCase(label: "short-history", history: 100, accepted: 5, replays: 5),
+    TimingCase(label: "steady-quiet", history: 500, accepted: 0, replays: 5, steadyState: true),
+    TimingCase(label: "steady-small", history: 500, accepted: 5, replays: 5, steadyState: true),
+    TimingCase(label: "steady-busy", history: 500, accepted: 40, replays: 40, steadyState: true),
+    TimingCase(label: "steady-bulk", history: 500, accepted: 200, replays: 200, steadyState: true),
 ]
+
+/// Sorts and de-duplicates `events` with a comparator written here rather than
+/// with the engine's own, so both revisions receive byte-identical archives
+/// even where their sorting differs. Mirrors `ActivityEventStore.normalized`
+/// for the canonical shape the steady-state cases are built from.
+func normalizedArchive(_ events: [ActivityEvent]) -> [ActivityEvent] {
+    var byID: [String: ActivityEvent] = [:]
+    byID.reserveCapacity(events.count)
+    for event in events { byID[event.id] = event }
+    return Array(byID.values).sorted { lhs, rhs in
+        if lhs.occurredAt != rhs.occurredAt { return lhs.occurredAt > rhs.occurredAt }
+        if lhs.priority != rhs.priority { return lhs.priority < rhs.priority }
+        let nameOrder = lhs.repositoryName.localizedStandardCompare(rhs.repositoryName)
+        if nameOrder != .orderedSame { return nameOrder == .orderedAscending }
+        if lhs.kind.rawValue != rhs.kind.rawValue { return lhs.kind.rawValue < rhs.kind.rawValue }
+        return lhs.id < rhs.id
+    }
+}
 
 /// Builds one deterministic `(existing, candidates)` pair with exactly
 /// `accepted` genuinely-new candidates and `replays` exact replays of the
 /// newest history entry of a family. Arrays are shuffled before being handed
-/// in, so both implementations receive out-of-order input.
+/// in, so both implementations receive out-of-order input; a steady-state case
+/// re-normalizes the archive afterwards instead.
 func makeTimingFixture(_ timingCase: TimingCase, shape: String, seedOffset: UInt64)
     -> (existing: [ActivityEvent], candidates: [ActivityEvent]) {
     var rng = SplitMix64(seed: seed ^ seedOffset)
@@ -375,6 +402,7 @@ func makeTimingFixture(_ timingCase: TimingCase, shape: String, seedOffset: UInt
 
     existing.shuffle(using: &rng)
     candidates.shuffle(using: &rng)
+    if timingCase.steadyState { existing = normalizedArchive(existing) }
     return (existing, candidates)
 }
 
