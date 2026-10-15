@@ -4411,8 +4411,14 @@ final class ScanScheduler: ObservableObject {
         get {
             let defaults = AppGroupStore.defaults
             let raw = defaults?.stringArray(forKey: lastDiscoveredRepositoryPathsKey) ?? []
+            // `ignoredRepositoryPaths` canonicalizes every ignored path against
+            // the filesystem, so it is read once per access rather than once per
+            // discovered path. Reading it inside the filter below made this
+            // accessor cost O(discovered x ignored) path resolutions instead of
+            // O(discovered + ignored).
+            let ignored = ignoredRepositoryPaths
             let normalized = Array(Set(raw.map(RepositoryIdentity.canonicalPath)))
-                .filter { !ignoredRepositoryPaths.contains($0) }
+                .filter { !ignored.contains($0) }
                 .sorted()
             if normalized != raw {
                 defaults?.set(normalized, forKey: lastDiscoveredRepositoryPathsKey)
@@ -4420,8 +4426,9 @@ final class ScanScheduler: ObservableObject {
             return normalized
         }
         set {
+            let ignored = ignoredRepositoryPaths
             let normalized = Array(Set(newValue.map(RepositoryIdentity.canonicalPath)))
-                .filter { !ignoredRepositoryPaths.contains($0) }
+                .filter { !ignored.contains($0) }
                 .sorted()
             AppGroupStore.defaults?
                 .set(normalized, forKey: lastDiscoveredRepositoryPathsKey)

@@ -511,6 +511,64 @@ struct RepositoryPathCanonicalizationReuseTests {
         #expect(!next.repositories.contains { $0.path == paths[0] })
     }
 
+    /// Mirrors the `ScanScheduler.lastDiscoveredRepositoryPaths` normalization
+    /// seam: canonicalize the discovered paths, drop the ignored ones, sort.
+    /// Resolving the ignore set inside the filter re-resolved every ignored
+    /// path once per discovered path, so the accessor performed
+    /// `discovered x ignored` filesystem canonicalizations instead of
+    /// `discovered + ignored`.
+    @Test func discoveredPathNormalizationResolvesIgnoreSetOncePerAccess() async throws {
+        let scratch = scratchRoot("discovered-paths")
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: scratch) }
+
+        let discoveredCount = 12
+        let ignoredCount = 4
+        var discovered: [String] = []
+        for index in 0..<discoveredCount {
+            let url = scratch.appendingPathComponent("repo-\(index)", isDirectory: true)
+            try fileManager.createDirectory(at: url, withIntermediateDirectories: true)
+            discovered.append(url.path)
+        }
+        // Ignore real discovered paths so the filter actually drops entries.
+        let ignored = Array(discovered.prefix(ignoredCount))
+
+        func ignoreSetInsideFilter() -> [String] {
+            Array(Set(discovered.map(RepositoryIdentity.canonicalPath)))
+                .filter { !RepositoryScope.canonicalPathSet(ignored).contains($0) }
+                .sorted()
+        }
+
+        func ignoreSetResolvedOnce() -> [String] {
+            let ignoredPaths = RepositoryScope.canonicalPathSet(ignored)
+            return Array(Set(discovered.map(RepositoryIdentity.canonicalPath)))
+                .filter { !ignoredPaths.contains($0) }
+                .sorted()
+        }
+
+        func ledger(
+            _ body: () -> [String]
+        ) -> (metrics: RepositoryIdentity.CanonicalizationScope.Metrics, result: [String]) {
+            let scope = RepositoryIdentity.CanonicalizationScope(reuseEnabled: false)
+            let result = RepositoryIdentity.withCanonicalizationScopeSync(scope, body)
+            return (scope.metrics, result)
+        }
+
+        let before = ledger(ignoreSetInsideFilter)
+        let after = ledger(ignoreSetResolvedOnce)
+        print("canonicalization_discovered_path_normalization "
+              + "discovered=\(discoveredCount) ignored=\(ignoredCount) "
+              + "before{lookups=\(before.metrics.lookups),computations=\(before.metrics.computations)} "
+              + "after{lookups=\(after.metrics.lookups),computations=\(after.metrics.computations)}")
+
+        #expect(after.result == before.result)
+        #expect(after.result.count == discoveredCount - ignoredCount)
+        #expect(before.metrics.computations == discoveredCount * (ignoredCount + 1))
+        #expect(after.metrics.computations == discoveredCount + ignoredCount)
+        #expect(after.metrics.lookups == discoveredCount + ignoredCount)
+    }
+
     /// The post-scan sequence derives one scan result several times: the
     /// scan-completion pass, the pre-write pass, the post-write read-back pass
     /// and the widget projection. One reuse map per sequence resolves each
@@ -726,6 +784,10 @@ struct RepositoryPathCanonicalizationReuseTests {
         for digest in candidates {
             let reference = digest.map { String(format: "%02x", $0) }.joined()
             if RepositoryIdentity.hexDigest(digest) != reference { mismatches += 1 }
+            // `hexDigest` forwards to the shared encoder that every identifier,
+            // checksum and fingerprint in Core now uses; compare that encoder
+            // directly so it stays covered even if the forwarder changes.
+            if DigestHex.encode(digest) != reference { mismatches += 1 }
         }
         print("canonicalization_identity_byte_table digests=\(candidates.count) "
               + "distinct_digest_bytes=\(covered.count) mismatches=\(mismatches)")
