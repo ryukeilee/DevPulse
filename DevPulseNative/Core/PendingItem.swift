@@ -206,6 +206,28 @@ struct PendingItem: Codable, Identifiable, Equatable, Sendable {
     var duration: TimeInterval
     var lastTransition: PendingItemTransition?
 
+    /// Stable identity for a pending item, derived from the same fields the
+    /// initializer hashes.
+    ///
+    /// The evaluator needs exactly one such id per rule per repository —
+    /// including for the rules that do not fire, which resolve a previous item
+    /// by id — so exposing the derivation lets those call sites ask for the id
+    /// without building and discarding a whole item.
+    static func identityID(
+        source: PendingItemSource,
+        repositoryID: String?,
+        workspaceID: String?,
+        title: String
+    ) -> String {
+        let identity = [
+            source.rawValue,
+            repositoryID ?? "",
+            workspaceID ?? "",
+            title
+        ].joined(separator: "\u{1F}")
+        return "pi-v1-" + DigestHex.encode(SHA256.hash(data: Data(identity.utf8)))
+    }
+
     init(
         id: String? = nil,
         source: PendingItemSource,
@@ -225,16 +247,15 @@ struct PendingItem: Codable, Identifiable, Equatable, Sendable {
         lastTransition: PendingItemTransition? = nil
     ) {
         let now = DateFormatting.nowISO()
-        let identity = [
-            source.rawValue,
-            repositoryID ?? "",
-            workspaceID ?? "",
-            title
-        ].joined(separator: "\u{1F}")
-        let digest = SHA256.hash(data: Data(identity.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
-        self.id = id ?? "pi-v1-\(digest)"
+        // Callers that already know the id (reloading a stored item, rebuilding
+        // one to carry a field forward) skip the digest entirely; it is only
+        // needed when this initializer has to mint the identity.
+        self.id = id ?? Self.identityID(
+            source: source,
+            repositoryID: repositoryID,
+            workspaceID: workspaceID,
+            title: title
+        )
         self.source = source
         self.severity = severity
         self.repositoryID = repositoryID

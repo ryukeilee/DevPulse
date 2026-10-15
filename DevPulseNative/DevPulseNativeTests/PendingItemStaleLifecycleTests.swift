@@ -234,6 +234,59 @@ struct PendingItemStaleLifecycleTests {
         #expect(source.rawValue == "staleRepository")
     }
 
+    // MARK: - PendingItem identity
+
+    /// `identityID` is the id the initializer mints, and the evaluator resolves
+    /// one expected id per rule per repository. The two derivations must agree
+    /// for every repository, workspace and auto-generated identity.
+    @Test func identityIDMatchesInitializerMintedID() throws {
+        let sources: [PendingItemSource] = [
+            .dirtyWorkspace, .unpushedCommits, .behindRemote, .mergeConflict,
+            .upstreamMissing, .unavailable, .staleRepository, .scanFailure,
+            .creepingChanges, .staleActivity, .healthTrend,
+            .workspaceDegraded, .workspaceConflicts, .workspaceAggregation
+        ]
+        for source in sources {
+            for repositoryID in [nil, "repo-1"] {
+                for workspaceID in [nil, "ws-1"] {
+                    for title in ["", "已确认的标题"] {
+                        let minted = PendingItem(
+                            source: source, severity: .low,
+                            repositoryID: repositoryID, workspaceID: workspaceID, title: title
+                        ).id
+                        #expect(minted == PendingItem.identityID(
+                            source: source, repositoryID: repositoryID,
+                            workspaceID: workspaceID, title: title
+                        ))
+                        #expect(minted.hasPrefix("pi-v1-"))
+                        #expect(minted.count == "pi-v1-".count + 64)
+                    }
+                }
+            }
+        }
+        // The repository-rule and workspace-rule expected ids of one source
+        // must stay distinct, otherwise the two dispatches would resolve each
+        // other's previous item.
+        #expect(PendingItem.identityID(source: .dirtyWorkspace, repositoryID: "repo-1",
+                                       workspaceID: nil, title: "")
+                != PendingItem.identityID(source: .dirtyWorkspace, repositoryID: nil,
+                                          workspaceID: "repo-1", title: ""))
+    }
+
+    /// A caller that already knows the id gets exactly that id back, and the
+    /// auto-generated identity ignores the supplied severity.
+    @Test func explicitIDIsPreservedAndSeverityDoesNotFeedIdentity() throws {
+        let explicit = "pi-v1-" + String(repeating: "a", count: 64)
+        let item = PendingItem(id: explicit, source: .unavailable, severity: .critical,
+                               repositoryID: "repo-1", title: "ignored")
+        #expect(item.id == explicit)
+        #expect(item.severity == .critical)
+
+        let low = PendingItem(source: .unavailable, severity: .low, repositoryID: "repo-1", title: "t")
+        let critical = PendingItem(source: .unavailable, severity: .critical, repositoryID: "repo-1", title: "t")
+        #expect(low.id == critical.id)
+    }
+
     // MARK: - PendingItemUserAction
 
     @Test func cleanupActionHasCorrectIdentity() throws {

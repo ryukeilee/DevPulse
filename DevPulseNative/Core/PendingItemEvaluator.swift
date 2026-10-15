@@ -246,7 +246,8 @@ enum PendingItemEvaluator {
         rule: RuleEvaluator
     ) {
         processRule(candidate: rule(repo, health, cached, context),
-                    expectedID: PendingItem(source: source, severity: .low, repositoryID: repo.id, title: "").id,
+                    expectedID: PendingItem.identityID(source: source, repositoryID: repo.id,
+                                                      workspaceID: nil, title: ""),
                     isRepositoryRule: true, previousByID: previousByID, context: context, state: &state)
     }
 
@@ -260,7 +261,8 @@ enum PendingItemEvaluator {
         rule: WorkspaceRuleEvaluator
     ) {
         processRule(candidate: rule(workspace, aggregation, context),
-                    expectedID: PendingItem(source: source, severity: .low, workspaceID: workspace.id, title: "").id,
+                    expectedID: PendingItem.identityID(source: source, repositoryID: nil,
+                                                      workspaceID: workspace.id, title: ""),
                     isRepositoryRule: false, previousByID: previousByID, context: context, state: &state)
     }
 
