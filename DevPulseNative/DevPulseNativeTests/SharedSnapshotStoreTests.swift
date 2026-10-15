@@ -452,7 +452,9 @@ struct SharedSnapshotStoreTests {
         print("SharedSnapshotStore non-identical recovery operations: writes=\(writeCount), F_FULLFSYNC=\(fullSyncCount), json_decodes=\(jsonDecodeCount), json_encodes=\(jsonEncodeCount)")
         #expect(writeCount == 3)
         #expect(fullSyncCount == 5)
-        #expect(jsonDecodeCount == 9)
+        // Three file decodes, each reading its top-level header and payload in
+        // two parses now that the header is a single pass.
+        #expect(jsonDecodeCount == 6)
         #expect(jsonEncodeCount == 1)
         #expect(try Data(contentsOf: snapshotStore.primaryURL)
             == Data(contentsOf: snapshotStore.backupURL))
@@ -490,7 +492,9 @@ struct SharedSnapshotStoreTests {
         print("SharedSnapshotStore steady-state operations: writes=\(writeCount), F_FULLFSYNC=\(fullSyncCount), json_decodes=\(jsonDecodeCount), json_encodes=\(jsonEncodeCount)")
         #expect(writeCount == 2)
         #expect(fullSyncCount == 3)
-        #expect(jsonDecodeCount == 6)
+        // Two file decodes (shared baseline + staged verification), each header
+        // now read in the same pass as its payload.
+        #expect(jsonDecodeCount == 4)
         #expect(jsonEncodeCount == 1)
         #expect(try Data(contentsOf: snapshotStore.primaryURL)
             == Data(contentsOf: snapshotStore.backupURL))
@@ -696,7 +700,8 @@ struct SharedSnapshotStoreTests {
         print("SharedSnapshotStore identical-copy load operations: json_decodes=\(jsonDecodeCount), json_encodes=\(jsonEncodeCount), writes=\(writeCount)")
         #expect(loaded.source == .primary)
         #expect(loaded.snapshot.repositories.first?.id == "load-shared")
-        #expect(jsonDecodeCount == 3)
+        // One shared file decode: one header pass plus one payload pass.
+        #expect(jsonDecodeCount == 2)
         #expect(jsonEncodeCount == 0)
         #expect(writeCount == 0)
     }

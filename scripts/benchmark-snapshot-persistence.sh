@@ -249,6 +249,7 @@ struct OperationTally {
         case .jsonEncode: jsonEncode += 1
         case .fileWrite: fileWrite += 1
         case .fullFileSync: fileSync += 1
+        case .fileSyncFallback: fileSync += 1
         case .fullDirectorySync: directorySync += 1
         }
     }
