@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
-# A/B benchmark for WorkspaceAggregationEngine.aggregateAll in multi-repository
-# workspaces.
+# A/B benchmark for the workspace aggregation of one refresh round.
 #
-# Runs a standalone harness (same pattern as verify-activity-timeline.sh) against
-# the current engine source, and optionally against a baseline engine source so
-# a before/after comparison can be measured with a single command.
+# `ScanScheduler` runs two aggregations per refresh: `refreshWorkspaceAggregations`
+# publishes the map for the workspace UI (every workspace), and
+# `refreshPendingItems` needs the confirmed-workspace subset for the
+# pending-item evaluation. This harness measures that round — the two consumers
+# the scheduler drives — not a single `aggregateAll` call:
+#
+#   legacy-two-call   aggregateAll(all workspaces) + aggregateAll(confirmed)
+#                     (the previous wiring, and the baseline label)
+#   partitioned       aggregateAllPartitioned(all workspaces), whose single pass
+#                     returns both maps (the current label)
+#
+# It compiles the production aggregation engine with the current scheduler call
+# pattern and prints the mean milliseconds per refresh round plus a content
+# fingerprint of every aggregation in both maps (excluding the wall-clock
+# computationDurationMs field), so an optimization can be proved
+# behavior-preserving: equal fingerprints mean identical aggregation output.
 #
 # Usage:
 #   ./scripts/benchmark-workspace-aggregation.sh
@@ -14,17 +26,20 @@
 #   ./scripts/benchmark-workspace-aggregation.sh --baseline-git <ref>
 #
 # Tunables (env): BENCH_WORKSPACES, BENCH_REPOS_PER_WORKSPACE, BENCH_ITERATIONS,
-#                 BENCH_WARMUP, BENCH_TIMESTAMP_SHAPE
+#                 BENCH_WARMUP, BENCH_TIMESTAMP_SHAPE, BENCH_UNCONFIRMED_WORKSPACES
+#
+# BENCH_UNCONFIRMED_WORKSPACES (default 0) adds auto-suggest candidate workspaces
+# that re-group repositories already covered by a confirmed workspace. 0 is the
+# state the app itself produces today — nothing creates an unconfirmed workspace
+# — so both consumers aggregate the same set; a non-zero value measures the
+# partial-overlap case where the reuse removes less than the whole second pass.
 #
 # BENCH_TIMESTAMP_SHAPE=mixed (default) keeps the fixture's fractional-second
 # timestamps, which still take the Foundation formatter path. Set it to
-# `canonical` to hold every timestamp in the `YYYY-MM-DDTHH:MM:SSZ` shape the app
-# itself writes; the two shapes give very different cost profiles, so measure the
-# one matching the data under investigation.
-#
-# The harness also emits a content fingerprint of every aggregation (excluding
-# the wall-clock computationDurationMs field) so an optimization can be proved
-# behavior-preserving: equal fingerprints mean identical aggregation output.
+# `canonical` to hold every timestamp in the shapes the app itself writes and
+# reads (`nowISO()` and `git log --pretty=%cI`), which take the arithmetic fast
+# path; the two shapes give very different cost profiles, so measure the one
+# matching the data under investigation.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -48,7 +63,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            sed -n '2,20p' "$0"
+            sed -n '2,42p' "$0"
             exit 0
             ;;
         *)
@@ -83,6 +98,12 @@ let workspaceCount = envInt("BENCH_WORKSPACES", 8)
 let reposPerWorkspace = envInt("BENCH_REPOS_PER_WORKSPACE", 25)
 let iterations = envInt("BENCH_ITERATIONS", 20)
 let warmupIterations = envInt("BENCH_WARMUP", 3)
+// Auto-suggest candidates re-group repositories that a confirmed workspace
+// already covers, so they add workspace memberships but no repositories.
+let requestedUnconfirmed = ProcessInfo.processInfo.environment["BENCH_UNCONFIRMED_WORKSPACES"]
+    .flatMap { Int($0) } ?? 0
+let unconfirmedCount = max(0, min(requestedUnconfirmed, workspaceCount - 1))
+let confirmedCount = workspaceCount - unconfirmedCount
 
 /// `mixed` (default) keeps the fixture's fractional-second timestamps; `canonical`
 /// holds every timestamp in the `YYYY-MM-DDTHH:MM:SSZ` shape the app writes.
@@ -187,17 +208,30 @@ func makeSnapshot(workspaceIndex: Int, repoIndex: Int, globalIndex: Int) -> Repo
     }
 }
 
-func makeFixture() -> (workspaces: [Workspace], repositories: [RepositorySnapshot]) {
+func makeFixture() -> (
+    confirmed: [Workspace],
+    unconfirmed: [Workspace],
+    repositories: [RepositorySnapshot]
+) {
+    // The fixture holds BENCH_WORKSPACES x BENCH_REPOS_PER_WORKSPACE repositories
+    // for every unconfirmed setting, so an A/B pair measures the same scan result
+    // and a partial-overlap run keeps the same repository count. The remainder
+    // goes to the first workspaces so a configuration that does not divide evenly
+    // still reaches the exact count.
+    let totalRepositories = workspaceCount * reposPerWorkspace
+    let repositoriesPerConfirmedWorkspace = totalRepositories / confirmedCount
+    let remainderRepositories = totalRepositories % confirmedCount
     var workspaces: [Workspace] = []
     var repositories: [RepositorySnapshot] = []
-    workspaces.reserveCapacity(workspaceCount)
-    repositories.reserveCapacity(workspaceCount * reposPerWorkspace)
+    workspaces.reserveCapacity(confirmedCount)
+    repositories.reserveCapacity(totalRepositories)
     var globalIndex = 0
 
-    for workspaceIndex in 0..<workspaceCount {
+    for workspaceIndex in 0..<confirmedCount {
+        let bucketSize = repositoriesPerConfirmedWorkspace + (workspaceIndex < remainderRepositories ? 1 : 0)
         var ids: [String] = []
-        ids.reserveCapacity(reposPerWorkspace)
-        for repoIndex in 0..<reposPerWorkspace {
+        ids.reserveCapacity(bucketSize)
+        for repoIndex in 0..<bucketSize {
             let snapshot = makeSnapshot(
                 workspaceIndex: workspaceIndex, repoIndex: repoIndex, globalIndex: globalIndex
             )
@@ -211,18 +245,39 @@ func makeFixture() -> (workspaces: [Workspace], repositories: [RepositorySnapsho
             id: "ws-\(workspaceIndex)", name: "ws-\(workspaceIndex)", repositoryIDs: ids
         ))
     }
-    return (workspaces, repositories)
+
+    // Unconfirmed workspaces cover a slice of the repositories above, the way an
+    // auto-suggest candidate re-groups repositories the confirmed grouping
+    // already contains.
+    var unconfirmed: [Workspace] = []
+    guard !repositories.isEmpty else { return (workspaces, unconfirmed, repositories) }
+    let window = max(1, repositoriesPerConfirmedWorkspace / 2)
+    for candidateIndex in 0..<unconfirmedCount {
+        let start = (candidateIndex * window) % repositories.count
+        let ids = (0..<window).map { repositories[(start + $0) % repositories.count].id }
+        unconfirmed.append(Workspace(
+            id: "ws-\(confirmedCount + candidateIndex)-unconfirmed",
+            name: "ws-\(confirmedCount + candidateIndex)-unconfirmed",
+            repositoryIDs: ids,
+            autoSuggestConfirmed: false
+        ))
+    }
+    return (workspaces, unconfirmed, repositories)
 }
 
 let fixture = makeFixture()
-let workspaces = fixture.workspaces
+let confirmedWorkspaces = fixture.confirmed
+let unconfirmedWorkspaces = fixture.unconfirmed
+// The scheduler publishes the map for confirmed workspaces first and unconfirmed
+// ones second; the pending-item evaluation reads the confirmed subset alone.
+let allWorkspaces = confirmedWorkspaces + unconfirmedWorkspaces
 let repositories = fixture.repositories
 
 // MARK: - Fingerprint
 
-/// Re-encodes the aggregation with sorted keys and drops the wall-clock
+/// Re-encodes one aggregation map with sorted keys and drops the wall-clock
 /// duration so two implementations can be compared for identical output.
-func fingerprint(_ aggregations: [String: WorkspaceAggregation]) throws -> (digest: String, json: Data) {
+func fingerprint(_ aggregations: [String: WorkspaceAggregation], jsonOut: String?) throws -> String {
     let encoded = try JSONEncoder().encode(aggregations)
     var object = try JSONSerialization.jsonObject(with: encoded)
     func strip(_ value: inout Any) {
@@ -245,9 +300,40 @@ func fingerprint(_ aggregations: [String: WorkspaceAggregation]) throws -> (dige
     }
     strip(&object)
     let json = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
-    let digest = SHA256.hash(data: json).map { String(format: "%02x", $0) }.joined()
-    return (digest, json)
+    if let jsonOut {
+        try json.write(to: URL(fileURLWithPath: jsonOut))
+    }
+    return SHA256.hash(data: json).map { String(format: "%02x", $0) }.joined()
 }
+
+// MARK: - Round under measurement
+
+#if PARTITIONED_AGGREGATION_ROUND
+let mode = "partitioned"
+
+/// One refresh round through the current call pattern: a single partitioned
+/// pass that answers both consumers.
+func measureRound() -> (all: [String: WorkspaceAggregation], confirmed: [String: WorkspaceAggregation]) {
+    let round = WorkspaceAggregationEngine.aggregateAllPartitioned(
+        workspaces: allWorkspaces, allRepositories: repositories, now: now
+    )
+    return (round.all, round.confirmed)
+}
+#else
+let mode = "legacy-two-call"
+
+/// One refresh round through the previous call pattern: the UI map and the
+/// confirmed subset aggregated in two separate passes.
+func measureRound() -> (all: [String: WorkspaceAggregation], confirmed: [String: WorkspaceAggregation]) {
+    let all = WorkspaceAggregationEngine.aggregateAll(
+        workspaces: allWorkspaces, allRepositories: repositories, now: now
+    )
+    let confirmed = WorkspaceAggregationEngine.aggregateAll(
+        workspaces: confirmedWorkspaces, allRepositories: repositories, now: now
+    )
+    return (all, confirmed)
+}
+#endif
 
 // MARK: - Bench
 
@@ -260,32 +346,32 @@ let label = ProcessInfo.processInfo.environment["BENCH_LABEL"] ?? "current"
 @main
 struct Main {
     static func main() throws {
-        var lastResult: [String: WorkspaceAggregation] = [:]
+        var lastRound = measureRound()
 
         for _ in 0..<warmupIterations {
-            lastResult = WorkspaceAggregationEngine.aggregateAll(
-                workspaces: workspaces, allRepositories: repositories, now: now
-            )
+            lastRound = measureRound()
         }
 
         let start = uptimeNanoseconds()
         for _ in 0..<iterations {
-            lastResult = WorkspaceAggregationEngine.aggregateAll(
-                workspaces: workspaces, allRepositories: repositories, now: now
-            )
+            lastRound = measureRound()
         }
         let elapsed = uptimeNanoseconds() - start
 
-        let (digest, json) = try fingerprint(lastResult)
-        if let outPath = ProcessInfo.processInfo.environment["BENCH_JSON_OUT"] {
-            try json.write(to: URL(fileURLWithPath: outPath))
-        }
+        let allDigest = try fingerprint(
+            lastRound.all, jsonOut: ProcessInfo.processInfo.environment["BENCH_JSON_OUT"]
+        )
+        let confirmedDigest = try fingerprint(
+            lastRound.confirmed, jsonOut: ProcessInfo.processInfo.environment["BENCH_CONFIRMED_JSON_OUT"]
+        )
 
         let totalMs = Double(elapsed) / 1_000_000.0
         let meanMs = totalMs / Double(iterations)
         print(String(
-            format: "BENCH label=%@ repos=%d workspaces=%d iterations=%d total_ms=%.3f mean_ms=%.3f fingerprint=%@ timestamps=%@",
-            label, repositories.count, workspaces.count, iterations, totalMs, meanMs, digest,
+            format: "BENCH label=%@ mode=%@ repos=%d workspaces=%d confirmed=%d iterations=%d "
+                + "total_ms=%.3f mean_ms=%.3f fingerprint_all=%@ fingerprint_confirmed=%@ timestamps=%@",
+            label, mode, repositories.count, allWorkspaces.count, confirmedWorkspaces.count,
+            iterations, totalMs, meanMs, allDigest, confirmedDigest,
             canonicalTimestamps ? "canonical" : "mixed"
         ))
     }
@@ -295,9 +381,13 @@ SWIFT
 compile_and_run() {
     local label="$1"
     local engine="$2"
+    local defines="${3:-}"
     local binary="$TMP_DIR/bench-$label"
+    # Only the current tree is compiled against `aggregateAllPartitioned`; the
+    # baseline engine source predates it.
     xcrun swiftc \
         -O \
+        $defines \
         -sdk "$SDK_PATH" \
         -target arm64-apple-macosx14.0 \
         -module-cache-path "$MODULE_CACHE" \
@@ -316,16 +406,17 @@ compile_and_run() {
             return 1
         }
     BENCH_LABEL="$label" \
-    BENCH_JSON_OUT="$TMP_DIR/$label.json" \
+    BENCH_JSON_OUT="$TMP_DIR/$label-all.json" \
+    BENCH_CONFIRMED_JSON_OUT="$TMP_DIR/$label-confirmed.json" \
         "$binary"
 }
 
-echo "Workspace aggregation benchmark"
-echo "  workspaces=${BENCH_WORKSPACES:-8} repos/workspace=${BENCH_REPOS_PER_WORKSPACE:-25} iterations=${BENCH_ITERATIONS:-20} timestamps=${BENCH_TIMESTAMP_SHAPE:-mixed}"
+echo "Workspace aggregation benchmark (one refresh round: UI map + confirmed map)"
+echo "  workspaces=${BENCH_WORKSPACES:-8} (unconfirmed=${BENCH_UNCONFIRMED_WORKSPACES:-0}) repos/workspace=${BENCH_REPOS_PER_WORKSPACE:-25} iterations=${BENCH_ITERATIONS:-20} timestamps=${BENCH_TIMESTAMP_SHAPE:-mixed}"
 echo
 
 if [[ -z "$BASELINE_ENGINE" ]]; then
-    compile_and_run current "$ENGINE_FILE"
+    compile_and_run current "$ENGINE_FILE" "-D PARTITIONED_AGGREGATION_ROUND"
     exit 0
 fi
 
@@ -334,28 +425,38 @@ fi
 BASELINE_OUT="$TMP_DIR/baseline.out"
 CURRENT_OUT="$TMP_DIR/current.out"
 compile_and_run baseline "$BASELINE_ENGINE" | tee "$BASELINE_OUT"
-compile_and_run current "$ENGINE_FILE" | tee "$CURRENT_OUT"
+compile_and_run current "$ENGINE_FILE" "-D PARTITIONED_AGGREGATION_ROUND" | tee "$CURRENT_OUT"
 
 baseline_ms="$(sed -n 's/.* mean_ms=\([0-9.]*\).*/\1/p' "$BASELINE_OUT")"
 current_ms="$(sed -n 's/.* mean_ms=\([0-9.]*\).*/\1/p' "$CURRENT_OUT")"
-baseline_fp="$(sed -n 's/.* fingerprint=\([0-9a-f]*\).*/\1/p' "$BASELINE_OUT")"
-current_fp="$(sed -n 's/.* fingerprint=\([0-9a-f]*\).*/\1/p' "$CURRENT_OUT")"
+baseline_all_fp="$(sed -n 's/.* fingerprint_all=\([0-9a-f]*\).*/\1/p' "$BASELINE_OUT")"
+current_all_fp="$(sed -n 's/.* fingerprint_all=\([0-9a-f]*\).*/\1/p' "$CURRENT_OUT")"
+baseline_confirmed_fp="$(sed -n 's/.* fingerprint_confirmed=\([0-9a-f]*\).*/\1/p' "$BASELINE_OUT")"
+current_confirmed_fp="$(sed -n 's/.* fingerprint_confirmed=\([0-9a-f]*\).*/\1/p' "$CURRENT_OUT")"
 
 echo
 awk -v b="$baseline_ms" -v c="$current_ms" 'BEGIN {
     if (c > 0) {
-        printf "speedup: %.2fx faster (%.3f ms -> %.3f ms per aggregateAll)\n", b / c, b, c
+        printf "speedup: %.2fx faster (%.3f ms -> %.3f ms per refresh round)\n", b / c, b, c
         printf "reduction: %.1f%% of baseline runtime\n", (1 - c / b) * 100
     }
 }'
 
-if [[ "$baseline_fp" == "$current_fp" ]]; then
-    echo "output equivalence: identical aggregation fingerprint ($current_fp)"
+status=0
+if [[ "$baseline_all_fp" == "$current_all_fp" ]]; then
+    echo "output equivalence (UI map): identical aggregation fingerprint ($current_all_fp)"
 else
-    echo "output equivalence: MISMATCH" >&2
-    echo "  baseline: $baseline_fp" >&2
-    echo "  current:  $current_fp" >&2
-    diff <(python3 -m json.tool "$TMP_DIR/baseline.json") \
-         <(python3 -m json.tool "$TMP_DIR/current.json") >&2 || true
-    exit 1
+    echo "output equivalence (UI map): MISMATCH" >&2
+    diff <(python3 -m json.tool "$TMP_DIR/baseline-all.json") \
+         <(python3 -m json.tool "$TMP_DIR/current-all.json") >&2 || true
+    status=1
 fi
+if [[ "$baseline_confirmed_fp" == "$current_confirmed_fp" ]]; then
+    echo "output equivalence (confirmed map): identical aggregation fingerprint ($current_confirmed_fp)"
+else
+    echo "output equivalence (confirmed map): MISMATCH" >&2
+    diff <(python3 -m json.tool "$TMP_DIR/baseline-confirmed.json") \
+         <(python3 -m json.tool "$TMP_DIR/current-confirmed.json") >&2 || true
+    status=1
+fi
+exit "$status"

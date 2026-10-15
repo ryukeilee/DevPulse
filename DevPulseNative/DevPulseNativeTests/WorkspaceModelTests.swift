@@ -645,6 +645,68 @@ struct WorkspaceAggregationTests {
         #expect(combined[duplicatedID]?.workspaceName == "DuplicatedUnconfirmed")
     }
 
+    /// A refresh round serves both consumers from one partitioned pass, so its
+    /// maps must equal the two single-set aggregations they replace, including
+    /// each map's own duplicated-id precedence.
+    @Test func testAggregateAllPartitionedMatchesSeparateAggregations() throws {
+        let fixedNow = Date(timeIntervalSince1970: 1_770_000_000)
+        let duplicatedID = "duplicated-workspace"
+        let confirmedWorkspaces = [
+            Workspace(id: duplicatedID, name: "DuplicatedConfirmed", repositoryIDs: ["r1"]),
+            Workspace(name: "Confirmed", repositoryIDs: ["r1", "r2"])
+        ]
+        let unconfirmedWorkspaces = [
+            Workspace(id: duplicatedID, name: "DuplicatedUnconfirmed", repositoryIDs: ["r2"],
+                      autoSuggestConfirmed: false),
+            Workspace(name: "Unconfirmed", repositoryIDs: ["r3"], autoSuggestConfirmed: false)
+        ]
+        let repositories = [
+            RepositorySnapshot.mock(id: "r1", name: "R1", path: "/test/R1",
+                                   status: .changed, modified: 3, risk: .high),
+            RepositorySnapshot.mock(id: "r2", name: "R2", path: "/test/R2", conflicted: 1),
+            RepositorySnapshot.mock(id: "r3", name: "R3", path: "/test/R3",
+                                   status: .error, dataSource: .unknown)
+        ]
+
+        // The scheduler passes confirmed workspaces first, then unconfirmed ones.
+        let round = WorkspaceAggregationEngine.aggregateAllPartitioned(
+            workspaces: confirmedWorkspaces + unconfirmedWorkspaces,
+            allRepositories: repositories,
+            now: fixedNow
+        )
+
+        // Independent oracle for both maps: one public single-workspace
+        // aggregation per workspace, merged in the order each map iterates — a
+        // duplicated id keeps the last entry, which is the unconfirmed one for the
+        // published map and the confirmed one for the confirmed subset.
+        var expectedAll: [String: WorkspaceAggregation] = [:]
+        for workspace in confirmedWorkspaces + unconfirmedWorkspaces {
+            expectedAll[workspace.id] = WorkspaceAggregationEngine.aggregate(
+                workspace: workspace, allRepositories: repositories, now: fixedNow
+            )
+        }
+        var expectedConfirmed: [String: WorkspaceAggregation] = [:]
+        for workspace in confirmedWorkspaces {
+            expectedConfirmed[workspace.id] = WorkspaceAggregationEngine.aggregate(
+                workspace: workspace, allRepositories: repositories, now: fixedNow
+            )
+        }
+
+        #expect(round.all.keys.sorted() == expectedAll.keys.sorted())
+        for (workspaceID, aggregation) in round.all {
+            let expected = try #require(expectedAll[workspaceID])
+            #expect(try aggregationPayload(aggregation) == aggregationPayload(expected))
+        }
+        #expect(round.confirmed.keys.sorted() == expectedConfirmed.keys.sorted())
+        for (workspaceID, aggregation) in round.confirmed {
+            let expected = try #require(expectedConfirmed[workspaceID])
+            #expect(try aggregationPayload(aggregation) == aggregationPayload(expected))
+        }
+
+        #expect(round.all[duplicatedID]?.workspaceName == "DuplicatedUnconfirmed")
+        #expect(round.confirmed[duplicatedID]?.workspaceName == "DuplicatedConfirmed")
+    }
+
     /// Empty input stays explicit: no workspaces yields no aggregations, and a
     /// workspace without repositories still reports an empty `.unknown` result.
     @Test func testAggregateAllHandlesEmptyInputs() throws {

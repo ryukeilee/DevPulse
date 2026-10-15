@@ -972,19 +972,24 @@ final class ScanScheduler: ObservableObject {
     }
 
     /// Recompute workspace aggregations after a scan completes.
-    private func refreshWorkspaceAggregations() {
+    ///
+    /// Returns the round's task so a derivation of the same scan result (the
+    /// pending-item evaluation started right after) can consume the confirmed
+    /// subset instead of aggregating the confirmed workspaces a second time.
+    @discardableResult
+    private func refreshWorkspaceAggregations() -> Task<WorkspaceAggregationRound, Never> {
         let repos = lastResult.repositories
-        // One `aggregateAll` call resolves repository membership once for both
-        // sets instead of once per set. Confirmed workspaces stay first so a
-        // duplicated workspace id still resolves to its unconfirmed entry, which
-        // is the precedence the previous two-call merge produced.
+        // Both consumers of this round read the same list. Confirmed workspaces
+        // stay first so a duplicated workspace id still resolves to its
+        // unconfirmed entry for the published map, which is the precedence the
+        // previous two-call merge produced.
         let allWorkspaces = workspaces.filter(\.autoSuggestConfirmed)
             + workspaces.filter { !$0.autoSuggestConfirmed }
         workspaceAggregationGeneration &+= 1
         let generation = workspaceAggregationGeneration
 
-        Task.detached(priority: .utility) { @Sendable [weak self] in
-            let all = WorkspaceAggregationEngine.aggregateAll(
+        return Task.detached(priority: .utility) { @Sendable [weak self] in
+            let round = WorkspaceAggregationEngine.aggregateAllPartitioned(
                 workspaces: allWorkspaces,
                 allRepositories: repos
             )
@@ -992,8 +997,9 @@ final class ScanScheduler: ObservableObject {
                 guard let self,
                       !self.terminating,
                       self.workspaceAggregationGeneration == generation else { return }
-                self.workspaceAggregations = all
+                self.workspaceAggregations = round.all
             }
+            return round
         }
     }
 
@@ -1022,7 +1028,16 @@ final class ScanScheduler: ObservableObject {
     }
 
     /// Refresh pending items after a scan completes, in background.
-    func refreshPendingItems(skipHealthAssessments: Bool = false) {
+    ///
+    /// `aggregationRound` is the workspace aggregation already computed for this
+    /// scan result by `refreshWorkspaceAggregations()`. Supplying it reuses the
+    /// confirmed subset instead of aggregating those workspaces again; without it
+    /// (a time-based re-evaluation with no fresh scan) the aggregation is
+    /// computed here.
+    func refreshPendingItems(
+        skipHealthAssessments: Bool = false,
+        aggregationRound: Task<WorkspaceAggregationRound, Never>? = nil
+    ) {
         let repos = lastResult.repositories
         let confirmedWorkspaces = workspaces.filter { $0.autoSuggestConfirmed }
         let historyStore = self.historyStore
@@ -1068,11 +1083,18 @@ final class ScanScheduler: ObservableObject {
 
             // Build aggregations from the same repository/workspace snapshot as
             // this evaluation. Reading the published UI aggregation here could
-            // pair a new scan with an older asynchronous aggregation result.
-            let workspaceAggregations = WorkspaceAggregationEngine.aggregateAll(
-                workspaces: confirmedWorkspaces,
-                allRepositories: repos
-            )
+            // pair a new scan with an older asynchronous aggregation result, so
+            // the round's own task is awaited instead: it was started from the
+            // same snapshot that is evaluated here.
+            let workspaceAggregations: [String: WorkspaceAggregation]
+            if let aggregationRound {
+                workspaceAggregations = await aggregationRound.value.confirmed
+            } else {
+                workspaceAggregations = WorkspaceAggregationEngine.aggregateAll(
+                    workspaces: confirmedWorkspaces,
+                    allRepositories: repos
+                )
+            }
 
             let previousArchive: PendingItemArchive?
             switch pendingItemStore.load() {
@@ -2112,11 +2134,13 @@ final class ScanScheduler: ObservableObject {
                     }
                 }
                 if hadChanges {
-                    // Refresh workspace aggregations in background
-                    self.refreshWorkspaceAggregations()
+                    // Refresh workspace aggregations in background, then hand the
+                    // same round's confirmed subset to the pending-item evaluation
+                    // so no workspace is aggregated twice per refresh.
+                    let aggregationRound = self.refreshWorkspaceAggregations()
                     self.refreshWorkspaceSuggestions()
                     // Refresh pending items (uses health assessments and workspace aggregations)
-                    self.refreshPendingItems()
+                    self.refreshPendingItems(aggregationRound: aggregationRound)
                 } else {
                     // Still refresh pending items for time-based rule evaluation (escalation, auto-recovery)
                     // but skip the expensive per-repo history loading since no state changed.

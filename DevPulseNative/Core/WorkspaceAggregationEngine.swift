@@ -148,6 +148,15 @@ struct RepositoryAggregationSummary: Codable, Equatable, Identifiable, Sendable 
     }
 }
 
+/// One aggregation pass over a workspace list, split for the two consumers of a
+/// refresh round: `all` is the map for the UI, `confirmed` the subset the
+/// pending-item evaluator reads. Both describe the same pass, so a refresh that
+/// needs both aggregations no longer aggregates the confirmed workspaces twice.
+struct WorkspaceAggregationRound: Sendable {
+    let all: [String: WorkspaceAggregation]
+    let confirmed: [String: WorkspaceAggregation]
+}
+
 // MARK: - Aggregation engine
 
 /// Aggregates workspace-level metrics from repository snapshots.
@@ -174,9 +183,9 @@ enum WorkspaceAggregationEngine {
     /// Compute the full aggregation for one workspace from repositories that are
     /// already known to belong to it.
     ///
-    /// Membership filtering is the caller's job so that `aggregateAll` can resolve
-    /// membership for every workspace in one pass over the scan result instead of
-    /// one pass per workspace.
+    /// Membership filtering is the caller's job so that `aggregateAllPartitioned`
+    /// can resolve membership for every workspace in one pass over the scan
+    /// result instead of one pass per workspace.
     private static func aggregate(
         workspace: Workspace,
         repositories: [RepositorySnapshot],
@@ -363,14 +372,45 @@ enum WorkspaceAggregationEngine {
     }
 
     /// Compute aggregations for ALL workspaces.
+    ///
+    /// The single-map form of `aggregateAllPartitioned`; a caller that also needs
+    /// the confirmed subset (one refresh round serves both consumers) uses that
+    /// one so the pass is not repeated.
     static func aggregateAll(
         workspaces: [Workspace],
         allRepositories: [RepositorySnapshot],
         now: Date = Date()
     ) -> [String: WorkspaceAggregation] {
+        aggregateAllPartitioned(
+            workspaces: workspaces,
+            allRepositories: allRepositories,
+            now: now
+        ).all
+    }
+
+    /// Compute aggregations for ALL workspaces and split out the confirmed ones.
+    ///
+    /// The confirmed workspaces are usually the whole list, so a caller that
+    /// serves both the workspace UI and the pending-item evaluator uses this to
+    /// aggregate every workspace once per refresh instead of twice.
+    ///
+    /// Both maps keep the result the equivalent single-set `aggregateAll` call
+    /// produced: each workspace is aggregated from its own membership bucket, and
+    /// a duplicated workspace id resolves to the last entry in the order that map
+    /// iterated — the passed order for `all`, the confirmed subsequence for
+    /// `confirmed`.
+    static func aggregateAllPartitioned(
+        workspaces: [Workspace],
+        allRepositories: [RepositorySnapshot],
+        now: Date = Date()
+    ) -> WorkspaceAggregationRound {
         var results: [String: WorkspaceAggregation] = [:]
+        var confirmedResults: [String: WorkspaceAggregation] = [:]
         results.reserveCapacity(workspaces.count)
-        guard !workspaces.isEmpty else { return results }
+        confirmedResults.reserveCapacity(workspaces.count)
+        guard !workspaces.isEmpty else {
+            return WorkspaceAggregationRound(all: results, confirmed: confirmedResults)
+        }
 
         // Resolve membership once for every workspace, then bucket the scan
         // result in a single pass over it. Filtering per workspace walked the
@@ -405,13 +445,17 @@ enum WorkspaceAggregationEngine {
             // Bucket order follows `allRepositories`, which is the order the
             // per-workspace filter produced, so every order-dependent field
             // (drill-down lists, conflict names) is unchanged.
-            results[workspace.id] = aggregate(
+            let aggregation = aggregate(
                 workspace: workspace,
                 repositories: repositoriesByWorkspaceIndex[workspaceIndex],
                 now: now
             )
+            results[workspace.id] = aggregation
+            if workspace.autoSuggestConfirmed {
+                confirmedResults[workspace.id] = aggregation
+            }
         }
-        return results
+        return WorkspaceAggregationRound(all: results, confirmed: confirmedResults)
     }
 
     /// Find orphan repositories (not in any workspace).
