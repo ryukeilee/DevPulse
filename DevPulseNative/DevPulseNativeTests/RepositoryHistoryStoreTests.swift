@@ -167,6 +167,56 @@ struct RepositoryHistoryStoreTests {
         #expect(count == 1)
     }
 
+    @Test func snapshotRecordingUsesFirstLatestArchiveEntryOnTies() throws {
+        let repository = makeSnapshot(name: "tie", branch: "main", changedCount: 0)
+        let state = HistoryStatePoint(snapshot: repository)
+        let otherState = HistoryStatePoint(snapshot: makeSnapshot(name: "tie", branch: "feature", changedCount: 3))
+        for (index, kind) in [HistoryEntryKind.scanRecord, .stateChange].enumerated() {
+            let url = tempDir.appendingPathComponent("archive-ties-\(index).json")
+            let tiedFirst = RepositoryHistoryEntry(repositoryID: repository.id,
+                recordedAt: "2026-07-22T11:00:00Z", kind: kind, state: state)
+            let tiedSecond = RepositoryHistoryEntry(repositoryID: repository.id,
+                recordedAt: tiedFirst.recordedAt, kind: .scanRecord, state: otherState)
+            let older = RepositoryHistoryEntry(repositoryID: repository.id,
+                recordedAt: "2026-07-22T10:00:00Z", kind: .scanRecord, state: otherState)
+            // Deliberately unsorted, with different states/kinds at the latest timestamp.
+            let entries = [older, tiedFirst, tiedSecond]
+            try JSONEncoder().encode(RepositoryHistoryArchive(entries: entries)).write(to: url)
+            let historyStore = RepositoryHistoryStore(fileURL: url)
+            let outcome = try historyStore.recordSnapshotStates(
+                repositories: [repository], recordedAt: "2026-07-22T12:00:00Z"
+            ).get()
+            let added = kind == .scanRecord ? 0 : 1
+            #expect(outcome == HistoryRecordOutcome(addedCount: added, totalEntryCount: 3 + added))
+            #expect(historyStore.loadMetrics().archiveDecodeCount == 1)
+            let newEntry = RepositoryHistoryEntry(repositoryID: repository.id,
+                recordedAt: "2026-07-22T12:00:00Z", kind: .scanRecord, state: state)
+            let expected = (entries + (added == 1 ? [newEntry] : []))
+                .sorted { $0.recordedAt > $1.recordedAt }
+            #expect(try historyStore.load().get() == expected)
+            let diagnostics = historyStore.diagnostics
+            #expect(diagnostics.totalEntriesWritten == 1)
+            #expect(diagnostics.totalDedupSkipped == 1 - added)
+            #expect(diagnostics.currentEntryCount == 3 + added)
+            #expect(diagnostics.totalRepositoryCount == 1)
+        }
+    }
+
+    @Test func recordingKeepsFirstNewestIncomingEntryOnTies() throws {
+        let state = HistoryStatePoint(snapshot: makeSnapshot(name: "tie", branch: "main", changedCount: 0))
+        let otherState = HistoryStatePoint(snapshot: makeSnapshot(name: "tie", branch: "feature", changedCount: 3))
+        let older = RepositoryHistoryEntry(repositoryID: "repo", recordedAt: "2026-07-22T10:00:00Z",
+            kind: .scanRecord, state: otherState)
+        let first = RepositoryHistoryEntry(repositoryID: "repo", recordedAt: "2026-07-22T11:00:00Z",
+            kind: .stateChange, state: state)
+        let second = RepositoryHistoryEntry(repositoryID: "repo", recordedAt: first.recordedAt,
+            kind: .scanRecord, state: otherState)
+        #expect(try store.record(entries: [older, first, second]).get() == 1)
+        #expect(try store.load().get() == [first])
+        #expect(store.diagnostics.totalEntriesWritten == 3)
+        #expect(store.diagnostics.totalDedupSkipped == 2)
+    }
+
     @Test func testStateChangeNotDeduped() async throws {
         let state1 = HistoryStatePoint(snapshot: makeSnapshot(name: "test", branch: "main", changedCount: 0))
         let state2 = HistoryStatePoint(snapshot: makeSnapshot(name: "test", branch: "main", changedCount: 5))

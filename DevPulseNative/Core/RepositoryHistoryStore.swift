@@ -453,18 +453,25 @@ final class RepositoryHistoryStore: @unchecked Sendable {
     ) -> Result<HistoryRecordOutcome, HistoryStoreError> {
         let beforeCount = archive.entries.count
 
-        // Group entries by repository, keep newest first for each.
+        // Keep the first entry at the latest timestamp, matching max(by:) on the archive.
+        var latestByRepository: [String: RepositoryHistoryEntry] = [:]
+        for entry in archive.entries {
+            if let latest = latestByRepository[entry.repositoryID],
+               entry.recordedAt <= latest.recordedAt {
+                continue
+            }
+            latestByRepository[entry.repositoryID] = entry
+        }
+
+        // Group entries by repository, keeping the first newest entry on ties.
         let grouped = Dictionary(grouping: entries, by: { $0.repositoryID })
         var entriesToAdd: [RepositoryHistoryEntry] = []
 
         for (repoID, repoEntries) in grouped {
-            let sorted = repoEntries.sorted { $0.recordedAt > $1.recordedAt }
-            guard let newest = sorted.first else { continue }
+            guard let newest = repoEntries.max(by: { $0.recordedAt < $1.recordedAt }) else { continue }
 
             // Check if the latest entry for this repo is identical.
-            let lastForRepo = archive.entries
-                .filter { $0.repositoryID == repoID }
-                .max { $0.recordedAt < $1.recordedAt }
+            let lastForRepo = latestByRepository[repoID]
 
             if let last = lastForRepo,
                last.kind == .scanRecord,
