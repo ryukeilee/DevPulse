@@ -182,7 +182,6 @@ struct WorkspaceListView: View {
 
     private func workspaceCard(_ workspace: Workspace) -> some View {
         let aggregation = scheduler.workspaceAggregations[workspace.id]
-        let repos = scheduler.lastResult.repositories.filter { workspace.repositoryIDs.contains($0.id) }
 
         return VStack(spacing: 0) {
             Button {
@@ -294,17 +293,7 @@ struct WorkspaceListView: View {
             Spacer()
 
             Button("确认") {
-                if let idx = scheduler.workspaces.firstIndex(where: { $0.id == workspace.id }) {
-                    let ws = scheduler.workspaces[idx]
-                    let updated = Workspace(
-                        id: ws.id,
-                        name: ws.name,
-                        sortOrder: ws.sortOrder,
-                        isPinned: ws.isPinned,
-                        repositoryIDs: ws.repositoryIDs,
-                        groupingBasis: ws.groupingBasis,
-                        autoSuggestConfirmed: true
-                    )
+                if let ws = scheduler.workspaces.first(where: { $0.id == workspace.id }) {
                     scheduler.confirmUnconfirmedWorkspace(ws)
                 }
             }
@@ -312,7 +301,7 @@ struct WorkspaceListView: View {
             .controlSize(.small)
 
             Button("忽略") {
-                if let idx = scheduler.workspaces.firstIndex(where: { $0.id == workspace.id }) {
+                if scheduler.workspaces.contains(where: { $0.id == workspace.id }) {
                     scheduler.deleteWorkspace(id: workspace.id)
                 }
             }
