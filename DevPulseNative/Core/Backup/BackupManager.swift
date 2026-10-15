@@ -255,8 +255,7 @@ final class BackupManager: @unchecked Sendable {
             }
 
             // Compute hash
-            let dataHash = SHA256.hash(data: sanitized)
-                .map { String(format: "%02x", $0) }.joined()
+            let dataHash = DigestHex.encode(SHA256.hash(data: sanitized))
 
             // Keep incremental backups independently restorable: when an entry
             // is unchanged, copy its verified payload from the previous chain
@@ -509,8 +508,7 @@ final class BackupManager: @unchecked Sendable {
                 continue
             }
 
-            let actualHash = SHA256.hash(data: logicalData)
-                .map { String(format: "%02x", $0) }.joined()
+            let actualHash = DigestHex.encode(SHA256.hash(data: logicalData))
             if actualHash != entry.dataHash {
                 entryChecksumsMatch = false
                 errors.append("条目数据校验和不匹配：\(entryFileName)")
@@ -571,8 +569,7 @@ final class BackupManager: @unchecked Sendable {
                 "无法解压：\(entry.storeType.entryFileName)"
             )
         }
-        let actualHash = SHA256.hash(data: logicalData)
-            .map { String(format: "%02x", $0) }.joined()
+        let actualHash = DigestHex.encode(SHA256.hash(data: logicalData))
         guard actualHash == entry.dataHash else {
             throw BackupManagerError.checksumMismatch(
                 expected: entry.dataHash,

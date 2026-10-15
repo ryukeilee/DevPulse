@@ -540,7 +540,7 @@ extension BackupManifest {
             .map { "\($0.key):\($0.value)" }
             .joined(separator: "|")
         let digest = SHA256.hash(data: Data(combined.utf8))
-        return digest.map { String(format: "%02x", $0) }.joined()
+        return DigestHex.encode(digest)
     }
 }
 

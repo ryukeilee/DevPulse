@@ -127,9 +127,7 @@ struct RepositoryHistoryEntry: Codable, Identifiable, Equatable, Sendable {
             state.lastCommitID ?? "nil",
             "\(state.changedFileCount)"
         ].joined(separator: "\u{1F}")
-        let digest = SHA256.hash(data: Data(identity.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
+        let digest = DigestHex.encode(SHA256.hash(data: Data(identity.utf8)))
         id = "history-v1-\(digest)"
         self.repositoryID = repositoryID
         self.recordedAt = recordedAt

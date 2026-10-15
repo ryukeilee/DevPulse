@@ -132,8 +132,7 @@ enum BackupPrivacyFilter {
     private static func anonymizeDeviceName(_ name: String) -> String {
         guard !name.trimmingCharacters(in: .whitespaces).isEmpty else { return "Mac" }
         // Use a stable hash prefix so the same device gets the same anonymized name
-        let hash = SHA256.hash(data: Data(name.utf8))
-        let suffix = hash.map { String(format: "%02x", $0) }.joined().prefix(8)
+        let suffix = DigestHex.encode(SHA256.hash(data: Data(name.utf8))).prefix(8)
         return "Mac-\(suffix)"
     }
 }

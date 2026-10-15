@@ -101,15 +101,13 @@ final class DependencyInferenceEngine: @unchecked Sendable {
             // Repository is a SwiftPM package; try to read product/target names
             if let targets = parseSwiftPackageTargets(at: path) {
                 for target in targets {
-                    let digest = SHA256.hash(data: Data(target.name.utf8))
-                    let id = "spm-" + digest.map { String(format: "%02x", $0) }.joined()
+                    let id = "spm-" + DigestHex.encode(SHA256.hash(data: Data(target.name.utf8)))
                     modules.append((id: id, name: target.name, kind: target.kind))
                 }
             } else {
                 // Fallback: single package module
                 let name = (path as NSString).lastPathComponent
-                let digest = SHA256.hash(data: Data(name.utf8))
-                let id = "pkg-" + digest.map { String(format: "%02x", $0) }.joined()
+                let id = "pkg-" + DigestHex.encode(SHA256.hash(data: Data(name.utf8)))
                 modules.append((id: id, name: name, kind: .package))
             }
         }
@@ -119,8 +117,7 @@ final class DependencyInferenceEngine: @unchecked Sendable {
         if fm.fileExists(atPath: projectYmlPath) {
             if let targets = parseProjectYmlTargets(at: path) {
                 for target in targets {
-                    let digest = SHA256.hash(data: Data(target.name.utf8))
-                    let id = "tgt-" + digest.map { String(format: "%02x", $0) }.joined()
+                    let id = "tgt-" + DigestHex.encode(SHA256.hash(data: Data(target.name.utf8)))
                     modules.append((id: id, name: target.name, kind: target.kind))
                 }
             }
@@ -137,8 +134,7 @@ final class DependencyInferenceEngine: @unchecked Sendable {
                 // Check for targets via xcodebuild -list (lightweight)
                 if let xcodeTargets = parseXcodeTargets(projectPath: fullPath) {
                     for target in xcodeTargets {
-                        let digest = SHA256.hash(data: Data(target.utf8))
-                        let id = "xctgt-" + digest.map { String(format: "%02x", $0) }.joined()
+                        let id = "xctgt-" + DigestHex.encode(SHA256.hash(data: Data(target.utf8)))
                         let kind = target.contains("Test") || target.contains("Tests")
                             ? ModuleKind.testTarget
                             : ModuleKind.app
@@ -146,8 +142,7 @@ final class DependencyInferenceEngine: @unchecked Sendable {
                     }
                 } else {
                     // Fallback: use project name as a single module
-                    let digest = SHA256.hash(data: Data(projectName.utf8))
-                    let id = "xcp-" + digest.map { String(format: "%02x", $0) }.joined()
+                    let id = "xcp-" + DigestHex.encode(SHA256.hash(data: Data(projectName.utf8)))
                     modules.append((id: id, name: projectName, kind: .app))
                 }
             }
@@ -162,8 +157,7 @@ final class DependencyInferenceEngine: @unchecked Sendable {
                 var isDir: ObjCBool = false
                 if fm.fileExists(atPath: dirPath, isDirectory: &isDir), isDir.boolValue {
                     let name = dir
-                    let digest = SHA256.hash(data: Data(name.utf8))
-                    let id = "mod-" + digest.map { String(format: "%02x", $0) }.joined()
+                    let id = "mod-" + DigestHex.encode(SHA256.hash(data: Data(name.utf8)))
                     let kind: ModuleKind = dir == "Widget" ? .widgetExtension : .library
                     modules.append((id: id, name: name, kind: kind))
                 }
@@ -173,8 +167,7 @@ final class DependencyInferenceEngine: @unchecked Sendable {
         // 5. Always include a fallback workspace-level module
         if modules.isEmpty {
             let name = (path as NSString).lastPathComponent
-            let digest = SHA256.hash(data: Data(name.utf8))
-            let id = "repo-" + digest.map { String(format: "%02x", $0) }.joined()
+            let id = "repo-" + DigestHex.encode(SHA256.hash(data: Data(name.utf8)))
             modules.append((id: id, name: name, kind: .unknown))
         }
 

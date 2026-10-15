@@ -75,9 +75,7 @@ struct Workspace: Codable, Identifiable, Equatable, Sendable {
             repositoryIDs.sorted().joined(separator: ","),
             now
         ].joined(separator: "\u{1F}")
-        let digest = SHA256.hash(data: Data(identity.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
+        let digest = DigestHex.encode(SHA256.hash(data: Data(identity.utf8)))
         self.id = id ?? "ws-v1-\(digest)"
         self.name = name
         self.sortOrder = sortOrder
@@ -204,9 +202,7 @@ struct WorkspaceAutoSuggestCandidate: Codable, Equatable, Identifiable, Sendable
         evidence: String
     ) {
         let canonical = [name] + repositoryIDs.sorted() + [groupingBasis.rawValue, evidence]
-        let digest = SHA256.hash(data: Data(canonical.joined(separator: "\u{1F}").utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
+        let digest = DigestHex.encode(SHA256.hash(data: Data(canonical.joined(separator: "\u{1F}").utf8)))
         self.id = "suggest-\(digest)"
         self.name = name
         self.repositoryIDs = repositoryIDs

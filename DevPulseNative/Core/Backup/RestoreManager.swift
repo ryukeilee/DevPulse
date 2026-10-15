@@ -608,5 +608,5 @@ struct RestoreResult: Equatable {
 // MARK: - Helper: compute data hash for store comparison
 
 private func storeDataHash(_ data: Data) -> String {
-    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    DigestHex.encode(SHA256.hash(data: data))
 }

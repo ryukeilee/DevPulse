@@ -739,8 +739,6 @@ struct InvalidationKey: Codable, Equatable, Hashable, Sendable {
     }
 
     private static func simpleHash(_ string: String) -> String {
-        let data = Data(string.utf8)
-        let hash = SHA256.hash(data: data)
-        return hash.map { String(format: "%02x", $0) }.joined()
+        DigestHex.encode(SHA256.hash(data: Data(string.utf8)))
     }
 }
