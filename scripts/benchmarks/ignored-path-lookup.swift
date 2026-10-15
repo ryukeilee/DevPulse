@@ -12,8 +12,10 @@ import Foundation
 // This harness reproduces both forms over real directories (so
 // `RepositoryIdentity.canonicalPath` performs the same existence and symlink
 // resolution as production), times them without a reuse scope, and counts the
-// filesystem resolutions with a counting scope. Both forms must return the
-// identical array or the run fails.
+// filesystem resolutions with a counting scope. Half of each ignored set is a
+// subset of the discovered paths so the filter has to drop real entries; the
+// other half is not, matching a repository ignored while outside the current
+// discovery scope. Both forms must return the identical array or the run fails.
 
 private let iterations = max(1, Int(ProcessInfo.processInfo.environment["BENCH_ITERATIONS"] ?? "5") ?? 5)
 private let sizes: [(discovered: Int, ignored: Int)] =
@@ -59,14 +61,17 @@ private func median(_ samples: [Double]) -> Double {
     return sorted[sorted.count / 2]
 }
 
-private func time(_ body: () -> [String]) -> Double {
+/// Median wall time over `iterations` runs. The result is consumed so the
+/// optimizer cannot elide the work; an empty result is legitimate when every
+/// discovered path is ignored, so it is not treated as a failure.
+private func time(_ sink: inout Int, _ body: () -> [String]) -> Double {
     var samples: [Double] = []
     samples.reserveCapacity(iterations)
     for _ in 0..<iterations {
         let start = DispatchTime.now().uptimeNanoseconds
         let result = body()
+        sink &+= result.count
         let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
-        if result.isEmpty { FileHandle.standardError.write(Data("FAIL: empty result\n".utf8)); exit(1) }
         samples.append(elapsed)
     }
     return median(samples)
@@ -83,9 +88,10 @@ private func resolutions(_ body: () -> [String]) -> Int {
 @main
 struct Main {
     static func main() {
+        // A per-run directory: a fixed path made two concurrent runs delete each
+        // other's fixtures.
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("devpulse-ignored-path-bench", isDirectory: true)
-        try? FileManager.default.removeItem(at: root)
+            .appendingPathComponent("devpulse-ignored-path-bench-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -94,12 +100,16 @@ struct Main {
             + pad("inside-filter ms", 18)
             + pad("once-per-access ms", 20)
             + pad("resolutions", 26)
+            + pad("kept", 9)
             + "equivalent")
 
+        var sink = 0
         var mismatches = 0
         for (discoveredCount, ignoredCount) in sizes {
             let discovered = makeDirectories(count: discoveredCount, prefix: "repo", root: root)
-            let ignored = makeDirectories(count: ignoredCount, prefix: "ignored", root: root)
+            let fromDiscovered = min(ignoredCount / 2, discoveredCount)
+            let ignored = Array(discovered.prefix(fromDiscovered))
+                + makeDirectories(count: ignoredCount - fromDiscovered, prefix: "ignored", root: root)
 
             let previous = ignoredSetInsideFilter(discovered, ignored)
             let current = ignoredSetResolvedOnce(discovered, ignored)
@@ -110,12 +120,17 @@ struct Main {
             let currentResolutions = resolutions { ignoredSetResolvedOnce(discovered, ignored) }
 
             print(pad("\(discoveredCount):\(ignoredCount)", 20)
-                + pad(String(format: "%.3f", time { ignoredSetInsideFilter(discovered, ignored) }), 18)
-                + pad(String(format: "%.3f", time { ignoredSetResolvedOnce(discovered, ignored) }), 20)
+                + pad(String(format: "%.3f", time(&sink) { ignoredSetInsideFilter(discovered, ignored) }), 18)
+                + pad(String(format: "%.3f", time(&sink) { ignoredSetResolvedOnce(discovered, ignored) }), 20)
                 + pad("\(previousResolutions) -> \(currentResolutions)", 26)
+                + pad("\(current.count)/\(discoveredCount)", 9)
                 + (equivalent ? "yes" : "MISMATCH"))
         }
 
+        if sink == 0 {
+            FileHandle.standardError.write(Data("FAIL: no work measured\n".utf8))
+            exit(1)
+        }
         if mismatches != 0 {
             FileHandle.standardError.write(Data("FAIL: \(mismatches) output mismatch(es)\n".utf8))
             exit(1)

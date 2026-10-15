@@ -33,28 +33,6 @@ private func repo(_ i: Int, dirty: Bool, variant: Bool = false) -> RepositorySna
     )
 }
 
-private func historySources(_ j: Int) -> PendingItemSource {
-    let all: [PendingItemSource] = [
-        .dirtyWorkspace, .unpushedCommits, .behindRemote, .mergeConflict,
-        .upstreamMissing, .unavailable, .staleRepository, .scanFailure,
-        .creepingChanges, .staleActivity, .healthTrend
-    ]
-    return all[j % all.count]
-}
-
-private func historyStatuses(_ j: Int) -> PendingItemStatus {
-    // Exactly one previous item per repository may be resolvable. The
-    // evaluator walks the resolvable previous items of a repository through a
-    // `Dictionary`'s values, so a bucket holding two of them appends their
-    // transitions in per-process hash order and lets the last one overwrite
-    // `firstDetectedAt`. That is a property of the evaluator, not of what this
-    // harness measures, so the fixture keeps each bucket at one element to stay
-    // reproducible across builds.
-    if j == 0 { return .active }
-    let suppressed: [PendingItemStatus] = [.snoozed, .muted, .resolved, .permanentlyIgnored]
-    return suppressed[(j - 1) % suppressed.count]
-}
-
 private struct NotificationRow: Encodable {
     let itemID: String
     let transitionReason: String
@@ -104,10 +82,13 @@ private func dump(_ scenario: String, _ data: Data) {
 }
 
 private func fingerprint(_ r: PendingItemEvaluationResult) throws -> String {
-    // Local encoder so the harness compiles against both trees; it is not part
-    // of what is being measured.
-    let digest = SHA256.hash(data: try encoded(r))
-    return digest.map { String(format: "%02x", $0) }.joined()
+    hex(SHA256.hash(data: try encoded(r)))
+}
+
+/// Local encoder so the harness compiles against both trees; it is not part of
+/// what is being measured.
+private func hex(_ digest: SHA256Digest) -> String {
+    digest.map { String(format: "%02x", $0) }.joined()
 }
 
 private func require(_ condition: Bool, _ message: String) {
@@ -120,6 +101,18 @@ private func require(_ condition: Bool, _ message: String) {
 private func median(_ samples: [Double]) -> Double {
     let sorted = samples.sorted()
     return sorted[sorted.count / 2]
+}
+
+/// Fingerprint of a batch of constructed items, taken outside any timed region.
+/// Without this the construction scenarios would report an equivalence that
+/// compared two empty fingerprint sets.
+private func constructionFingerprint(count: Int, _ operation: () -> PendingItem) throws -> String {
+    var items: [PendingItem] = []
+    items.reserveCapacity(count)
+    for _ in 0..<count { items.append(operation()) }
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    return hex(SHA256.hash(data: try encoder.encode(items)))
 }
 
 /// Median wall time of `rounds` invocations; the result is consumed outside the
@@ -169,17 +162,25 @@ struct Main {
         // ── Construction cost ────────────────────────────────────────────
         // Explicit-id rebuilds (the evaluator's update path) only need the id
         // the caller already has; auto-id constructions must keep hashing.
+        // Both are fingerprinted so the driver's equivalence check is not a
+        // comparison of two empty fingerprint sets.
         let explicitID = "pi-v1-" + String(repeating: "0", count: 64)
-        report("construct_explicit_id", ms: measureConstruct(rounds) {
+        let explicitConstruction = {
             PendingItem(id: explicitID, source: .dirtyWorkspace, severity: .medium,
                         repositoryID: "repo-7", repositoryName: "repo-7",
                         title: "title", explanation: "explanation", evidence: ["a", "b"])
-        })
-        report("construct_auto_id", ms: measureConstruct(rounds) {
+        }
+        let autoIDConstruction = {
             PendingItem(source: .dirtyWorkspace, severity: .medium,
                         repositoryID: "repo-7", repositoryName: "repo-7",
                         title: "title", explanation: "explanation", evidence: ["a", "b"])
-        })
+        }
+        report("construct_explicit_id",
+               ms: measureConstruct(rounds, explicitConstruction),
+               fingerprintOf: { try constructionFingerprint(count: 64, explicitConstruction) })
+        report("construct_auto_id",
+               ms: measureConstruct(rounds, autoIDConstruction),
+               fingerprintOf: { try constructionFingerprint(count: 64, autoIDConstruction) })
 
         // ── End-to-end evaluation ────────────────────────────────────────
         for (name, count, dirty, historyPerRepo) in [
@@ -195,15 +196,39 @@ struct Main {
                 workspaces: workspaces, allRepositories: repositories, now: now
             )
             var history: [PendingItem] = []
-            for i in 0..<count {
-                for j in 0..<historyPerRepo {
+            if historyPerRepo > 0 {
+                // Seed the archive with items the evaluator itself mints, so the
+                // history carries the same `pi-v1-` identities and titles the
+                // production rules produce. Synthetic ids would never match a
+                // candidate's id and would leave the same-id update path
+                // (severity change, title change, `firstDetectedAt` carry-over)
+                // unexercised.
+                let seed = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+                    repositories: repositories, workspaceAggregations: aggregations,
+                    workspaces: workspaces, healthAssessments: [:], now: now
+                ))
+                // At most one resolvable previous item per repository, and none
+                // for the nil-repositoryID bucket workspace items share: the
+                // evaluator walks a bucket through a `Dictionary`'s values, so a
+                // bucket with two of them resolves in per-process hash order.
+                var activatableRepositories: Set<String> = []
+                for item in seed.items {
+                    var status: PendingItemStatus = .snoozed
+                    if let repositoryID = item.repositoryID,
+                       activatableRepositories.insert(repositoryID).inserted {
+                        status = .active
+                    }
                     history.append(PendingItem(
-                        id: "old-\(i)-\(j)", source: historySources(j), severity: .high,
-                        repositoryID: "repo-\(i)", title: "old-\(j)",
+                        id: item.id, source: item.source, severity: .high,
+                        repositoryID: item.repositoryID, repositoryName: item.repositoryName,
+                        workspaceID: item.workspaceID, workspaceName: item.workspaceName,
+                        title: item.title, explanation: item.explanation, evidence: item.evidence,
                         firstDetectedAt: "2025-01-01T00:00:00Z", lastConfirmedAt: stamp,
-                        status: historyStatuses(j), snoozedUntil: nil
+                        status: status, snoozedUntil: nil
                     ))
                 }
+                require(historyPerRepo == 7,
+                        "historyPerRepo \(historyPerRepo) is no longer derived from the seed")
             }
             let context = PendingItemEvaluationContext(
                 repositories: repositories, workspaceAggregations: aggregations,

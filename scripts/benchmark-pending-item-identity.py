@@ -8,19 +8,24 @@ SHA-256 digest. The encoder was `digest.map { String(format: "%02x", $0) }
 .joined()`, which re-enters the C varargs formatter once per byte, and the
 initializer computed that digest even when the caller supplied the id — and the
 evaluator built a whole throwaway item per rule per repository just to obtain an
-expected id. This harness compiles the same measurement fixture against a
-baseline tree and the working tree, so it measures the composite effect rather
-than one isolated expression:
+expected id. This harness compiles one measurement fixture against a baseline
+tree and the working tree.
 
-  baseline   previous encoder + unconditional digest + throwaway `expectedID` items
-  current    shared table-driven encoder + id-aware initializer + `identityID`
+What the delta covers: every compiled input listed below. The driver prints the
+ones whose bytes actually differ (`differing_files=`) rather than asserting a
+scope it does not enforce. Against the commit this change was written on those
+are `Models.swift` (the shared encoder), `PendingItem.swift` and
+`PendingItemEvaluator.swift` (the identity change) plus the call-site swaps in
+`WorkspaceModel.swift`, `ActivityEvent.swift` and `RepositoryHistoryEntry.swift`,
+so the reported numbers are the composite effect of that set and not of the
+initializer alone. `DateFormatting.swift` and `WorkspaceModel.swift` are patched
+copies taken from each tree with the production clock pinned, so the evaluation
+output is deterministic and byte-comparable.
 
-Both builds receive the same sources except `PendingItem.swift`,
-`PendingItemEvaluator.swift` and `Models.swift`, and the driver pins the
-production clock in both so the evaluation output is deterministic. Every
-scenario prints a SHA-256 fingerprint of its encoded evaluation result; the
-driver exits non-zero when any fingerprint differs, so equal output is a
-precondition for reading the timings.
+Every scenario prints a SHA-256 fingerprint of its encoded result. A scenario
+that produces no fingerprint is reported as a failure, never as empty-set
+equality. The driver exits non-zero when any fingerprint differs, so equal
+output is a precondition for reading the timings.
 
 Tunables (env): BENCH_ITERATIONS (in-process rounds per scenario, default 9),
                  BENCH_PAIRS (alternating process pairs, default 5)
@@ -35,9 +40,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Only these three files may differ between the two builds; every other source
-# is compiled from the same tree so a difference in the timings cannot come from
-# unrelated code.
+# The harness compares a fingerprint of the encoded evaluation result per
+# scenario, so a scenario that produces no fingerprint cannot be checked and is
+# reported as a failure rather than as an empty-set equality.
 DIFFERING = [
     "DevPulseNative/Core/Models.swift",
     "DevPulseNative/Core/PendingItem.swift",
@@ -50,6 +55,32 @@ SHARED = [
     "DevPulseNative/Core/RepositoryHealthEngine.swift",
     "DevPulseNative/Core/WorkspaceAggregationEngine.swift",
 ]
+
+# Compiled from each tree rather than from one shared copy: the only places the
+# two builds can differ.
+# Read from each tree and rewritten into a patched copy (the production clock is
+# pinned in DateFormatting; WorkspaceModel is truncated before the store). They
+# still contribute differences to the build, so they are part of the delta.
+PATCHED_FROM_TREE = [
+    "DevPulseNative/Utilities/DateFormatting.swift",
+    "DevPulseNative/Core/WorkspaceModel.swift",
+]
+
+COMPILED_FROM_TREE = DIFFERING + SHARED + PATCHED_FROM_TREE
+
+
+def differing_files(baseline_root: Path) -> list[str]:
+    """Compiled inputs whose bytes differ from the working tree.
+
+    The timing delta covers every difference in the compiled sources, so the
+    driver states them instead of claiming a scope it does not enforce.
+    """
+    differing = []
+    for relative in COMPILED_FROM_TREE:
+        baseline = baseline_root / relative
+        if not baseline.exists() or baseline.read_bytes() != (ROOT / relative).read_bytes():
+            differing.append(relative)
+    return differing
 
 CLOCKED = "isoString(from: Date())"
 PINNED = "isoString(from: Date(timeIntervalSince1970: 1770000000))"
@@ -138,6 +169,8 @@ def main() -> None:
             )
             baseline_root = str(worktree)
         try:
+            differing = differing_files(Path(baseline_root))
+            print(f"differing_files={differing}")
             baseline_binary = build(tmp, Path(baseline_root), "baseline")
             current_binary = build(tmp, ROOT, "current")
 
@@ -167,14 +200,22 @@ def main() -> None:
                 p_value = sign_test_p(wins, losses)
                 baseline_prints = fingerprints.get(name, {}).get("baseline", set())
                 current_prints = fingerprints.get(name, {}).get("current", set())
-                equivalent = baseline_prints == current_prints
+                if not baseline_prints or not current_prints:
+                    equivalent = False
+                    note = "NO FINGERPRINT"
+                elif baseline_prints == current_prints:
+                    equivalent = True
+                    note = "yes"
+                else:
+                    equivalent = False
+                    note = "MISMATCH"
                 if not equivalent:
                     mismatches += 1
                     mismatching.append(name)
                 print(
                     f"{name:<26}{baseline_median:>12.3f}{current_median:>12.3f}"
                     f"{paired:>+14.3f}{f'{wins}/{wins + losses}':>8}{p_value:>9.5f}"
-                    f"  {'yes' if equivalent else 'MISMATCH'}"
+                    f"  {note}"
                 )
             print(f"fingerprint_mismatches={mismatches}")
             if mismatches:
