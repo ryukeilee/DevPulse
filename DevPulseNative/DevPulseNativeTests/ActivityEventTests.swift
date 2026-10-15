@@ -340,6 +340,104 @@ struct ActivityEventTests {
         ) == [repeatedAfterCycle])
     }
 
+    @Test func batchDeduplicationUsesTheAcceptedCandidateAsTheFamilyBaseline() throws {
+        // Stored history: one working-tree event and one commit event.
+        let seeded = try #require(makeWorkingTreeEvent(
+            from: 0, to: 1, at: "2026-07-16T11:00:00Z"
+        ))
+        let priorCommit = try #require(event(
+            previous: snapshot(lastCommitID: "base", lastCommitSummary: "Base"),
+            current: snapshot(lastCommitID: "prev", lastCommitSummary: "Prev"),
+            at: "2026-07-16T11:05:00Z",
+            kind: .newCommit
+        ))
+
+        // One batch, deliberately out of order. `latest` is newer than the
+        // stored working-tree event, so accepting it moves the family baseline
+        // for the rest of the same batch; the commit family is unaffected by
+        // either working-tree candidate.
+        let latest = try #require(makeWorkingTreeEvent(
+            from: 2, to: 3, at: "2026-07-16T12:30:00Z"
+        ))
+        let latestReplay = try #require(makeWorkingTreeEvent(
+            from: 2, to: 3, at: "2026-07-16T12:20:00Z"
+        ))
+        let commitReplay = try #require(event(
+            previous: snapshot(lastCommitID: "base", lastCommitSummary: "Base"),
+            current: snapshot(lastCommitID: "prev", lastCommitSummary: "Prev"),
+            at: "2026-07-16T12:10:00Z",
+            kind: .newCommit
+        ))
+        let nextCommit = try #require(event(
+            previous: snapshot(lastCommitID: "prev", lastCommitSummary: "Prev"),
+            current: snapshot(lastCommitID: "next", lastCommitSummary: "Next"),
+            at: "2026-07-16T12:00:00Z",
+            kind: .newCommit
+        ))
+
+        #expect(ActivityEventDeduplicator.newEvents(
+            from: [latestReplay, nextCommit, commitReplay, latest],
+            comparedTo: [seeded, priorCommit]
+        ) == [latest, nextCommit])
+
+        // The same replay is *not* a duplicate of the older stored event, which
+        // is what makes the drop above attributable to the batch baseline.
+        #expect(ActivityEventDeduplicator.newEvents(
+            from: [latestReplay],
+            comparedTo: [seeded]
+        ) == [latestReplay])
+    }
+
+    @Test func equalTimestampTieBreakSelectsTheDedupBaselineWithinAFamily() throws {
+        let at = "2026-07-20T13:00:00Z"
+        let started = try #require(event(
+            previous: snapshot(conflicted: 0),
+            current: snapshot(conflicted: 1),
+            at: at,
+            kind: .conflictStarted
+        ))
+        let resolved = try #require(event(
+            previous: snapshot(conflicted: 1),
+            current: snapshot(conflicted: 0),
+            at: at,
+            kind: .conflictResolved
+        ))
+
+        // Both share the conflict family and the timestamp; conflictStarted
+        // sorts first (lower priority), so it is the baseline of the family.
+        #expect(ActivityEventDeduplicator.newEvents(
+            from: [resolved, started],
+            comparedTo: []
+        ) == [started, resolved])
+
+        // The baseline is decided by ordering, not by kind: a replay of the
+        // family's newest event drops even though the incoming array holds the
+        // other family member first.
+        let startedReplay = try #require(event(
+            previous: snapshot(conflicted: 0),
+            current: snapshot(conflicted: 1),
+            at: "2026-07-20T13:10:00Z",
+            kind: .conflictStarted
+        ))
+        #expect(ActivityEventDeduplicator.newEvents(
+            from: [startedReplay],
+            comparedTo: [resolved, started]
+        ).isEmpty)
+
+        // The opposite transition is not a duplicate of that baseline, so it
+        // is still accepted.
+        let resolvedReplay = try #require(event(
+            previous: snapshot(conflicted: 1),
+            current: snapshot(conflicted: 0),
+            at: "2026-07-20T13:05:00Z",
+            kind: .conflictResolved
+        ))
+        #expect(ActivityEventDeduplicator.newEvents(
+            from: [resolvedReplay],
+            comparedTo: [resolved, started]
+        ) == [resolvedReplay])
+    }
+
     @Test func eventStoreDeduplicatesSortsAndTrimsWhileKeepingCrossDayEvents() throws {
         let url = temporaryURL()
         let store = ActivityEventStore(fileURL: url, capacity: 2)

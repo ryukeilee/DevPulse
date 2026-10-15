@@ -202,7 +202,11 @@ enum ActivityEventOrdering {
         }
     }
 
-    private static func precedes(_ lhs: ActivityEvent, _ rhs: ActivityEvent) -> Bool {
+    /// Strict "sorts before" relation used by `sorted(_:)`: the result order is
+    /// newest timestamp first, then priority, repository name, kind and id.
+    /// File-internal so the deduplicator can fold history into one pass with the
+    /// exact same comparison the sort uses.
+    fileprivate static func precedes(_ lhs: ActivityEvent, _ rhs: ActivityEvent) -> Bool {
         if lhs.occurredAt != rhs.occurredAt {
             return timestampPrecedes(
                 lhs: lhs.occurredAt,
@@ -430,7 +434,73 @@ enum ActivityEventDiffer {
 }
 
 enum ActivityEventDeduplicator {
+    /// Identity of the newest-event index: one entry per repository and event
+    /// family, mirroring the `(repositoryID, family(for: kind))` pair the
+    /// previous scan matched on.
+    private struct FamilyKey: Hashable {
+        let repositoryID: String
+        let family: String
+    }
+
     static func newEvents(
+        from candidates: [ActivityEvent],
+        comparedTo existing: [ActivityEvent]
+    ) -> [ActivityEvent] {
+        // The index below keeps the maximum under `ActivityEventOrdering.precedes`,
+        // which equals the old `sorted(...).first { ... }` only while that
+        // relation is a strict total order. It is one exactly when every
+        // timestamp is a shape `DateFormatting.canonicalDate` accepts: an
+        // unparseable value makes `precedes` fall back to a raw string compare
+        // that can cycle, and then the `first` of a sorted array is not a
+        // maximum, so only the original re-sorting algorithm reproduces it.
+        guard hasTotallyOrderedTimestamps(existing),
+              hasTotallyOrderedTimestamps(candidates) else {
+            return legacyNewEvents(from: candidates, comparedTo: existing)
+        }
+
+        // Index the newest history event per (repository, family) in one pass.
+        // A candidate can only be a replay of that single newest entry, so the
+        // index answers the question the old linear scan asked. The old code
+        // re-sorted the whole history after every accepted candidate and then
+        // scanned it linearly, making a batch cost
+        // O(candidates x history log history); folding the history once keeps
+        // the same result at O(history + candidates log candidates).
+        var newestByFamily: [FamilyKey: ActivityEvent] = [:]
+        newestByFamily.reserveCapacity(existing.count)
+        for event in existing {
+            keepNewest(event, in: &newestByFamily)
+        }
+
+        var accepted: [ActivityEvent] = []
+        for candidate in ActivityEventOrdering.sorted(candidates) {
+            let key = FamilyKey(
+                repositoryID: candidate.repositoryID,
+                family: family(for: candidate.kind)
+            )
+            if let newest = newestByFamily[key],
+               newest.kind == candidate.kind,
+               newest.before == candidate.before,
+               newest.after == candidate.after {
+                continue
+            }
+            accepted.append(candidate)
+            keepNewest(candidate, in: &newestByFamily)
+        }
+
+        return accepted
+    }
+
+    /// Whether every timestamp is a canonical shape, which is what makes
+    /// `ActivityEventOrdering.precedes` a strict total order.
+    private static func hasTotallyOrderedTimestamps(_ events: [ActivityEvent]) -> Bool {
+        events.allSatisfy { DateFormatting.canonicalDate($0.occurredAt) != nil }
+    }
+
+    /// The previous implementation, kept for the inputs whose timestamps do not
+    /// order totally: it re-sorts the whole history after every accepted
+    /// candidate, so it still reproduces whatever `first`-of-sorted result the
+    /// old code read for them.
+    private static func legacyNewEvents(
         from candidates: [ActivityEvent],
         comparedTo existing: [ActivityEvent]
     ) -> [ActivityEvent] {
@@ -453,6 +523,22 @@ enum ActivityEventDeduplicator {
         }
 
         return accepted
+    }
+
+    /// Retains `event` for its (repository, family) slot when it precedes the
+    /// event already indexed there, i.e. when it is newer in the ordering.
+    private static func keepNewest(
+        _ event: ActivityEvent,
+        in index: inout [FamilyKey: ActivityEvent]
+    ) {
+        let key = FamilyKey(
+            repositoryID: event.repositoryID,
+            family: family(for: event.kind)
+        )
+        if let current = index[key], !ActivityEventOrdering.precedes(event, current) {
+            return
+        }
+        index[key] = event
     }
 
     private static func family(for kind: ActivityEventKind) -> String {
