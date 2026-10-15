@@ -104,6 +104,15 @@ enum RepositoryHealthThresholds {
 // MARK: - Health engine
 
 enum RepositoryHealthEngine {
+    /// One history entry with its `recordedAt` timestamp already parsed.
+    ///
+    /// Every signal assessment below needs the entry's date, so parsing it once
+    /// per entry keeps the eight assessments from re-parsing the same strings.
+    private struct ParsedHistoryEntry {
+        let entry: RepositoryHistoryEntry
+        let date: Date?
+    }
+
     /// Assess repository health based on its history entries.
     ///
     /// Each signal includes the specific evidence (timestamps, values) that
@@ -128,51 +137,56 @@ enum RepositoryHealthEngine {
         }
 
         let sorted = entries.sorted { $0.recordedAt < $1.recordedAt }
+        // Every signal needs the entry's date, so the timestamps are parsed once
+        // here instead of once per signal assessment.
+        let datedEntries = sorted.map {
+            ParsedHistoryEntry(entry: $0, date: DateFormatting.date(from: $0.recordedAt))
+        }
         let now = Date()
         var signals: [RepositoryHealthSignal] = []
 
         // Signal 1: Dirty workspace duration
-        if let signal = assessDirtyWorkspaceDuration(entries: sorted, now: now) {
+        if let signal = assessDirtyWorkspaceDuration(entries: datedEntries, now: now) {
             signals.append(signal)
         }
 
         // Signal 2: Unpushed commits duration
-        if let signal = assessUnpushedCommitsDuration(entries: sorted, now: now) {
+        if let signal = assessUnpushedCommitsDuration(entries: datedEntries, now: now) {
             signals.append(signal)
         }
 
         // Signal 3: Behind remote duration
-        if let signal = assessBehindRemoteDuration(entries: sorted, now: now) {
+        if let signal = assessBehindRemoteDuration(entries: datedEntries, now: now) {
             signals.append(signal)
         }
 
         // Signal 4: Stale activity
-        if let signal = assessStaleActivity(entries: sorted, now: now) {
+        if let signal = assessStaleActivity(entries: datedEntries, now: now) {
             signals.append(signal)
         }
 
         // Signal 5: Recurring conflicts
-        if let signal = assessRecurringConflicts(entries: sorted, now: now) {
+        if let signal = assessRecurringConflicts(entries: datedEntries, now: now) {
             signals.append(signal)
         }
 
         // Signal 6: Frequent read failures
-        if let signal = assessFrequentReadFailures(entries: sorted, now: now) {
+        if let signal = assessFrequentReadFailures(entries: datedEntries, now: now) {
             signals.append(signal)
         }
 
         // Signal 7: Branch instability
-        if let signal = assessBranchInstability(entries: sorted, now: now) {
+        if let signal = assessBranchInstability(entries: datedEntries, now: now) {
             signals.append(signal)
         }
 
         // Signal 8: Creeping changes
-        if let signal = assessCreepingChanges(entries: sorted, now: now) {
+        if let signal = assessCreepingChanges(entries: datedEntries, now: now) {
             signals.append(signal)
         }
 
         // Signal 9: Recent recovery (informational)
-        if let signal = assessRecentRecovery(entries: sorted, now: now) {
+        if let signal = assessRecentRecovery(entries: datedEntries, now: now) {
             signals.append(signal)
         }
 
@@ -201,37 +215,27 @@ enum RepositoryHealthEngine {
     // MARK: - Individual signal assessments
 
     private static func assessDirtyWorkspaceDuration(
-        entries: [RepositoryHistoryEntry],
+        entries: [ParsedHistoryEntry],
         now: Date
     ) -> RepositoryHealthSignal? {
-        // Find the earliest continuous period where the repo had changes
+        // Find the earliest recorded state where the repo had changes
         var earliestDirtyDate: Date?
-        var latestDirtyDate: Date?
-        var recentDirtyCount = 0
 
-        for entry in entries.reversed() {
-            guard let date = DateFormatting.date(from: entry.recordedAt) else { continue }
-            let hasChanges = entry.state.changedFileCount > 0
-                && entry.state.dataSource == .current
-
-            if hasChanges {
-                if earliestDirtyDate == nil {
-                    earliestDirtyDate = date
-                    latestDirtyDate = date
-                } else if date < earliestDirtyDate! {
-                    earliestDirtyDate = date
-                }
-                recentDirtyCount += 1
+        for parsed in entries.reversed() {
+            guard let date = parsed.date,
+                  parsed.entry.state.changedFileCount > 0,
+                  parsed.entry.state.dataSource == .current else { continue }
+            if earliestDirtyDate == nil || date < earliestDirtyDate! {
+                earliestDirtyDate = date
             }
         }
 
-        guard let earliest = earliestDirtyDate,
-              let latest = latestDirtyDate else { return nil }
+        guard let earliest = earliestDirtyDate else { return nil }
 
         // Check no more than 80% of recent entries show dirty state
         let recentEntries = entries.suffix(5)
         let dirtyRatio = recentEntries.isEmpty ? 0 :
-            Double(recentEntries.filter { $0.state.changedFileCount > 0 }.count) / Double(recentEntries.count)
+            Double(recentEntries.filter { $0.entry.state.changedFileCount > 0 }.count) / Double(recentEntries.count)
         guard dirtyRatio >= 0.6 else { return nil }
 
         let duration = now.timeIntervalSince(earliest)
@@ -248,8 +252,8 @@ enum RepositoryHealthEngine {
             return nil
         }
 
-        let lastEntry = entries.last(where: { $0.state.changedFileCount > 0 })
-        let fileCount = lastEntry?.state.changedFileCount ?? 0
+        let lastEntry = entries.last(where: { $0.entry.state.changedFileCount > 0 })
+        let fileCount = lastEntry?.entry.state.changedFileCount ?? 0
 
         return RepositoryHealthSignal(
             kind: .dirtyWorkspaceDuration,
@@ -264,15 +268,15 @@ enum RepositoryHealthEngine {
     }
 
     private static func assessUnpushedCommitsDuration(
-        entries: [RepositoryHistoryEntry],
+        entries: [ParsedHistoryEntry],
         now: Date
     ) -> RepositoryHealthSignal? {
         var earliestAheadDate: Date?
         var maxAhead = 0
 
-        for entry in entries.reversed() {
-            guard let date = DateFormatting.date(from: entry.recordedAt) else { continue }
-            let ahead = entry.state.aheadCount ?? 0
+        for parsed in entries.reversed() {
+            guard let date = parsed.date else { continue }
+            let ahead = parsed.entry.state.aheadCount ?? 0
             if ahead > 0 {
                 maxAhead = max(maxAhead, ahead)
                 if earliestAheadDate == nil || date < earliestAheadDate! {
@@ -310,15 +314,15 @@ enum RepositoryHealthEngine {
     }
 
     private static func assessBehindRemoteDuration(
-        entries: [RepositoryHistoryEntry],
+        entries: [ParsedHistoryEntry],
         now: Date
     ) -> RepositoryHealthSignal? {
         var earliestBehindDate: Date?
         var maxBehind = 0
 
-        for entry in entries.reversed() {
-            guard let date = DateFormatting.date(from: entry.recordedAt) else { continue }
-            let behind = entry.state.behindCount ?? 0
+        for parsed in entries.reversed() {
+            guard let date = parsed.date else { continue }
+            let behind = parsed.entry.state.behindCount ?? 0
             if behind > 0 {
                 maxBehind = max(maxBehind, behind)
                 if earliestBehindDate == nil || date < earliestBehindDate! {
@@ -356,18 +360,19 @@ enum RepositoryHealthEngine {
     }
 
     private static func assessStaleActivity(
-        entries: [RepositoryHistoryEntry],
+        entries: [ParsedHistoryEntry],
         now: Date
     ) -> RepositoryHealthSignal? {
         // Find the latest entry where the repo had changes, commits, or upstream activity
         var latestActivityDate: Date?
 
-        for entry in entries.reversed() {
-            guard let date = DateFormatting.date(from: entry.recordedAt) else { continue }
-            let hasActivity = entry.state.changedFileCount > 0
-                || entry.state.lastCommitID != nil
-                || entry.state.aheadCount ?? 0 > 0
-                || entry.state.behindCount ?? 0 > 0
+        for parsed in entries.reversed() {
+            guard let date = parsed.date else { continue }
+            let state = parsed.entry.state
+            let hasActivity = state.changedFileCount > 0
+                || state.lastCommitID != nil
+                || state.aheadCount ?? 0 > 0
+                || state.behindCount ?? 0 > 0
             if hasActivity {
                 latestActivityDate = date
                 break
@@ -376,7 +381,7 @@ enum RepositoryHealthEngine {
 
         guard let latest = latestActivityDate else {
             // No activity at all since recording began
-            if let firstDate = entries.first.flatMap({ DateFormatting.date(from: $0.recordedAt) }) {
+            if let firstDate = entries.first?.date {
                 let duration = now.timeIntervalSince(firstDate)
                 if duration >= RepositoryHealthThresholds.staleWarningDuration {
                     let level = duration >= RepositoryHealthThresholds.staleHighDuration ? RiskLevel.high : .medium
@@ -422,13 +427,13 @@ enum RepositoryHealthEngine {
     }
 
     private static func assessRecurringConflicts(
-        entries: [RepositoryHistoryEntry],
+        entries: [ParsedHistoryEntry],
         now: Date
     ) -> RepositoryHealthSignal? {
         let cutoff = now.addingTimeInterval(-7 * 24 * 60 * 60)
         let recentConflicts = entries.filter {
-            guard let date = DateFormatting.date(from: $0.recordedAt) else { return false }
-            return date >= cutoff && ($0.state.conflictedFileCount ?? 0) > 0
+            guard let date = $0.date else { return false }
+            return date >= cutoff && ($0.entry.state.conflictedFileCount ?? 0) > 0
         }
 
         guard recentConflicts.count >= RepositoryHealthThresholds.recurringConflictThreshold else {
@@ -443,8 +448,8 @@ enum RepositoryHealthEngine {
             level: level,
             title: "持续出现 Git 冲突",
             explanation: "最近 7 天出现了 \(recentConflicts.count) 次冲突记录。",
-            evidence: recentConflicts.prefix(5).compactMap { entry in
-                DateFormatting.date(from: entry.recordedAt).map { DateFormatting.displayString(from: $0) }
+            evidence: recentConflicts.prefix(5).compactMap { parsed in
+                parsed.date.map { DateFormatting.displayString(from: $0) }
             }.joined(separator: "、"),
             duration: nil,
             currentValue: "\(recentConflicts.count) 次冲突",
@@ -453,15 +458,15 @@ enum RepositoryHealthEngine {
     }
 
     private static func assessFrequentReadFailures(
-        entries: [RepositoryHistoryEntry],
+        entries: [ParsedHistoryEntry],
         now: Date
     ) -> RepositoryHealthSignal? {
         let cutoff24h = now.addingTimeInterval(-24 * 60 * 60)
         let recentFailures = entries.filter {
-            guard let date = DateFormatting.date(from: $0.recordedAt) else { return false }
+            guard let date = $0.date else { return false }
             return date >= cutoff24h
-                && ($0.kind == .becameUnavailable
-                    || ($0.state.dataSource != .current && $0.state.errorMessage != nil))
+                && ($0.entry.kind == .becameUnavailable
+                    || ($0.entry.state.dataSource != .current && $0.entry.state.errorMessage != nil))
         }
 
         let failureCount = recentFailures.count
@@ -480,14 +485,14 @@ enum RepositoryHealthEngine {
             threshold = "≥ \(RepositoryHealthThresholds.readFailureWarningThreshold) 次/24h"
         }
 
-        let lastError = recentFailures.last?.state.errorMessage ?? "未知"
+        let lastError = recentFailures.last?.entry.state.errorMessage ?? "未知"
 
         return RepositoryHealthSignal(
             kind: .frequentReadFailures,
             level: level,
             title: "频繁读取失败",
             explanation: "最近 24 小时出现 \(failureCount) 次读取失败。",
-            evidence: "最近错误：\(lastError)。失败时间：\(recentFailures.prefix(3).compactMap { entry in DateFormatting.date(from: entry.recordedAt).map { DateFormatting.displayString(from: $0) } }.joined(separator: "、"))",
+            evidence: "最近错误：\(lastError)。失败时间：\(recentFailures.prefix(3).compactMap { parsed in parsed.date.map { DateFormatting.displayString(from: $0) } }.joined(separator: "、"))",
             duration: nil,
             currentValue: "\(failureCount) 次失败/24h",
             threshold: threshold
@@ -495,16 +500,16 @@ enum RepositoryHealthEngine {
     }
 
     private static func assessBranchInstability(
-        entries: [RepositoryHistoryEntry],
+        entries: [ParsedHistoryEntry],
         now: Date
     ) -> RepositoryHealthSignal? {
         let cutoff = now.addingTimeInterval(-24 * 60 * 60)
         let recentEntries = entries.filter {
-            guard let date = DateFormatting.date(from: $0.recordedAt) else { return false }
+            guard let date = $0.date else { return false }
             return date >= cutoff
         }
 
-        let branches = recentEntries.map(\.state.branch)
+        let branches = recentEntries.map(\.entry.state.branch)
         let uniqueBranches = Set(branches)
         let changes = zip(branches, branches.dropFirst()).filter { $0 != $1 }.count
 
@@ -528,15 +533,15 @@ enum RepositoryHealthEngine {
     }
 
     private static func assessCreepingChanges(
-        entries: [RepositoryHistoryEntry],
+        entries: [ParsedHistoryEntry],
         now: Date
     ) -> RepositoryHealthSignal? {
         let recentEntries = entries.suffix(RepositoryHealthThresholds.creepingChangeWindow)
         guard recentEntries.count >= 3 else { return nil }
 
-        let changeCounts = recentEntries.compactMap { entry -> Int? in
-            guard entry.state.dataSource == .current else { return nil }
-            return entry.state.changedFileCount
+        let changeCounts = recentEntries.compactMap { parsed -> Int? in
+            guard parsed.entry.state.dataSource == .current else { return nil }
+            return parsed.entry.state.changedFileCount
         }
 
         guard changeCounts.count >= 3 else { return nil }
@@ -567,13 +572,13 @@ enum RepositoryHealthEngine {
     }
 
     private static func assessRecentRecovery(
-        entries: [RepositoryHistoryEntry],
+        entries: [ParsedHistoryEntry],
         now: Date
     ) -> RepositoryHealthSignal? {
         let cutoff = now.addingTimeInterval(-24 * 60 * 60)
         let recentRecoveries = entries.filter {
-            guard let date = DateFormatting.date(from: $0.recordedAt) else { return false }
-            return date >= cutoff && $0.kind == .recovery
+            guard let date = $0.date else { return false }
+            return date >= cutoff && $0.entry.kind == .recovery
         }
 
         guard !recentRecoveries.isEmpty else { return nil }
@@ -584,8 +589,8 @@ enum RepositoryHealthEngine {
             level: .low,
             title: "最近已恢复",
             explanation: "仓库在最近 24 小时内从不可用状态恢复。",
-            evidence: recentRecoveries.compactMap { entry in
-                DateFormatting.date(from: entry.recordedAt).map { DateFormatting.displayString(from: $0) }
+            evidence: recentRecoveries.compactMap { parsed in
+                parsed.date.map { DateFormatting.displayString(from: $0) }
             }.joined(separator: "、"),
             duration: nil,
             currentValue: "\(recentRecoveries.count) 次恢复",
