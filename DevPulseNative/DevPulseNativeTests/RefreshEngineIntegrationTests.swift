@@ -369,6 +369,77 @@ struct RefreshEngineIntegrationTests {
         #expect(retried.data.repositories.first?.lastChangedAt != nil)
     }
 
+    /// A mixed batch must keep every repository at its own core-status index,
+    /// including a repository that is excluded from the log phase. `repo-0` and
+    /// `repo-1` need `git log` (the second one fails), while `repo-2` reports a
+    /// status error and is therefore never submitted to the log phase. Writing
+    /// log results by position instead of by original index would overwrite
+    /// `repo-2`'s own snapshot with a neighbour's enriched payload.
+    @Test func logFailureKeepsEveryRepositoryAtItsOwnIndex() async throws {
+        let root = reposRoot("extended-index-alignment")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repoURLs = try (0..<3).map { i in
+            let url = root.appendingPathComponent("repo-\(i)")
+            try createTempGitRepo(at: url)
+            return url
+        }
+        let paths = repoURLs.map { RepositoryIdentity.canonicalPath($0.path) }
+
+        let mock = MockGitCommandRunner()
+        mock.setStatusResult(
+            .success(output: MockGitCommandRunner.cleanStatusOutput(oid: "oid0")),
+            for: paths[0]
+        )
+        mock.setStatusResult(
+            .success(output: MockGitCommandRunner.cleanStatusOutput(oid: "oid1")),
+            for: paths[1]
+        )
+        mock.setStatusResult(.timeout, for: paths[2])
+        mock.setLogResult(
+            .success(output: MockGitCommandRunner.defaultLogOutput(commitID: "oid0", summary: "log-0")),
+            for: paths[0]
+        )
+        mock.setLogResult(.timeout, for: paths[1])
+
+        let engine = RefreshEngine()
+        let result = await engine.execute(
+            config: scanConfig(maxConcurrent: 2),
+            scanRoots: [root.path],
+            knownRepositoryPaths: paths,
+            forceRepositoryDiscovery: false,
+            gitCommandRunner: mock.runner()
+        )
+
+        // Only the two repositories that reached the log phase are submitted.
+        #expect(mock.logCallCount == 2)
+        #expect(result.data.repositories.count == 3)
+        let byPath = Dictionary(uniqueKeysWithValues: result.data.repositories.map { ($0.path, $0) })
+        #expect(byPath.count == 3)
+
+        // The repository whose log succeeded carries its own metadata.
+        #expect(byPath[paths[0]]?.lastCommitID == "oid0")
+        #expect(byPath[paths[0]]?.lastCommitSummary == "log-0")
+
+        // The repository whose log failed keeps its own status snapshot: its own
+        // OID, no borrowed summary, and no duplicated neighbour entry.
+        #expect(byPath[paths[1]]?.lastCommitID == "oid1")
+        #expect(byPath[paths[1]]?.lastCommitSummary == nil)
+        #expect(byPath[paths[1]]?.lastCommitMetadataAvailable == false)
+
+        // The status-error repository is not part of the log phase and must keep
+        // its own degraded snapshot and failure reason rather than an enriched
+        // neighbour payload or the generic unfinished-scan marker.
+        #expect(byPath[paths[2]]?.status == .error)
+        #expect(byPath[paths[2]]?.errorMessage == "读取超时")
+        #expect(byPath[paths[2]]?.lastCommitID == nil)
+        #expect(byPath[paths[2]]?.lastCommitSummary == nil)
+
+        let extStage = try #require(result.diagnostics.stageDiagnostics.first { $0.stage == .extendedInfo })
+        #expect(extStage.repositoriesCompleted == 2)
+        #expect(extStage.gitCommandCount == 2)
+    }
+
     // MARK: - 2. Cancellation During Core Status
 
     @Test func cancellationDuringCoreStatus() async throws {
@@ -413,6 +484,73 @@ struct RefreshEngineIntegrationTests {
         #expect(result.data.repositories.count <= 4)
         // The first two repos (processed before polling blocks) should be present
         #expect(mock.statusCallCount >= 2)
+    }
+
+    /// Cancellation raised while `git log` tasks are in flight must keep every
+    /// repository at its own index in the partial result: each one keeps its own
+    /// status snapshot, none borrows a neighbour's commit metadata, and none is
+    /// dropped or duplicated. Only `git log` polls cancellation, so the status
+    /// stage completes and the cancel lands inside the extended-info drain loop.
+    @Test func cancellationDuringExtendedInfoKeepsOwnSnapshots() async throws {
+        let root = reposRoot("cancellation-extended")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repoURLs = try (0..<3).map { i in
+            let url = root.appendingPathComponent("repo-\(i)")
+            try createTempGitRepo(at: url)
+            return url
+        }
+        let paths = repoURLs.map { RepositoryIdentity.canonicalPath($0.path) }
+
+        let mock = MockGitCommandRunner()
+        for (index, path) in paths.enumerated() {
+            mock.setStatusResult(
+                .success(output: MockGitCommandRunner.cleanStatusOutput(oid: "oid\(index)")),
+                for: path
+            )
+            mock.setPollingLogPath(path)
+            mock.setLogResult(
+                .success(output: MockGitCommandRunner.defaultLogOutput(commitID: "oid\(index)", summary: "log-\(index)")),
+                for: path
+            )
+        }
+
+        let engine = RefreshEngine()
+        let executeTask = Task {
+            await engine.execute(
+                config: scanConfig(maxConcurrent: 3, commandTimeout: 5, scanTimeout: 30),
+                scanRoots: [root.path],
+                knownRepositoryPaths: paths,
+                forceRepositoryDiscovery: false,
+                source: .manual,
+                gitCommandRunner: mock.runner()
+            )
+        }
+
+        // Each log task records its call before it starts polling, so waiting for
+        // all three calls proves the drain loop is in flight.
+        var waited = 0
+        while mock.logCallCount < paths.count && waited < 250 {
+            try? await Task.sleep(for: .milliseconds(10))
+            waited += 1
+        }
+        #expect(mock.logCallCount == paths.count)
+        await engine.cancel()
+
+        let result = await executeTask.value
+
+        #expect(result.isCancelled)
+        #expect(result.data.repositories.count == paths.count)
+        let byPath = Dictionary(uniqueKeysWithValues: result.data.repositories.map { ($0.path, $0) })
+        #expect(byPath.count == paths.count)
+        for (index, path) in paths.enumerated() {
+            let snapshot = try #require(byPath[path])
+            #expect(snapshot.lastCommitID == "oid\(index)")
+            // No log result completed, so the partial payload carries this
+            // repository's own status snapshot and no borrowed metadata.
+            #expect(snapshot.lastCommitSummary == nil)
+            #expect(snapshot.lastCommitMetadataAvailable == false)
+        }
     }
 
     // MARK: - 3. Priority Ordering

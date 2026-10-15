@@ -637,7 +637,12 @@ extension RefreshEngine {
 
         let previousUnavailableSinceByPath = previousSnapshot?.repositoryUnavailableSinceByPath ?? [:]
         let concurrency = min(config.maxConcurrentGitOps, paths.count)
-        var snapshotsByIndex: [Int: RepositorySnapshot] = [:]
+        // Index 0..<paths.count is a dense, known domain, so results are
+        // addressed by slot instead of by dictionary key. One slot is filled
+        // per completed repository; slots that never report stay empty and
+        // are skipped during the ordered compaction below.
+        var slots = [RepositorySnapshot?](repeating: nil, count: paths.count)
+        var completedCount = 0
         var unbornRepositoryPaths: Set<String> = []
         var counters = (status: 0, timeout: 0, cancelled: 0, failed: 0, peak: 0)
 
@@ -730,21 +735,25 @@ extension RefreshEngine {
                             duration: ProcessInfo.processInfo.systemUptime - snapshotBuildStartedAt,
                             calls: 1
                         )
-                        snapshotsByIndex[idx] = built.snapshot
+                        slots[idx] = built.snapshot
+                        completedCount += 1
                         if built.hasNoCommits { unbornRepositoryPaths.insert(read.path) }
                         counters.status += 1
 
                     case .timeout:
                         counters.timeout += 1
-                        snapshotsByIndex[idx] = buildFailedSnapshot(read: read, error: "读取超时")
+                        slots[idx] = buildFailedSnapshot(read: read, error: "读取超时")
+                        completedCount += 1
 
                     case .cancelled:
                         counters.cancelled += 1
-                        snapshotsByIndex[idx] = buildFailedSnapshot(read: read, error: "扫描已取消")
+                        slots[idx] = buildFailedSnapshot(read: read, error: "扫描已取消")
+                        completedCount += 1
 
                     case .nonZero, .launch, .unavailable, .outputLimit:
                         counters.failed += 1
-                        snapshotsByIndex[idx] = buildFailedSnapshot(read: read, error: "读取失败")
+                        slots[idx] = buildFailedSnapshot(read: read, error: "读取失败")
+                        completedCount += 1
                     }
                 }
 
@@ -755,10 +764,13 @@ extension RefreshEngine {
             }
         }
 
-        // Produce snapshots in original priority order, filling gaps with failed snapshots
+        // Produce the snapshots that reported back in original priority order.
+        // Slots whose status task never started are left for the merge stage,
+        // which restores the previous payload or an explainable placeholder.
         var orderedSnapshots: [RepositorySnapshot] = []
-        for idx in paths.indices {
-            if let snapshot = snapshotsByIndex[idx] {
+        orderedSnapshots.reserveCapacity(completedCount)
+        for slot in slots {
+            if let snapshot = slot {
                 orderedSnapshots.append(snapshot)
             }
         }
@@ -766,7 +778,7 @@ extension RefreshEngine {
         return CoreReadResult(
             snapshots: orderedSnapshots,
             unbornRepositoryPaths: unbornRepositoryPaths,
-            completed: snapshotsByIndex.count,
+            completed: completedCount,
             total: paths.count,
             gitStatusCount: counters.status + counters.timeout + counters.failed,
             gitTimeoutCount: counters.timeout,
@@ -908,18 +920,23 @@ extension RefreshEngine {
             return gitCommandRunner(arguments, workingDirectory, timeout, outputLimit, isCancelled)
         }
 
-        // Keep non-log results keyed by their original core-status index.
-        // A compact array loses alignment whenever an earlier repository needs
+        // Every repository keeps its original core-status index. A compact
+        // array loses alignment whenever an earlier repository needs
         // `git log`; if that log task is then cancelled or misses its budget,
-        // indexing the compact array duplicates a later repository and drops
-        // the unfinished one from the snapshot.
-        var baselineByIndex: [Int: RepositorySnapshot] = [:]
+        // indexing the compact array would duplicate a later repository and
+        // drop the unfinished one from the snapshot. The output array keeps
+        // core-status order and is updated in place, so a repository that needs
+        // `git log` is enriched at its own index and a log task that never
+        // reports back keeps its own status snapshot. No index remapping, no
+        // per-repository dictionary store/lookup, and no separate reassembly
+        // pass over the whole batch.
+        var orderedSnapshots = coreResult.snapshots
+        var logCompleted = 0
         var needsLog: [(Int, RepositorySnapshot)] = []
         var reusedCount = 0
 
         for (idx, snapshot) in coreResult.snapshots.enumerated() {
             guard snapshot.resolvedDataSource == .current, snapshot.status != .error else {
-                baselineByIndex[idx] = snapshot
                 continue
             }
 
@@ -927,7 +944,6 @@ extension RefreshEngine {
             // fact only within the current refresh; a later first commit must
             // still execute log, and an absent/malformed OID is not proof.
             if coreResult.unbornRepositoryPaths.contains(snapshot.path) {
-                baselineByIndex[idx] = snapshot
                 continue
             }
 
@@ -937,7 +953,7 @@ extension RefreshEngine {
                 && prev?.lastCommitMetadataAvailable == true && !headChanged
 
             if canReuse, let prev {
-                baselineByIndex[idx] = snapshot.reusingCommitMetadata(from: prev)
+                orderedSnapshots[idx] = snapshot.reusingCommitMetadata(from: prev)
                 reusedCount += 1
             } else {
                 needsLog.append((idx, snapshot))
@@ -945,14 +961,12 @@ extension RefreshEngine {
         }
 
         guard !needsLog.isEmpty else {
-            let snapshots = coreResult.snapshots.indices.compactMap { baselineByIndex[$0] }
-            return ExtendedReadResult(snapshots: snapshots, completed: snapshots.count,
+            return ExtendedReadResult(snapshots: orderedSnapshots, completed: orderedSnapshots.count,
                                       total: coreResult.snapshots.count, reusedMetadataCount: reusedCount,
                                       gitCommandCount: invocationCounter.value)
         }
 
         let concurrency = min(config.maxConcurrentGitOps, needsLog.count)
-        var logResults: [Int: RepositorySnapshot] = [:]
 
         await withTaskGroup(of: (Int, RepositorySnapshot?).self) { group in
             var nextIdx = 0
@@ -1033,7 +1047,10 @@ extension RefreshEngine {
                     group.cancelAll()
                     break
                 }
-                if let result { logResults[origIdx] = result }
+                if let result {
+                    orderedSnapshots[origIdx] = result
+                    logCompleted += 1
+                }
                 if self.isCancelled || Task.isCancelled || ProcessInfo.processInfo.systemUptime >= overallDeadline {
                     group.cancelAll()
                     break
@@ -1041,17 +1058,9 @@ extension RefreshEngine {
             }
         }
 
-        // Merge log results back into the original core-status order. A log
-        // task that did not start or finish keeps its own status snapshot;
-        // it must never borrow another repository's baseline entry.
-        var finalSnapshots: [RepositorySnapshot] = []
-        for (idx, snapshot) in coreResult.snapshots.enumerated() {
-            finalSnapshots.append(logResults[idx] ?? baselineByIndex[idx] ?? snapshot)
-        }
-
         return ExtendedReadResult(
-            snapshots: finalSnapshots,
-            completed: logResults.count,
+            snapshots: orderedSnapshots,
+            completed: logCompleted,
             total: coreResult.snapshots.count,
             reusedMetadataCount: reusedCount,
             gitCommandCount: invocationCounter.value
@@ -1073,7 +1082,9 @@ extension RefreshEngine {
         previousSnapshot: AppGroupData?
     ) -> MergeOutput {
         var byPath: [String: RepositorySnapshot] = [:]
-        for snapshot in coreSnapshots.map(RepositoryIdentity.normalize) {
+        byPath.reserveCapacity(coreSnapshots.count)
+        for rawSnapshot in coreSnapshots {
+            let snapshot = RepositoryIdentity.normalize(rawSnapshot)
             let path = snapshot.path
             if let existing = byPath[path], existing.isPinned || snapshot.isPinned {
                 var merged = existing
