@@ -1830,26 +1830,9 @@ final class ScanScheduler: ObservableObject {
         invalidatePendingSnapshotSync()
 
         // Write an isRefreshing snapshot so Widget can distinguish a running scan from stale/degraded data.
-        let refreshingData = lastResult.withWrittenAt(DateFormatting.nowISO())
-        let refreshingSnapshot = AppGroupData(
-            schemaVersion: refreshingData.schemaVersion,
-            generatedAt: refreshingData.generatedAt,
-            writtenAt: refreshingData.writtenAt,
-            lastSuccessfulRefreshAt: refreshingData.lastSuccessfulRefreshAt,
-            historySchemaVersion: refreshingData.historySchemaVersion,
-            historyRecordingEnabled: refreshingData.historyRecordingEnabled,
-            scanSummary: refreshingData.scanSummary,
-            repositories: refreshingData.repositories,
-            recentActivityEvents: refreshingData.recentActivityEvents,
-            repositoryUnavailableSinceByPath: refreshingData.repositoryUnavailableSinceByPath,
-            storageRevision: refreshingData.storageRevision,
-            persistenceState: refreshingData.persistenceState,
-            pendingItemWidgetSummary: refreshingData.pendingItemWidgetSummary,
-            isRefreshing: true,
-            discoveryWasIncomplete: refreshingData.discoveryWasIncomplete,
-            appVersion: refreshingData.appVersion,
-            storageFormatVersion: refreshingData.storageFormatVersion
-        )
+        let refreshingSnapshot = lastResult
+            .withWrittenAt(DateFormatting.nowISO())
+            .withIsRefreshing(true)
         switch AppGroupStore.write(
             refreshingSnapshot,
             observedStorageRevision: lastResult.storageRevision
@@ -1915,26 +1898,9 @@ final class ScanScheduler: ObservableObject {
                 self.refreshPhase = .failure
                 self.refreshFailureMessage = "扫描超时，看门狗已强制结束"
                 self.scanTask = nil
-                var safeSnapshot = self.lastResult
-                safeSnapshot = AppGroupData(
-                    schemaVersion: safeSnapshot.schemaVersion,
-                    generatedAt: safeSnapshot.generatedAt,
-                    writtenAt: DateFormatting.nowISO(),
-                    lastSuccessfulRefreshAt: safeSnapshot.lastSuccessfulRefreshAt,
-                    historySchemaVersion: safeSnapshot.historySchemaVersion,
-                    historyRecordingEnabled: safeSnapshot.historyRecordingEnabled,
-                    scanSummary: safeSnapshot.scanSummary,
-                    repositories: safeSnapshot.repositories,
-                    recentActivityEvents: safeSnapshot.recentActivityEvents,
-                    repositoryUnavailableSinceByPath: safeSnapshot.repositoryUnavailableSinceByPath,
-                    storageRevision: safeSnapshot.storageRevision,
-                    persistenceState: safeSnapshot.persistenceState,
-                    pendingItemWidgetSummary: safeSnapshot.pendingItemWidgetSummary,
-                    isRefreshing: false,
-                    discoveryWasIncomplete: safeSnapshot.discoveryWasIncomplete,
-                    appVersion: safeSnapshot.appVersion,
-                    storageFormatVersion: safeSnapshot.storageFormatVersion
-                )
+                let safeSnapshot = self.lastResult
+                    .withWrittenAt(DateFormatting.nowISO())
+                    .withIsRefreshing(false)
                 self.invalidatePendingSnapshotSync()
                 switch AppGroupStore.write(
                     safeSnapshot,
@@ -3058,26 +3024,7 @@ final class ScanScheduler: ObservableObject {
             // so the Widget doesn't remain stuck in "refreshing" state across
             // app restarts.
             if pinned.isRefreshing == true {
-                var cleared = pinned
-                cleared = AppGroupData(
-                    schemaVersion: pinned.schemaVersion,
-                    generatedAt: pinned.generatedAt,
-                    writtenAt: pinned.writtenAt,
-                    lastSuccessfulRefreshAt: pinned.lastSuccessfulRefreshAt,
-                    historySchemaVersion: pinned.historySchemaVersion,
-                    historyRecordingEnabled: pinned.historyRecordingEnabled,
-                    scanSummary: pinned.scanSummary,
-                    repositories: pinned.repositories,
-                    recentActivityEvents: pinned.recentActivityEvents,
-                    repositoryUnavailableSinceByPath: pinned.repositoryUnavailableSinceByPath,
-                    storageRevision: pinned.storageRevision,
-                    persistenceState: pinned.persistenceState,
-                    pendingItemWidgetSummary: pinned.pendingItemWidgetSummary,
-                    isRefreshing: nil,
-                    discoveryWasIncomplete: pinned.discoveryWasIncomplete,
-                    appVersion: pinned.appVersion,
-                    storageFormatVersion: pinned.storageFormatVersion
-                )
+                let cleared = pinned.withIsRefreshing(nil)
                 // Always clear isRefreshing in memory even if the disk write
                 // fails, so the next scan does not propagate a stale flag.
                 lastResult = cleared
