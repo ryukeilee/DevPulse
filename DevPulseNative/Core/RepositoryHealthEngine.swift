@@ -137,12 +137,16 @@ enum RepositoryHealthEngine {
         }
 
         let sorted = entries.sorted { $0.recordedAt < $1.recordedAt }
+        // Sample the reference instant before any timestamp is parsed, matching
+        // the assessment's previous ordering, so a threshold boundary is judged
+        // against the same clock instant it was before the parse pass moved
+        // ahead of the signal loop.
+        let now = Date()
         // Every signal needs the entry's date, so the timestamps are parsed once
         // here instead of once per signal assessment.
         let datedEntries = sorted.map {
             ParsedHistoryEntry(entry: $0, date: DateFormatting.date(from: $0.recordedAt))
         }
-        let now = Date()
         var signals: [RepositoryHealthSignal] = []
 
         // Signal 1: Dirty workspace duration
