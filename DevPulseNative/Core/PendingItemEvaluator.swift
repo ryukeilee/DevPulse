@@ -237,33 +237,22 @@ enum PendingItemEvaluator {
         // outranks a frozen history entry, then the most recently confirmed
         // record wins, so neither the choice nor the traversal depends on the
         // order the archive happens to store them in.
+        //
+        // `previousByID` carries a rule's own item forward by the id derived from
+        // its title; `previousByScope` finds the same rule by scope, so a
+        // condition that disappeared is still found and a retitled rule does not
+        // orphan its history. Both use the same canonical choice in one scan.
         var previousByID: [String: PendingItem] = [:]
         previousByID.reserveCapacity(previousItems.count)
-        for item in previousItems {
-            guard let existing = previousByID[item.id] else {
-                previousByID[item.id] = item
-                continue
-            }
-            if isPreferredPrevious(item, existing) {
-                previousByID[item.id] = item
-            }
-        }
-        // Resolution and status carry-forward match a rule's own item by scope
-        // rather than by the id derived from its title, so a condition that
-        // disappeared is still found (and a retitled rule does not orphan its
-        // history). A rule owns one item per scope; if a legacy archive holds
-        // several, the same canonical choice applies.
         var previousByScope: [RuleScopeKey: PendingItem] = [:]
         previousByScope.reserveCapacity(previousItems.count)
+        func insert<T: Hashable>(_ item: PendingItem, at key: T, into records: inout [T: PendingItem]) {
+            if let existing = records[key], !isPreferredPrevious(item, existing) { return }
+            records[key] = item
+        }
         for item in previousItems {
-            let key = RuleScopeKey(item)
-            guard let existing = previousByScope[key] else {
-                previousByScope[key] = item
-                continue
-            }
-            if isPreferredPrevious(item, existing) {
-                previousByScope[key] = item
-            }
+            insert(item, at: item.id, into: &previousByID)
+            insert(item, at: RuleScopeKey(item), into: &previousByScope)
         }
 
         // Cache health assessments for fast lookup
@@ -378,14 +367,14 @@ enum PendingItemEvaluator {
             let item = state.items[index]
             guard item.status != .resolved else { continue }
             let owner = OwnerKey(item)
-            guard resolvablePreviousByOwner[owner]?.isEmpty == false else { continue }
+            guard resolvablePreviousByOwner[owner] != nil else { continue }
             if liveIndicesByOwner[owner] == nil { ownerOrder.append(owner) }
             liveIndicesByOwner[owner, default: []].append(index)
         }
 
         for owner in ownerOrder {
-            guard let liveIndices = liveIndicesByOwner[owner],
-                  let matchingPrev = resolvablePreviousByOwner[owner] else { continue }
+            guard let matchingPrev = resolvablePreviousByOwner[owner],
+                  let liveIndices = liveIndicesByOwner[owner] else { continue }
             let targets = liveIndices.sorted { lhs, rhs in
                 let lhsRank = state.items[lhs].source.dispatchRank
                 let rhsRank = state.items[rhs].source.dispatchRank
@@ -394,17 +383,17 @@ enum PendingItemEvaluator {
             }
             // Visit matching previous items in a canonical, value-derived order
             // so the transitions stay stable across input and archive order.
+            // `previousByScope` holds one canonical record per scope, so every
+            // replaced source is visited exactly once.
             for prev in matchingPrev.sorted(by: isEarlierPrevious) {
+                let prevScope = RuleScopeKey(prev)
                 // Skip a source that still produced a candidate (its rule handled
-                // it), one the absent-candidate branch already resolved or kept,
-                // and one already replaced by another live source for this owner.
-                guard !state.firingScopes.contains(RuleScopeKey(prev)),
-                      !state.absentScopes.contains(RuleScopeKey(prev)),
-                      !state.supersededScopes.contains(RuleScopeKey(prev)) else { continue }
+                // it) and one the absent-candidate branch already resolved or kept.
+                guard !state.firingScopes.contains(prevScope),
+                      !state.absentScopes.contains(prevScope) else { continue }
                 guard let targetIndex = targets.first(where: { state.items[$0].source != prev.source }) else {
                     continue
                 }
-                state.supersededScopes.insert(RuleScopeKey(prev))
                 let target = state.items[targetIndex]
                 // Record a transition from the old source to the new one. The old
                 // item is not added to state.items — the new item replaces it with
@@ -497,9 +486,6 @@ enum PendingItemEvaluator {
         /// carried-forward resolved item), so duplicate repository occurrences
         /// and the cross-rule pass cannot archive the same scope twice.
         var absentScopes: Set<RuleScopeKey> = []
-        /// Scopes the cross-rule pass already resolved, so one replaced source is
-        /// reported once even when several new sources appear for the repository.
-        var supersededScopes: Set<RuleScopeKey> = []
         /// Every id already emitted, so an absent-candidate resolution can never
         /// append a second copy of an item a repository occurrence created.
         var itemIDs: Set<String> = []
@@ -649,7 +635,12 @@ enum PendingItemEvaluator {
             // carried forward for the same identity earlier in this evaluation;
             // otherwise keep the canonical candidate so duplicate occurrences of
             // one rule do not make the result depend on scan order.
-            if existing.status == .resolved && finalItem.status != .resolved {
+            //
+            // `PendingItemStatusTransition.evaluate` maps an active condition to
+            // `.active`, `.restored`, `.snoozed` or `.permanentlyIgnored`, never
+            // to `.resolved`, and a fresh candidate is `.active`, so `finalItem`
+            // is always live here and needs no second status test.
+            if existing.status == .resolved {
                 state.items[existingIdx] = finalItem
                 // A live occurrence revived an item this evaluation already
                 // resolved; drop the stale recovery so the transitions and the

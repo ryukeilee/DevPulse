@@ -207,6 +207,74 @@ struct PendingItemStaleLifecycleTests {
         #expect(summarize(reversedRepositories) == summarize(baseline))
     }
 
+    /// A repository can appear more than once in one scan, and a legacy archive
+    /// can hold several records for one rule scope. Neither the repository order
+    /// nor the archive order may change which replaced scopes are reported, the
+    /// detection timestamp they carry forward, or the diagnostic counts.
+    @Test func archiveAndRepositoryPermutationsKeepReplacedScopesStable() throws {
+        let dirty = repositorySnapshot(id: "permute", name: "dirty", status: .changed, changedFileCount: 1)
+        let unpushed = repositorySnapshot(id: "permute", name: "unpushed", status: .clean, aheadCount: 2)
+
+        // Two records for the dirty-workspace scope — one canonical choice — plus
+        // two scopes only the replacement pass can resolve.
+        func legacy(_ id: String, _ source: PendingItemSource,
+                    _ severity: PendingItemSeverity, _ stamp: String) -> PendingItem {
+            PendingItem(id: id, source: source, severity: severity, repositoryID: dirty.id,
+                        title: "旧标题 \(id)", firstDetectedAt: stamp,
+                        lastConfirmedAt: stamp, status: .active)
+        }
+        let records = [
+            legacy("a", .dirtyWorkspace, .low, "2024-01-01T00:00:00Z"),
+            legacy("b", .dirtyWorkspace, .low, "2024-01-02T00:00:00Z"),
+            legacy("c", .behindRemote, .low, "2024-01-03T00:00:00Z"),
+            legacy("d", .unavailable, .high, "2024-01-04T00:00:00Z")
+        ]
+        let legacyStamps = Set(records.map(\.firstDetectedAt))
+
+        func evaluate(_ repositories: [RepositorySnapshot],
+                      _ archive: [PendingItem]) -> PendingItemEvaluationResult {
+            PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+                repositories: repositories, previousItems: archive))
+        }
+
+        // A fingerprint that ignores the wall clock: a detection timestamp counts
+        // only as the legacy value it carried forward, or as freshly minted.
+        func fingerprint(_ result: PendingItemEvaluationResult) -> [String] {
+            let items = result.items.map { item in
+                let stamp = legacyStamps.contains(item.firstDetectedAt) ? item.firstDetectedAt : "<new>"
+                return "\(item.id)|\(item.source.rawValue)|\(item.status.rawValue)|\(item.severity.rawValue)|\(stamp)"
+            }
+            let transitions = result.transitions.map {
+                "\($0.from.rawValue)>\($0.to.rawValue)|\($0.previousSeverity?.rawValue ?? "-")"
+                    + "|\($0.newSeverity?.rawValue ?? "-")|\($0.severityChanged)|\($0.reason)"
+            }
+            let counts = ["\(result.newItemCount)", "\(result.resolvedItemCount)",
+                          "\(result.escalatedCount)", "\(result.deescalatedCount)"]
+            return items.sorted() + transitions + result.notifications.map(\.reason) + counts
+        }
+
+        let baseline = evaluate([dirty, unpushed], records)
+        #expect(baseline.transitions.filter { $0.reason.hasPrefix("仓库状态从 ") }.map(\.reason)
+                == ["仓库状态从 落后远端 转为 脏工作区", "仓库状态从 仓库不可用 转为 脏工作区"])
+        #expect(baseline.resolvedItemCount == 2)
+        #expect(baseline.items.first { $0.source == .dirtyWorkspace }?.firstDetectedAt == "2024-01-03T00:00:00Z")
+
+        // Any archive order must produce the identical result, transition order
+        // included: the replacement pass visits one canonical record per scope.
+        for archive in permutations(records) {
+            #expect(fingerprint(evaluate([dirty, unpushed], archive)) == fingerprint(baseline))
+        }
+
+        // A different repository order may reorder the dispatched transitions, so
+        // compare the multiset while the items and counts stay identical.
+        let baselineSorted = fingerprint(baseline).sorted()
+        for repositories in permutations([dirty, unpushed]) {
+            let result = evaluate(repositories, records)
+            #expect(fingerprint(result).sorted() == baselineSorted)
+            #expect(result.resolvedItemCount == baseline.resolvedItemCount)
+        }
+    }
+
     /// A legacy archive can hold several records for one rule scope. The chosen
     /// record, the resolved item, and its transition must not depend on the
     /// order the archive stores them in.
@@ -1344,6 +1412,21 @@ struct PendingItemStaleLifecycleTests {
         #expect(summary.criticalCount == 1)
         #expect(summary.topItemTitle == "仓库已长期无法访问")
         #expect(summary.topItemSeverity == .critical)
+    }
+
+    /// Every ordering of a small fixture, so a test can pin that dictionary and
+    /// input order do not change the result.
+    private func permutations<T>(_ values: [T]) -> [[T]] {
+        guard values.count > 1 else { return [values] }
+        var result: [[T]] = []
+        for (index, value) in values.enumerated() {
+            var rest = values
+            rest.remove(at: index)
+            for tail in permutations(rest) {
+                result.append([value] + tail)
+            }
+        }
+        return result
     }
 
     private func repositorySnapshot(
