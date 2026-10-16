@@ -155,21 +155,24 @@ struct PendingItemStaleLifecycleTests {
         #expect(result.notifications.count == (expected.to.allowsNotification && expected.from != expected.to ? 2 : 0))
     }
 
-    @Test func duplicateResolutionsRemainAppendedAlongsideDeduplicatedCandidates() throws {
+    @Test func duplicateOccurrencesResolveTheAbsentSourceOnce() throws {
         let clean = repositorySnapshot(id: "duplicate", name: "clean", status: .clean)
         let dirty = repositorySnapshot(id: "duplicate", name: "dirty", status: .changed, changedFileCount: 1)
-        // Resolution identity uses an empty title in the existing evaluator.
+        // A stored item resolves by rule scope, not by a title-derived id, so an
+        // empty title is no longer significant; duplicate repository occurrences
+        // must not archive the same recovery twice (which would trap the next
+        // evaluation's id dictionary).
         let previous = PendingItem(source: .dirtyWorkspace, severity: .low, repositoryID: clean.id,
                                    title: "", evidence: ["old"], firstDetectedAt: "2025-01-01T00:00:00Z")
         let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
             repositories: [clean, dirty, clean, dirty], previousItems: [previous]))
         let resolved = result.items.filter { $0.id == previous.id }
-        #expect(resolved.count == 2)
+        #expect(resolved.count == 1)
         #expect(resolved.allSatisfy { $0.status == .resolved && $0.firstDetectedAt == previous.firstDetectedAt })
         #expect(result.items.filter { $0.id != previous.id }.count == 1)
-        #expect(result.resolvedItemCount == 2)
+        #expect(result.resolvedItemCount == 1)
         #expect(result.newItemCount == 2)
-        #expect(result.transitions.count == 4)
+        #expect(result.transitions.count == 3)
         #expect(result.notifications.count == 2)
     }
 
@@ -714,6 +717,348 @@ struct PendingItemStaleLifecycleTests {
         #expect(allUnavailableRepoIDs.intersection(allStaleRepoIDs).isEmpty)
     }
 
+    // MARK: - Auto-recovery after a rule stops firing
+
+    /// A repository rule mints its item id from the real, non-empty title, but
+    /// resolution used to look the previous item up by an empty-title id. The
+    /// dirty → clean transition therefore never completed. This pins the fix
+    /// against the production path: evaluate dirty, feed the real items back as
+    /// history, then evaluate clean.
+    @Test func ruleAutoRecoversItemMintedFromRealTitle() throws {
+        let dirty = repositorySnapshot(id: "repo-recover", name: "recover", status: .changed, changedFileCount: 2)
+        let first = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(repositories: [dirty]))
+        let active = try #require(first.items.first { $0.source == .dirtyWorkspace })
+        #expect(active.status == .active)
+        #expect(active.title == "工作区存在长期改动")
+
+        let clean = repositorySnapshot(id: "repo-recover", name: "recover", status: .clean)
+        let second = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [clean], previousItems: first.items))
+
+        #expect(second.resolvedItemCount == 1)
+        #expect(second.transitions.count == 1)
+        #expect(second.newItemCount == 0)
+        let resolved = try #require(second.items.first { $0.id == active.id })
+        #expect(resolved.status == .resolved)
+        #expect(resolved.firstDetectedAt == active.firstDetectedAt)
+        #expect(resolved.title == active.title)
+    }
+
+    /// A rule that keeps firing must not be reported as recovered, and each
+    /// source keeps its own firstDetectedAt even with several rules active.
+    @Test func sustainedMultipleRulesReportNoRecovery() throws {
+        let repo = repositorySnapshot(id: "repo-multi", name: "multi", status: .changed,
+                                      changedFileCount: 2, aheadCount: 3, hasUpstream: true)
+        let first = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(repositories: [repo]))
+        #expect(first.items.count == 2)
+
+        let second = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [repo], previousItems: first.items))
+        #expect(second.resolvedItemCount == 0)
+        #expect(second.newItemCount == 0)
+        #expect(second.notifications.isEmpty)
+        #expect(second.items.count == 2)
+        for before in first.items {
+            let after = try #require(second.items.first { $0.id == before.id })
+            #expect(after.status == .active)
+            #expect(after.firstDetectedAt == before.firstDetectedAt)
+        }
+    }
+
+    /// When the same repository id appears twice with conflicting state, a live
+    /// candidate must supersede the resolution an earlier clean occurrence
+    /// carried forward, instead of leaving a resolved item for a dirty repo.
+    @Test func resolvedCarryForwardYieldsToLiveCandidateWithSameID() throws {
+        let dirty = repositorySnapshot(id: "duplicate", name: "dirty", status: .changed, changedFileCount: 1)
+        let seed = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(repositories: [dirty]))
+        let previous = try #require(seed.items.first { $0.source == .dirtyWorkspace })
+        let clean = repositorySnapshot(id: "duplicate", name: "clean", status: .clean)
+
+        let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [clean, dirty], previousItems: [previous]))
+
+        let matching = result.items.filter { $0.id == previous.id }
+        #expect(matching.count == 1)
+        #expect(matching.first?.status == .active)
+        #expect(matching.first?.repositoryName == "dirty")
+    }
+
+    /// Auto-recovery must be durable: a second clean refresh neither re-resolves
+    /// nor duplicates the item, so the completed list and the
+    /// resolved → active reappearance path keep working.
+    @Test func repeatedCleanRefreshKeepsResolvedItem() throws {
+        let dirty = repositorySnapshot(id: "repo-stable", name: "stable", status: .changed, changedFileCount: 1)
+        let clean = repositorySnapshot(id: "repo-stable", name: "stable", status: .clean)
+        let first = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(repositories: [dirty]))
+        let active = try #require(first.items.first { $0.source == .dirtyWorkspace })
+        let second = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [clean], previousItems: first.items))
+        let third = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [clean], previousItems: second.items))
+
+        #expect(third.resolvedItemCount == 0)
+        #expect(third.newItemCount == 0)
+        #expect(third.notifications.isEmpty)
+        let recovered = third.items.filter { $0.id == active.id }
+        #expect(recovered.count == 1)
+        #expect(recovered.first?.status == .resolved)
+        #expect(recovered.first?.firstDetectedAt == active.firstDetectedAt)
+    }
+
+    /// When the condition returns, the persisted resolved item reactivates
+    /// instead of being recreated, and the reappearance notification fires.
+    @Test func reappearingConditionReactivatesResolvedItem() throws {
+        let dirty = repositorySnapshot(id: "repo-reappear", name: "reappear", status: .changed, changedFileCount: 1)
+        let clean = repositorySnapshot(id: "repo-reappear", name: "reappear", status: .clean)
+        let first = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(repositories: [dirty]))
+        let active = try #require(first.items.first { $0.source == .dirtyWorkspace })
+        let second = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [clean], previousItems: first.items))
+        let third = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [dirty], previousItems: second.items))
+
+        let reactivated = try #require(third.items.first { $0.id == active.id })
+        #expect(reactivated.status == .active)
+        #expect(reactivated.firstDetectedAt == active.firstDetectedAt)
+        #expect(third.transitions.contains { $0.from == .resolved && $0.to == .active })
+        #expect(third.notifications.contains { $0.item.id == active.id })
+        #expect(third.newItemCount == 0)
+    }
+
+    /// An archived item whose id predates the current rule title must still be
+    /// resolvable by rule scope, and its stored id must not change.
+    @Test func resolutionMatchesArchivedItemWithDifferentTitle() throws {
+        let clean = repositorySnapshot(id: "repo-legacy", name: "legacy", status: .clean)
+        let historical = PendingItem(
+            id: "legacy-id", source: .dirtyWorkspace, severity: .low,
+            repositoryID: "repo-legacy", repositoryName: "legacy", title: "旧标题",
+            firstDetectedAt: "2025-01-01T00:00:00Z", status: .active
+        )
+        let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [clean], previousItems: [historical]))
+
+        #expect(result.resolvedItemCount == 1)
+        #expect(result.newItemCount == 0)
+        let resolved = try #require(result.items.first { $0.id == "legacy-id" })
+        #expect(resolved.status == .resolved)
+        #expect(resolved.title == "旧标题")
+        #expect(resolved.firstDetectedAt == "2025-01-01T00:00:00Z")
+    }
+
+    /// Workspace rules key identity by workspace instead of repository; the
+    /// same auto-recovery must work with a nil repositoryID.
+    @Test func workspaceRuleAutoRecoversWhenConditionDisappears() throws {
+        let conflicted = repositorySnapshot(id: "repo-ws", name: "ws", status: .changed,
+                                            changedFileCount: 1, conflictedFileCount: 1)
+        let workspace = Workspace(id: "ws-1", name: "ws-1", repositoryIDs: [conflicted.id])
+        let dirtyAggregations = WorkspaceAggregationEngine.aggregateAll(
+            workspaces: [workspace], allRepositories: [conflicted])
+        let first = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [], workspaceAggregations: dirtyAggregations, workspaces: [workspace]))
+        let active = try #require(first.items.first { $0.source == .workspaceConflicts })
+
+        let clean = repositorySnapshot(id: "repo-ws", name: "ws", status: .clean)
+        let cleanAggregations = WorkspaceAggregationEngine.aggregateAll(
+            workspaces: [workspace], allRepositories: [clean])
+        let second = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [], workspaceAggregations: cleanAggregations,
+            workspaces: [workspace], previousItems: first.items))
+
+        #expect(second.resolvedItemCount >= 1)
+        let resolved = try #require(second.items.first { $0.id == active.id })
+        #expect(resolved.status == .resolved)
+        #expect(resolved.workspaceID == "ws-1")
+    }
+
+    /// The evaluator's resolved decision must survive the store merge; a stored
+    /// acknowledgement must not resurrect the item the evaluation resolved.
+    @Test func acknowledgedItemAutoRecoverySurvivesStoreMerge() throws {
+        let dirty = repositorySnapshot(id: "repo-ack", name: "ack", status: .changed, changedFileCount: 1)
+        let first = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(repositories: [dirty]))
+        var acknowledged = try #require(first.items.first { $0.source == .dirtyWorkspace })
+        acknowledged.status = .acknowledged
+
+        let clean = repositorySnapshot(id: "repo-ack", name: "ack", status: .clean)
+        let second = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [clean], previousItems: [acknowledged]))
+        #expect(second.resolvedItemCount == 1)
+        #expect(second.items.first { $0.id == acknowledged.id }?.status == .resolved)
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pending-recover-\(UUID().uuidString).json")
+        let store = PendingItemStore(fileURL: url)
+        _ = store.save(PendingItemArchive(items: [acknowledged]))
+        guard case .success(let merged) = store.replaceAll(with: second.items) else {
+            Issue.record("Expected merge to persist")
+            return
+        }
+        #expect(merged.items.first { $0.id == acknowledged.id }?.status == .resolved)
+    }
+
+    // MARK: - Auto-recovery robustness
+
+    /// Duplicate clean occurrences must resolve a rule instance once; a second
+    /// copy would put two items with one id in the archive and trap the next
+    /// evaluation's id lookup.
+    @Test func duplicateCleanOccurrencesResolveOnceWithoutDuplicateIDs() throws {
+        let dirty = repositorySnapshot(id: "duplicate", name: "dirty", status: .changed, changedFileCount: 1)
+        let seed = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(repositories: [dirty]))
+        let previous = try #require(seed.items.first { $0.source == .dirtyWorkspace })
+        let clean = repositorySnapshot(id: "duplicate", name: "clean", status: .clean)
+
+        let first = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [clean, clean], previousItems: [previous]))
+        let matching = first.items.filter { $0.id == previous.id }
+        #expect(matching.count == 1)
+        #expect(matching.first?.status == .resolved)
+        #expect(first.resolvedItemCount == 1)
+
+        // Feeding the result back must not trap on a repeated id.
+        let second = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [clean, clean], previousItems: first.items))
+        #expect(second.items.filter { $0.id == previous.id }.count == 1)
+        #expect(second.resolvedItemCount == 0)
+    }
+
+    /// Repository occurrences with conflicting states must still emit one item
+    /// per id in either order, whether the stored item was active or resolved,
+    /// so the archive never repeats an id.
+    @Test func mixedDuplicateOccurrencesKeepOneItemPerID() throws {
+        let dirty = repositorySnapshot(id: "duplicate", name: "dirty", status: .changed, changedFileCount: 1)
+        let clean = repositorySnapshot(id: "duplicate", name: "clean", status: .clean)
+        let seed = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(repositories: [dirty]))
+        let active = try #require(seed.items.first { $0.source == .dirtyWorkspace })
+        let resolved = PendingItem(
+            id: active.id, source: active.source, severity: active.severity,
+            repositoryID: active.repositoryID, repositoryName: active.repositoryName,
+            title: active.title, explanation: active.explanation, evidence: active.evidence,
+            firstDetectedAt: active.firstDetectedAt, lastConfirmedAt: active.lastConfirmedAt,
+            status: .resolved)
+
+        for previous in [active, resolved] {
+            for repositories in [[dirty, clean], [clean, dirty]] {
+                let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+                    repositories: repositories, previousItems: [previous]))
+                let matching = result.items.filter { $0.id == active.id }
+                #expect(matching.count == 1)
+                // A dirty occurrence means the condition is present.
+                #expect(matching.first?.status == .active)
+                // The archive stays valid for the next evaluation.
+                _ = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+                    repositories: repositories, previousItems: result.items))
+            }
+        }
+    }
+
+    /// Workspace items have a nil repositoryID, so the cross-rule bucket must
+    /// not match a recovery in one workspace against a new source in another.
+    @Test func workspaceRecoveryDoesNotLeakAcrossWorkspaces() throws {
+        let conflictedA = repositorySnapshot(id: "repo-a", name: "a", status: .changed,
+                                            changedFileCount: 1, conflictedFileCount: 1)
+        let workspaceA = Workspace(id: "ws-a", name: "ws-a", repositoryIDs: [conflictedA.id])
+        let dirtyAggregations = WorkspaceAggregationEngine.aggregateAll(
+            workspaces: [workspaceA], allRepositories: [conflictedA])
+        let seed = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [], workspaceAggregations: dirtyAggregations, workspaces: [workspaceA]))
+        let seededConflict = try #require(seed.items.first { $0.source == .workspaceConflicts })
+        let previous = PendingItem(
+            id: seededConflict.id, source: seededConflict.source, severity: seededConflict.severity,
+            repositoryID: seededConflict.repositoryID, repositoryName: seededConflict.repositoryName,
+            workspaceID: seededConflict.workspaceID, workspaceName: seededConflict.workspaceName,
+            title: seededConflict.title, explanation: seededConflict.explanation,
+            evidence: seededConflict.evidence,
+            firstDetectedAt: "2025-01-01T00:00:00Z", lastConfirmedAt: seededConflict.lastConfirmedAt,
+            status: .active
+        )
+
+        let healthyA = repositorySnapshot(id: "repo-a", name: "a", status: .clean)
+        let conflictedB = repositorySnapshot(id: "repo-b", name: "b", status: .changed,
+                                            changedFileCount: 1, conflictedFileCount: 1)
+        let workspaceB = Workspace(id: "ws-b", name: "ws-b", repositoryIDs: [conflictedB.id])
+        let aggregations = WorkspaceAggregationEngine.aggregateAll(
+            workspaces: [workspaceA, workspaceB], allRepositories: [healthyA, conflictedB])
+        let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [], workspaceAggregations: aggregations,
+            workspaces: [workspaceA, workspaceB], previousItems: [previous]))
+
+        let recovered = try #require(result.items.first { $0.id == previous.id })
+        #expect(recovered.status == .resolved)
+        #expect(recovered.workspaceID == "ws-a")
+        #expect(result.resolvedItemCount == 1)
+        let conflictsB = result.items.first { $0.source == .workspaceConflicts && $0.workspaceID == "ws-b" }
+        #expect(conflictsB != nil)
+        #expect(conflictsB?.firstDetectedAt != previous.firstDetectedAt)
+    }
+
+    /// One stored source replaced by two new sources is one recovery, not two,
+    /// even though the cross-rule pass visits it once per new source.
+    @Test func sourceChangeReportsOneRecovery() throws {
+        let dirty = repositorySnapshot(id: "repo-swap", name: "swap", status: .changed, changedFileCount: 1)
+        let seed = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(repositories: [dirty]))
+        let seededDirty = try #require(seed.items.first { $0.source == .dirtyWorkspace })
+        let previous = PendingItem(
+            id: seededDirty.id, source: seededDirty.source, severity: seededDirty.severity,
+            repositoryID: seededDirty.repositoryID, repositoryName: seededDirty.repositoryName,
+            title: seededDirty.title, explanation: seededDirty.explanation, evidence: seededDirty.evidence,
+            firstDetectedAt: "2025-01-01T00:00:00Z", lastConfirmedAt: seededDirty.lastConfirmedAt,
+            status: .active
+        )
+
+        let diverged = repositorySnapshot(id: "repo-swap", name: "swap", status: .clean,
+                                          aheadCount: 2, behindCount: 3, hasUpstream: true)
+        let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [diverged], previousItems: [previous]))
+
+        #expect(result.resolvedItemCount == 1)
+        #expect(result.items.filter { $0.id == previous.id }.isEmpty)
+        #expect(result.items.filter { $0.firstDetectedAt == previous.firstDetectedAt }.count == 1)
+    }
+
+    /// A legacy scope holding both a resolved and a live item resolves the live
+    /// one instead of silently dropping it behind the frozen history entry.
+    @Test func liveStoredItemWinsOverResolvedItemForTheSameScope() throws {
+        let clean = repositorySnapshot(id: "repo-degenerate", name: "degenerate", status: .clean)
+        let resolvedOld = PendingItem(id: "resolved-old", source: .dirtyWorkspace, severity: .low,
+                                      repositoryID: "repo-degenerate", title: "旧标题",
+                                      firstDetectedAt: "2024-01-01T00:00:00Z", status: .resolved)
+        let live = PendingItem(id: "live-current", source: .dirtyWorkspace, severity: .low,
+                               repositoryID: "repo-degenerate", title: "工作区存在长期改动",
+                               firstDetectedAt: "2025-01-01T00:00:00Z", status: .active)
+        let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [clean], previousItems: [resolvedOld, live]))
+
+        #expect(result.resolvedItemCount == 1)
+        #expect(result.items.contains { $0.id == "live-current" && $0.status == .resolved })
+    }
+
+    /// A concurrent permanent ignore is user suppression and must survive the
+    /// evaluator's auto-recovery merge.
+    @Test func concurrentPermanentIgnoreSurvivesRecoveryMerge() throws {
+        let dirty = repositorySnapshot(id: "repo-ignore", name: "ignore", status: .changed, changedFileCount: 1)
+        let seed = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(repositories: [dirty]))
+        let active = try #require(seed.items.first { $0.source == .dirtyWorkspace })
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pending-ignore-\(UUID().uuidString).json")
+        let store = PendingItemStore(fileURL: url)
+        _ = store.save(PendingItemArchive(items: [active]))
+        guard case .success = store.applyUserAction(itemID: active.id, action: .permanentlyIgnore) else {
+            Issue.record("Expected permanent ignore to persist")
+            return
+        }
+
+        let clean = repositorySnapshot(id: "repo-ignore", name: "ignore", status: .clean)
+        let reevaluated = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [clean], previousItems: [active]))
+        #expect(reevaluated.items.first { $0.id == active.id }?.status == .resolved)
+
+        guard case .success(let merged) = store.replaceAll(with: reevaluated.items) else {
+            Issue.record("Expected merge to persist")
+            return
+        }
+        #expect(merged.items.first { $0.id == active.id }?.status == .permanentlyIgnored)
+    }
+
     // MARK: - Widget summary includes stale items
 
     @Test func widgetSummaryIncludesStaleRepositoryItems() throws {
@@ -745,6 +1090,7 @@ struct PendingItemStaleLifecycleTests {
         status: RepositoryStatus,
         changedFileCount: Int = 0,
         aheadCount: Int? = 0,
+        behindCount: Int? = 0,
         hasUpstream: Bool? = true,
         conflictedFileCount: Int? = 0
     ) -> RepositorySnapshot {
@@ -763,7 +1109,7 @@ struct PendingItemStaleLifecycleTests {
             unstagedFileCount: changedFileCount,
             conflictedFileCount: conflictedFileCount,
             aheadCount: aheadCount,
-            behindCount: 0,
+            behindCount: behindCount,
             hasUpstream: hasUpstream,
             changedFileCount: changedFileCount,
             changedFilesPreview: [],

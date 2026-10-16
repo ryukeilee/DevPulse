@@ -58,6 +58,42 @@ private struct CachedHealth {
     let overallRisk: RiskLevel
 }
 
+// MARK: - Rule scope
+
+/// Identifies the single pending item one rule owns for a repository or a
+/// workspace.
+///
+/// This is the initializer's identity without `title`: a rule's title is a
+/// human-readable payload it may rewrite, and a rule that stops firing has no
+/// candidate to read a title from, so neither the lookup that resolves a
+/// disappeared condition nor the lookup that updates a live one can depend on
+/// it. The stored item keeps the id it was minted with.
+private struct RuleScopeKey: Hashable {
+    let source: PendingItemSource
+    let repositoryID: String?
+    let workspaceID: String?
+
+    init(_ item: PendingItem) {
+        self.source = item.source
+        self.repositoryID = item.repositoryID
+        self.workspaceID = item.workspaceID
+    }
+
+    static func repository(_ source: PendingItemSource, _ repositoryID: String) -> RuleScopeKey {
+        RuleScopeKey(source: source, repositoryID: repositoryID, workspaceID: nil)
+    }
+
+    static func workspace(_ source: PendingItemSource, _ workspaceID: String) -> RuleScopeKey {
+        RuleScopeKey(source: source, repositoryID: nil, workspaceID: workspaceID)
+    }
+
+    private init(source: PendingItemSource, repositoryID: String?, workspaceID: String?) {
+        self.source = source
+        self.repositoryID = repositoryID
+        self.workspaceID = workspaceID
+    }
+}
+
 // MARK: - Pending item evaluator
 
 /// Background evaluator that generates pending items from scan results.
@@ -86,46 +122,110 @@ enum PendingItemEvaluator {
         let start = Date()
         let warnings: [String] = []
 
-        let previousByID = Dictionary(
-            uniqueKeysWithValues: (previousArchive?.items ?? context.previousItems).map { ($0.id, $0) }
-        )
+        let previousItems = previousArchive?.items ?? context.previousItems
+        // A legacy or hand-edited archive could repeat an id; keep the first so
+        // a duplicate cannot trap the dictionary.
+        var previousByID: [String: PendingItem] = [:]
+        previousByID.reserveCapacity(previousItems.count)
+        for item in previousItems where previousByID[item.id] == nil {
+            previousByID[item.id] = item
+        }
+        // Resolution and status carry-forward match a rule's own item by scope
+        // rather than by the id derived from its title, so a condition that
+        // disappeared is still found (and a retitled rule does not orphan its
+        // history). A rule owns one item per scope; if a legacy archive holds
+        // several, the live one wins over a resolved one.
+        var previousByScope: [RuleScopeKey: PendingItem] = [:]
+        previousByScope.reserveCapacity(previousItems.count)
+        for item in previousItems {
+            let key = RuleScopeKey(item)
+            guard let existing = previousByScope[key] else {
+                previousByScope[key] = item
+                continue
+            }
+            if existing.status == .resolved && item.status != .resolved {
+                previousByScope[key] = item
+            }
+        }
 
         // Cache health assessments for fast lookup
         let healthByRepoID = context.healthAssessments
 
         var state = EvaluationState()
 
-        // Keep explicit dispatch order; no per-repository rule arrays or escaping closures.
+        // Keep explicit dispatch order. All of one repository's candidates are
+        // computed before any is dispatched, so a rule whose condition is gone
+        // can tell whether another source took the repository over (the
+        // cross-rule path replaces the old item) or the repository is simply
+        // clean (the rule resolves its own item).
         for repo in context.repositories {
             let health = healthByRepoID[repo.id]
             let cached = extractSignals(from: health)
-            func run(_ source: PendingItemSource, _ rule: RuleEvaluator) {
-                evaluateRule(source: source, repo: repo, health: health, cached: cached,
-                             previousByID: previousByID, context: context, state: &state, rule: rule)
+
+            let dirtyWorkspace = evaluateDirtyWorkspace(repo, health, cached, context)
+            let unpushedCommits = evaluateUnpushedCommits(repo, health, cached, context)
+            let behindRemote = evaluateBehindRemote(repo, health, cached, context)
+            let mergeConflict = evaluateMergeConflict(repo, health, cached, context)
+            let upstreamMissing = evaluateUpstreamMissing(repo, health, cached, context)
+            let unavailable = evaluateUnavailable(repo, health, cached, context)
+            let staleRepository = evaluateStaleRepository(repo, health, cached, context)
+            let scanFailure = evaluateScanFailure(repo, health, cached, context)
+            let creepingChanges = evaluateCreepingChanges(repo, health, cached, context)
+            let staleActivity = evaluateStaleActivity(repo, health, cached, context)
+            let healthTrend = evaluateHealthTrend(repo, health, cached, context)
+
+            var firingCount = 0
+            if dirtyWorkspace != nil { firingCount += 1 }
+            if unpushedCommits != nil { firingCount += 1 }
+            if behindRemote != nil { firingCount += 1 }
+            if mergeConflict != nil { firingCount += 1 }
+            if upstreamMissing != nil { firingCount += 1 }
+            if unavailable != nil { firingCount += 1 }
+            if staleRepository != nil { firingCount += 1 }
+            if scanFailure != nil { firingCount += 1 }
+            if creepingChanges != nil { firingCount += 1 }
+            if staleActivity != nil { firingCount += 1 }
+            if healthTrend != nil { firingCount += 1 }
+
+            func run(_ source: PendingItemSource, _ candidate: PendingItem?) {
+                processRule(candidate: candidate,
+                            scope: .repository(source, repo.id),
+                            isSuperseded: candidate == nil ? firingCount > 0 : firingCount > 1,
+                            isRepositoryRule: true,
+                            previousByID: previousByID, previousByScope: previousByScope,
+                            context: context, state: &state)
             }
 
-            run(.dirtyWorkspace, evaluateDirtyWorkspace)
-            run(.unpushedCommits, evaluateUnpushedCommits)
-            run(.behindRemote, evaluateBehindRemote)
-            run(.mergeConflict, evaluateMergeConflict)
-            run(.upstreamMissing, evaluateUpstreamMissing)
-            run(.unavailable, evaluateUnavailable)
-            run(.staleRepository, evaluateStaleRepository)
-            run(.scanFailure, evaluateScanFailure)
-            run(.creepingChanges, evaluateCreepingChanges)
-            run(.staleActivity, evaluateStaleActivity)
-            run(.healthTrend, evaluateHealthTrend)
+            run(.dirtyWorkspace, dirtyWorkspace)
+            run(.unpushedCommits, unpushedCommits)
+            run(.behindRemote, behindRemote)
+            run(.mergeConflict, mergeConflict)
+            run(.upstreamMissing, upstreamMissing)
+            run(.unavailable, unavailable)
+            run(.staleRepository, staleRepository)
+            run(.scanFailure, scanFailure)
+            run(.creepingChanges, creepingChanges)
+            run(.staleActivity, staleActivity)
+            run(.healthTrend, healthTrend)
         }
 
         for workspace in context.workspaces {
             let aggregation = context.workspaceAggregations[workspace.id]
-            func run(_ source: PendingItemSource, _ rule: WorkspaceRuleEvaluator) {
-                evaluateWorkspaceRule(source: source, workspace: workspace, aggregation: aggregation,
-                                      previousByID: previousByID, context: context, state: &state, rule: rule)
+            let workspaceDegraded = evaluateWorkspaceDegraded(workspace, aggregation, context)
+            let workspaceConflicts = evaluateWorkspaceConflicts(workspace, aggregation, context)
+            let firingCount = (workspaceDegraded == nil ? 0 : 1) + (workspaceConflicts == nil ? 0 : 1)
+
+            func run(_ source: PendingItemSource, _ candidate: PendingItem?) {
+                processRule(candidate: candidate,
+                            scope: .workspace(source, workspace.id),
+                            isSuperseded: candidate == nil ? firingCount > 0 : firingCount > 1,
+                            isRepositoryRule: false,
+                            previousByID: previousByID, previousByScope: previousByScope,
+                            context: context, state: &state)
             }
 
-            run(.workspaceDegraded, evaluateWorkspaceDegraded)
-            run(.workspaceConflicts, evaluateWorkspaceConflicts)
+            run(.workspaceDegraded, workspaceDegraded)
+            run(.workspaceConflicts, workspaceConflicts)
         }
 
         // Post-processing: carry forward firstDetectedAt from previous items
@@ -145,10 +245,21 @@ enum PendingItemEvaluator {
 
         for i in state.items.indices {
             let currentItem = state.items[i]
+            // Only a source that took the repository over resolves the previous
+            // source; a source that still produced its own candidate was
+            // handled by its rule and must not be reported as recovered.
+            guard currentItem.status != .resolved else { continue }
             let matchingPrev = resolvablePreviousByRepository[currentItem.repositoryID] ?? []
 
             for prev in matchingPrev {
-                guard prev.source != currentItem.source else { continue }
+                // Skip a source that still produced a candidate (its rule handled
+                // it), one the absent-candidate branch already resolved or kept,
+                // and one already replaced by another new source for this
+                // repository.
+                guard prev.source != currentItem.source,
+                      !state.firingScopes.contains(RuleScopeKey(prev)),
+                      !state.absentScopes.contains(RuleScopeKey(prev)),
+                      state.supersededScopes.insert(RuleScopeKey(prev)).inserted else { continue }
                 // Record a transition from the old source to the new one.
                 // The old item is not added to state.items — the new item
                 // replaces it with the preserved firstDetectedAt.
@@ -209,19 +320,6 @@ enum PendingItemEvaluator {
 
     // MARK: - Rule evaluation helpers
 
-    private typealias RuleEvaluator = (
-        _ repo: RepositorySnapshot,
-        _ health: RepositoryHealthAssessment?,
-        _ cached: CachedHealth?,
-        _ context: PendingItemEvaluationContext
-    ) -> PendingItem?
-
-    private typealias WorkspaceRuleEvaluator = (
-        _ workspace: Workspace,
-        _ aggregation: WorkspaceAggregation?,
-        _ context: PendingItemEvaluationContext
-    ) -> PendingItem?
-
     /// Mutable output shared by rule dispatch and post-processing. The repository
     /// position index intentionally excludes workspace appends, which are not deduplicated.
     private struct EvaluationState {
@@ -229,79 +327,92 @@ enum PendingItemEvaluator {
         var firstItemIndexByID: [String: Int] = [:]
         var transitions: [PendingItemTransition] = []
         var notifications: [(PendingItem, PendingItemTransition, String)] = []
+        /// Scopes whose rule produced a candidate this evaluation. A stored item
+        /// for one of them is a live condition, not a recovered one.
+        var firingScopes: Set<RuleScopeKey> = []
+        /// Scopes the absent-candidate branch already emitted (a resolution or a
+        /// carried-forward resolved item), so duplicate repository occurrences
+        /// and the cross-rule pass cannot archive the same scope twice.
+        var absentScopes: Set<RuleScopeKey> = []
+        /// Scopes the cross-rule pass already resolved, so one replaced source is
+        /// reported once even when several new sources appear for the repository.
+        var supersededScopes: Set<RuleScopeKey> = []
+        /// Every id already emitted, so an absent-candidate resolution can never
+        /// append a second copy of an item a repository occurrence created.
+        var itemIDs: Set<String> = []
         var newCount = 0
         var resolvedCount = 0
         var escalatedCount = 0
         var deescalatedCount = 0
     }
 
-    private static func evaluateRule(
-        source: PendingItemSource,
-        repo: RepositorySnapshot,
-        health: RepositoryHealthAssessment?,
-        cached: CachedHealth?,
-        previousByID: [String: PendingItem],
-        context: PendingItemEvaluationContext,
-        state: inout EvaluationState,
-        rule: RuleEvaluator
-    ) {
-        processRule(candidate: rule(repo, health, cached, context),
-                    expectedID: PendingItem.identityID(source: source, repositoryID: repo.id,
-                                                      workspaceID: nil, title: ""),
-                    isRepositoryRule: true, previousByID: previousByID, context: context, state: &state)
-    }
-
-    private static func evaluateWorkspaceRule(
-        source: PendingItemSource,
-        workspace: Workspace,
-        aggregation: WorkspaceAggregation?,
-        previousByID: [String: PendingItem],
-        context: PendingItemEvaluationContext,
-        state: inout EvaluationState,
-        rule: WorkspaceRuleEvaluator
-    ) {
-        processRule(candidate: rule(workspace, aggregation, context),
-                    expectedID: PendingItem.identityID(source: source, repositoryID: nil,
-                                                      workspaceID: workspace.id, title: ""),
-                    isRepositoryRule: false, previousByID: previousByID, context: context, state: &state)
-    }
-
     // Repository rules also detect explanation changes and deduplicate candidates;
     // workspace rules retain every append and only compare severity/title.
     private static func processRule(
         candidate: PendingItem?,
-        expectedID: @autoclosure () -> String,
+        scope: RuleScopeKey,
+        isSuperseded: Bool,
         isRepositoryRule: Bool,
         previousByID: [String: PendingItem],
+        previousByScope: [RuleScopeKey: PendingItem],
         context: PendingItemEvaluationContext,
         state: inout EvaluationState
     ) {
         guard let candidate else {
-            // Condition not present — check if previous item needs resolution
-            if let previous = previousByID[expectedID()],
-               previous.status == .active || previous.status == .restored || previous.status == .acknowledged {
-                let transition = PendingItemStatusTransition.evaluate(
-                    current: previous,
-                    conditionStillActive: false,
-                    conditionChanged: false,
-                    newSeverity: nil,
-                    now: context.now
-                )
-                if transition.to == .resolved {
-                    state.resolvedCount += 1
+            // Condition not present for this rule and this repository/workspace.
+            guard let previous = previousByScope[scope] else { return }
+
+            // A resolved item stays in the archive: the completed list and the
+            // resolved → active reappearance path depend on it, and a later
+            // refresh must not report the same recovery again.
+            if previous.status == .resolved {
+                // One rule instance is handled once per evaluation: a duplicate
+                // repository occurrence must not archive a second copy.
+                guard state.absentScopes.insert(scope).inserted,
+                      state.itemIDs.insert(previous.id).inserted else { return }
+                // Register the position too, so a later dirty occurrence for the
+                // same repository replaces this entry instead of appending a
+                // second item with the same id.
+                if isRepositoryRule && state.firstItemIndexByID[previous.id] == nil {
+                    state.firstItemIndexByID[previous.id] = state.items.count
                 }
-                state.transitions.append(transition)
-                var resolved = previous
-                resolved.status = transition.to
-                resolved.lastConfirmedAt = DateFormatting.nowISO()
-                resolved.lastTransition = transition
-                if isRepositoryRule && state.firstItemIndexByID[resolved.id] == nil {
-                    state.firstItemIndexByID[resolved.id] = state.items.count
-                }
-                state.items.append(resolved)
+                state.items.append(previous)
+                return
             }
+
+            // A different source took the repository over: the cross-rule path
+            // replaces this item and preserves its firstDetectedAt, so resolving
+            // it here would duplicate the recovery.
+            guard !isSuperseded else { return }
+            guard previous.status == .active || previous.status == .restored || previous.status == .acknowledged else {
+                return
+            }
+            guard state.absentScopes.insert(scope).inserted,
+                  state.itemIDs.insert(previous.id).inserted else { return }
+
+            let transition = PendingItemStatusTransition.evaluate(
+                current: previous,
+                conditionStillActive: false,
+                conditionChanged: false,
+                newSeverity: nil,
+                now: context.now
+            )
+            if transition.to == .resolved {
+                state.resolvedCount += 1
+            }
+            state.transitions.append(transition)
+            var resolved = previous
+            resolved.status = transition.to
+            resolved.lastConfirmedAt = DateFormatting.nowISO()
+            resolved.lastTransition = transition
+            if isRepositoryRule && state.firstItemIndexByID[resolved.id] == nil {
+                state.firstItemIndexByID[resolved.id] = state.items.count
+            }
+            state.items.append(resolved)
             return
         }
+
+        state.firingScopes.insert(scope)
 
         // Generate or update
         let previous = previousByID[candidate.id]
@@ -359,13 +470,20 @@ enum PendingItemEvaluator {
 
         // Deduplicate: if an item with the same ID already exists, keep the one with more evidence
         if !isRepositoryRule {
+            state.itemIDs.insert(finalItem.id)
             state.items.append(finalItem)
         } else if let existingIdx = state.firstItemIndexByID[finalItem.id] {
             let existing = state.items[existingIdx]
-            if finalItem.evidence.count > existing.evidence.count {
+            // A live candidate supersedes a recovery a clean occurrence already
+            // carried forward for the same identity earlier in this evaluation;
+            // otherwise keep the entry with more evidence.
+            if existing.status == .resolved && finalItem.status != .resolved {
+                state.items[existingIdx] = finalItem
+            } else if finalItem.evidence.count > existing.evidence.count {
                 state.items[existingIdx] = finalItem
             }
         } else {
+            state.itemIDs.insert(finalItem.id)
             state.firstItemIndexByID[finalItem.id] = state.items.count
             state.items.append(finalItem)
         }

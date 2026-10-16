@@ -280,26 +280,41 @@ final class PendingItemStore: @unchecked Sendable {
     func replaceAll(with items: [PendingItem]) -> Result<PendingItemArchive, PendingItemStoreError> {
         mutateArchive { archive in
             // Preserve dismissed IDs and user-set statuses for matching items.
-            let existingByID = Dictionary(uniqueKeysWithValues: archive.items.map { ($0.id, $0) })
+            // A legacy archive could repeat an id; keep the first so the lookup
+            // cannot trap.
+            var existingByID: [String: PendingItem] = [:]
+            existingByID.reserveCapacity(archive.items.count)
+            for existing in archive.items where existingByID[existing.id] == nil {
+                existingByID[existing.id] = existing
+            }
 
             var merged: [PendingItem] = []
             for item in items {
                 if let existing = existingByID[item.id] {
                     let preservedStatus: PendingItemStatus
-                    switch existing.status {
-                    case .acknowledged, .muted, .permanentlyIgnored:
-                        preservedStatus = existing.status
-                    case .snoozed:
-                        if let until = existing.snoozedUntil.flatMap(DateFormatting.date(from:)),
-                           until <= Date() {
-                            preservedStatus = .restored
-                        } else {
-                            preservedStatus = .snoozed
+                    if item.status == .resolved && existing.status != .muted && existing.status != .permanentlyIgnored {
+                        // The evaluator observed the condition disappear. Auto-
+                        // recovery supersedes a stored acknowledgement or snooze,
+                        // otherwise the completed list and the resolved → active
+                        // reappearance path would never see the resolution. Mute
+                        // and permanent ignore are suppression and still win.
+                        preservedStatus = .resolved
+                    } else {
+                        switch existing.status {
+                        case .acknowledged, .muted, .permanentlyIgnored:
+                            preservedStatus = existing.status
+                        case .snoozed:
+                            if let until = existing.snoozedUntil.flatMap(DateFormatting.date(from:)),
+                               until <= Date() {
+                                preservedStatus = .restored
+                            } else {
+                                preservedStatus = .snoozed
+                            }
+                        case .restored:
+                            preservedStatus = item.status
+                        case .active, .resolved:
+                            preservedStatus = item.status
                         }
-                    case .restored:
-                        preservedStatus = item.status
-                    case .active, .resolved:
-                        preservedStatus = item.status
                     }
 
                     var mergedItem = item
