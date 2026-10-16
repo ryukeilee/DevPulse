@@ -77,25 +77,39 @@ struct PendingItemStaleLifecycleTests {
         #expect(result.notifications[0].item.firstDetectedAt != previous.firstDetectedAt)
     }
 
-    @Test func crossRuleHistoryUsesArchiveAndPreservesTraversalOrder() throws {
+    /// When one owner has several replaceable history records, the carried
+    /// timestamp is the owner's original (earliest) detection, and neither it
+    /// nor the transition order depends on how those records are ordered.
+    @Test func crossRuleHistoryCarriesEarliestDetectionRegardlessOfArchiveOrder() throws {
         let repo = repositorySnapshot(id: "target", name: "target", status: .changed, changedFileCount: 1)
         let history = [PendingItemSource.unpushedCommits, .behindRemote, .mergeConflict].enumerated().map {
             PendingItem(id: "history-\($0.offset)", source: $0.element, severity: .high,
                         repositoryID: repo.id, title: "old", firstDetectedAt: "2026-01-0\($0.offset + 1)T00:00:00Z")
         }
-        let result = PendingItemEvaluator.evaluate(
-            context: PendingItemEvaluationContext(repositories: [repo], previousItems: [
-                PendingItem(source: .unavailable, severity: .high, repositoryID: repo.id, title: "ignored")
-            ]), previousArchive: PendingItemArchive(items: history))
-        let crossRule = result.transitions.filter { $0.reason.hasPrefix("仓库状态从 ") }
-        #expect(crossRule.count == history.count)
-        #expect(result.resolvedItemCount == history.count)
-        let last = try #require(crossRule.last)
-        let previous = try #require(history.first { last.reason.contains($0.source.displayName) })
-        #expect(result.items[0].firstDetectedAt == previous.firstDetectedAt)
+        let earliest = try #require(history.first).firstDetectedAt
+
+        func evaluate(_ records: [PendingItem]) -> PendingItemEvaluationResult {
+            PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(repositories: [repo]),
+                                          previousArchive: PendingItemArchive(items: records))
+        }
+
+        let forward = evaluate(history)
+        let reversed = evaluate(Array(history.reversed()))
+
+        for result in [forward, reversed] {
+            let crossRule = result.transitions.filter { $0.reason.hasPrefix("仓库状态从 ") }
+            #expect(crossRule.count == history.count)
+            #expect(result.resolvedItemCount == history.count)
+            #expect(result.items.first { $0.source == .dirtyWorkspace }?.firstDetectedAt == earliest)
+        }
+        #expect(forward.transitions.map(\.reason) == reversed.transitions.map(\.reason))
+        #expect(forward.resolvedItemCount == reversed.resolvedItemCount)
     }
 
-    @Test func workspaceCrossRuleMatchingRetainsNilRepositorySemantics() throws {
+    /// Two workspaces both store a nil repository ID, so the cross-source bucket
+    /// must key on the workspace too: a workspace item never inherits another
+    /// workspace's history or resolves it.
+    @Test func workspaceCrossRuleMatchingNeverLeaksAcrossWorkspaces() throws {
         let repo = repositorySnapshot(id: "conflict", name: "conflict", status: .changed,
                                       changedFileCount: 1, conflictedFileCount: 1)
         let workspace = Workspace(id: "current", name: "current", repositoryIDs: [repo.id])
@@ -105,9 +119,257 @@ struct PendingItemStaleLifecycleTests {
         let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
             repositories: [], workspaceAggregations: aggregations, workspaces: [workspace], previousItems: [previous]))
         let conflict = try #require(result.items.first { $0.source == .workspaceConflicts })
-        #expect(conflict.firstDetectedAt == previous.firstDetectedAt)
+        #expect(conflict.workspaceID == "current")
+        #expect(conflict.firstDetectedAt != previous.firstDetectedAt)
+        #expect(result.resolvedItemCount == 0)
+        #expect(!result.transitions.contains { $0.reason.contains("other-workspace") })
+    }
+
+    /// The owner key must still allow the intended within-workspace cross-source
+    /// carry-forward, so the fix does not disable the feature.
+    @Test func workspaceCrossRuleMatchingCarriesWithinTheSameWorkspace() throws {
+        let repo = repositorySnapshot(id: "conflict", name: "conflict", status: .changed,
+                                      changedFileCount: 1, conflictedFileCount: 1)
+        let workspace = Workspace(id: "current", name: "current", repositoryIDs: [repo.id])
+        let aggregations = WorkspaceAggregationEngine.aggregateAll(workspaces: [workspace], allRepositories: [repo])
+        // A stored source the evaluator no longer emits, so the only reason the
+        // new conflict item can inherit is the same-owner cross-source pass.
+        let previous = PendingItem(id: "old-workspace", source: .workspaceAggregation, severity: .medium,
+                                   workspaceID: "current", title: "old", firstDetectedAt: "2026-01-01T00:00:00Z")
+        let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [], workspaceAggregations: aggregations, workspaces: [workspace], previousItems: [previous]))
+        let conflict = try #require(result.items.first { $0.source == .workspaceConflicts })
+        #expect(conflict.workspaceID == "current")
+        // The owner's earliest detection is carried onto the first live item for
+        // that workspace, and the replaced source is reported exactly once.
+        let inherited = result.items.filter {
+            $0.workspaceID == "current" && $0.firstDetectedAt == previous.firstDetectedAt
+        }
+        #expect(inherited.count == 1)
         #expect(result.resolvedItemCount == 1)
-        #expect(result.items.first { $0.source == .workspaceDegraded }?.firstDetectedAt != previous.firstDetectedAt)
+    }
+
+    /// A clean occurrence followed by a dirty occurrence of the same repository
+    /// id must not leave a phantom recovery: the returned item is active and the
+    /// diagnostics agree with it in either input order.
+    @Test func conflictingDuplicateOccurrencesCancelThePhantomRecovery() throws {
+        let dirty = repositorySnapshot(id: "duplicate", name: "dirty", status: .changed, changedFileCount: 1)
+        let seed = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(repositories: [dirty]))
+        let previous = try #require(seed.items.first { $0.source == .dirtyWorkspace })
+        let clean = repositorySnapshot(id: "duplicate", name: "clean", status: .clean)
+
+        for repositories in [[clean, dirty], [dirty, clean]] {
+            let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+                repositories: repositories, previousItems: [previous]))
+            let matching = result.items.filter { $0.id == previous.id }
+            #expect(matching.count == 1)
+            #expect(matching.first?.status == .active)
+            #expect(result.resolvedItemCount == 0)
+            #expect(!result.transitions.contains { $0.to == .resolved })
+        }
+    }
+
+    /// Both input order and the previous-item order must leave the inherited
+    /// history and the diagnostic counts unchanged.
+    @Test func inputAndHistoryOrderKeepCrossRuleHistoryStable() throws {
+        let dirty = repositorySnapshot(id: "repo-order", name: "order", status: .changed, changedFileCount: 1)
+        let seed = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+            repositories: [dirty,
+                           repositorySnapshot(id: "repo-other", name: "other", status: .clean)]))
+        let previous = seed.items.enumerated().map { index, item in
+            PendingItem(id: item.id, source: item.source, severity: item.severity,
+                        repositoryID: item.repositoryID, title: item.title,
+                        firstDetectedAt: "2025-01-0\(index + 1)T00:00:00Z", status: .active)
+        }
+        let history = [
+            PendingItem(id: "history-b", source: .unpushedCommits, severity: .high,
+                        repositoryID: dirty.id, title: "old", firstDetectedAt: "2026-02-02T00:00:00Z"),
+            PendingItem(id: "history-a", source: .behindRemote, severity: .high,
+                        repositoryID: dirty.id, title: "old", firstDetectedAt: "2026-01-01T00:00:00Z")
+        ]
+
+        func evaluate(_ repositories: [RepositorySnapshot], _ records: [PendingItem]) -> PendingItemEvaluationResult {
+            PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+                repositories: repositories, previousItems: previous + records))
+        }
+
+        let baseline = evaluate([dirty], history)
+        #expect(evaluate([dirty], Array(history.reversed())).transitions.map(\.reason) == baseline.transitions.map(\.reason))
+        #expect(evaluate([dirty], Array(history.reversed())).resolvedItemCount == baseline.resolvedItemCount)
+
+        let reversedRepositories = evaluate([repositorySnapshot(id: "repo-other", name: "other", status: .clean), dirty],
+                                            history)
+        #expect(reversedRepositories.resolvedItemCount == baseline.resolvedItemCount)
+        #expect(reversedRepositories.transitions.map(\.reason).sorted() == baseline.transitions.map(\.reason).sorted())
+        let summarize = { (result: PendingItemEvaluationResult) in
+            result.items.map { "\($0.id)|\($0.status.rawValue)|\($0.firstDetectedAt)" }.sorted()
+        }
+        #expect(summarize(reversedRepositories) == summarize(baseline))
+    }
+
+    /// A legacy archive can hold several records for one rule scope. The chosen
+    /// record, the resolved item, and its transition must not depend on the
+    /// order the archive stores them in.
+    @Test func conflictingScopeHistoryResolvesTheSameRecordInEitherOrder() throws {
+        let clean = repositorySnapshot(id: "repo-scope", name: "scope", status: .clean)
+        let older = PendingItem(id: "scope-old", source: .dirtyWorkspace, severity: .low,
+                                repositoryID: clean.id, title: "旧标题 A",
+                                firstDetectedAt: "2024-01-01T00:00:00Z",
+                                lastConfirmedAt: "2024-01-01T00:00:00Z", status: .active)
+        let newer = PendingItem(id: "scope-new", source: .dirtyWorkspace, severity: .low,
+                                repositoryID: clean.id, title: "旧标题 B",
+                                firstDetectedAt: "2025-01-01T00:00:00Z",
+                                lastConfirmedAt: "2025-01-01T00:00:00Z", status: .acknowledged)
+
+        for records in [[older, newer], [newer, older]] {
+            let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+                repositories: [clean], previousItems: records))
+            #expect(result.resolvedItemCount == 1)
+            let resolved = try #require(result.items.first)
+            #expect(resolved.id == "scope-new")
+            #expect(resolved.status == .resolved)
+            #expect(resolved.lastTransition?.from == .acknowledged)
+        }
+    }
+
+    /// Two records that share an id but conflict on status must resolve to the
+    /// same live record in either order instead of trapping the dictionary.
+    @Test func conflictingDuplicateIDHistoryUsesTheLiveRecordInEitherOrder() throws {
+        let dirty = repositorySnapshot(id: "repo-id", name: "id", status: .changed, changedFileCount: 1)
+        let seed = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(repositories: [dirty]))
+        let live = try #require(seed.items.first { $0.source == .dirtyWorkspace })
+        let resolvedRecord = PendingItem(id: live.id, source: live.source, severity: live.severity,
+                                         repositoryID: live.repositoryID, repositoryName: live.repositoryName,
+                                         title: live.title, explanation: live.explanation, evidence: live.evidence,
+                                         firstDetectedAt: "2024-01-01T00:00:00Z",
+                                         lastConfirmedAt: "2024-01-01T00:00:00Z", status: .resolved)
+        let activeRecord = PendingItem(id: live.id, source: live.source, severity: live.severity,
+                                       repositoryID: live.repositoryID, repositoryName: live.repositoryName,
+                                       title: live.title, explanation: live.explanation, evidence: live.evidence,
+                                       firstDetectedAt: "2025-01-01T00:00:00Z",
+                                       lastConfirmedAt: "2025-01-01T00:00:00Z", status: .active)
+
+        for records in [[resolvedRecord, activeRecord], [activeRecord, resolvedRecord]] {
+            let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+                repositories: [dirty], previousItems: records))
+            let matching = result.items.filter { $0.id == live.id }
+            #expect(matching.count == 1)
+            #expect(matching.first?.status == .active)
+            #expect(matching.first?.firstDetectedAt == "2025-01-01T00:00:00Z")
+        }
+    }
+
+    /// With duplicate ids and identical timestamps, the status order breaks the
+    /// tie so the choice is still independent of the archive order.
+    @Test func duplicateIDsWithIdenticalTimestampsUseAStableStatusOrder() throws {
+        let dirty = repositorySnapshot(id: "repo-tie", name: "tie", status: .changed, changedFileCount: 1)
+        let seed = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(repositories: [dirty]))
+        let live = try #require(seed.items.first { $0.source == .dirtyWorkspace })
+        func record(_ status: PendingItemStatus) -> PendingItem {
+            PendingItem(id: live.id, source: live.source, severity: live.severity,
+                        repositoryID: live.repositoryID, repositoryName: live.repositoryName,
+                        title: live.title, explanation: live.explanation, evidence: live.evidence,
+                        firstDetectedAt: "2025-01-01T00:00:00Z",
+                        lastConfirmedAt: "2025-01-01T00:00:00Z", status: status)
+        }
+        let active = record(.active)
+        let muted = record(.muted)
+        for records in [[active, muted], [muted, active]] {
+            let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+                repositories: [dirty], previousItems: records))
+            #expect(result.items.filter { $0.id == live.id }.count == 1)
+            #expect(result.items.first { $0.id == live.id }?.status == .active)
+        }
+    }
+
+    /// Duplicate occurrences that fire different rules must assign the replaced
+    /// history to a fixed source, not to whichever occurrence is scanned first.
+    @Test func duplicateOccurrencesAssignReplacedHistoryByCanonicalRuleOrder() throws {
+        let dirtyOnly = repositorySnapshot(id: "duplicate", name: "dirty", status: .changed, changedFileCount: 1)
+        let unpushedOnly = repositorySnapshot(id: "duplicate", name: "unpushed", status: .clean, aheadCount: 3)
+        let previous = PendingItem(id: "stale-dup", source: .unavailable, severity: .high,
+                                   repositoryID: "duplicate", title: "old",
+                                   firstDetectedAt: "2025-01-01T00:00:00Z", status: .active)
+
+        for repositories in [[dirtyOnly, unpushedOnly], [unpushedOnly, dirtyOnly]] {
+            let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+                repositories: repositories, previousItems: [previous]))
+            let dirty = try #require(result.items.first { $0.source == .dirtyWorkspace })
+            let unpushed = try #require(result.items.first { $0.source == .unpushedCommits })
+            #expect(dirty.firstDetectedAt == previous.firstDetectedAt)
+            #expect(unpushed.firstDetectedAt != previous.firstDetectedAt)
+            #expect(result.resolvedItemCount == 1)
+            #expect(result.transitions.filter { $0.reason.hasPrefix("仓库状态从 ") }.map(\.reason)
+                    == ["仓库状态从 仓库不可用 转为 脏工作区"])
+        }
+    }
+
+    /// A scope whose canonical record is suppressed must not be reported as a
+    /// recovery through an older duplicate record.
+    @Test func crossRuleIgnoresASupersededScopeRecord() throws {
+        let unpushed = repositorySnapshot(id: "repo-canon", name: "canon", status: .clean, aheadCount: 2)
+        let older = PendingItem(id: "canon-old", source: .dirtyWorkspace, severity: .low,
+                                repositoryID: unpushed.id, title: "旧标题",
+                                firstDetectedAt: "2024-01-01T00:00:00Z",
+                                lastConfirmedAt: "2024-01-01T00:00:00Z", status: .active)
+        let suppressed = PendingItem(id: "canon-new", source: .dirtyWorkspace, severity: .low,
+                                     repositoryID: unpushed.id, title: "新标题",
+                                     firstDetectedAt: "2025-01-01T00:00:00Z",
+                                     lastConfirmedAt: "2025-01-01T00:00:00Z", status: .permanentlyIgnored)
+
+        for records in [[older, suppressed], [suppressed, older]] {
+            let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+                repositories: [unpushed], previousItems: records))
+            #expect(result.resolvedItemCount == 0)
+            let item = try #require(result.items.first { $0.source == .unpushedCommits })
+            #expect(item.firstDetectedAt != older.firstDetectedAt)
+        }
+    }
+
+    /// Duplicate occurrences of one rule with conflicting severity must keep the
+    /// same candidate in either input order.
+    @Test func duplicateOccurrencesKeepTheSameCandidateInEitherOrder() throws {
+        let low = repositorySnapshot(id: "duplicate", name: "low", status: .clean, aheadCount: 1)
+        let high = repositorySnapshot(id: "duplicate", name: "high", status: .clean, aheadCount: 20)
+        let previous = PendingItem(id: "stale-dup", source: .unavailable, severity: .high,
+                                   repositoryID: "duplicate", title: "old",
+                                   firstDetectedAt: "2025-01-01T00:00:00Z", status: .active)
+
+        for repositories in [[low, high], [high, low]] {
+            let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+                repositories: repositories, previousItems: [previous]))
+            let item = try #require(result.items.first { $0.source == .unpushedCommits })
+            #expect(item.severity == .high)
+            #expect(item.repositoryName == "high")
+            #expect(result.transitions.filter { $0.reason.hasPrefix("仓库状态从 ") }.map(\.newSeverity)
+                    == [.high])
+        }
+    }
+
+    /// Two snoozed records that tie on every other field must still be chosen the
+    /// same way in either order; the snooze deadline breaks the tie.
+    @Test func conflictingSnoozeHistoryIsOrderIndependent() throws {
+        let dirty = repositorySnapshot(id: "repo-snooze", name: "snooze", status: .changed, changedFileCount: 1)
+        let now = try #require(DateFormatting.date(from: "2026-01-03T00:00:00Z"))
+        let seed = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(repositories: [dirty]))
+        let live = try #require(seed.items.first { $0.source == .dirtyWorkspace })
+        func record(_ until: String) -> PendingItem {
+            PendingItem(id: live.id, source: live.source, severity: live.severity,
+                        repositoryID: live.repositoryID, repositoryName: live.repositoryName,
+                        title: live.title, explanation: live.explanation, evidence: live.evidence,
+                        firstDetectedAt: "2025-01-01T00:00:00Z",
+                        lastConfirmedAt: "2025-01-01T00:00:00Z", status: .snoozed, snoozedUntil: until)
+        }
+        let early = record("2026-01-02T00:00:00Z")
+        let late = record("2026-01-04T00:00:00Z")
+
+        for records in [[early, late], [late, early]] {
+            let result = PendingItemEvaluator.evaluate(context: PendingItemEvaluationContext(
+                repositories: [dirty], previousItems: records, now: now))
+            #expect(result.items.count == 1)
+            #expect(result.items.first?.status == .restored)
+            #expect(result.items.first?.snoozedUntil == nil)
+        }
     }
 
     @Test func duplicateRepositoryIDsKeepFirstCandidateAndEveryNotification() throws {

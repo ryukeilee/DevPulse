@@ -94,6 +94,115 @@ private struct RuleScopeKey: Hashable {
     }
 }
 
+/// Identifies the repository or workspace that owns a previous item. The
+/// cross-source carry-forward matches only items from the same owner: a
+/// workspace item has a nil repository ID, so keying on the repository alone
+/// would let one workspace inherit another workspace's history.
+private struct OwnerKey: Hashable {
+    let repositoryID: String?
+    let workspaceID: String?
+
+    init(_ item: PendingItem) {
+        self.repositoryID = item.repositoryID
+        self.workspaceID = item.workspaceID
+    }
+}
+
+/// Canonical visit order for previous items that share an owner: earliest
+/// detection first, then stable identity. Never depends on dictionary or
+/// archive traversal order.
+private func isEarlierPrevious(_ lhs: PendingItem, _ rhs: PendingItem) -> Bool {
+    if lhs.firstDetectedAt != rhs.firstDetectedAt {
+        if let lhsDate = DateFormatting.date(from: lhs.firstDetectedAt),
+           let rhsDate = DateFormatting.date(from: rhs.firstDetectedAt),
+           lhsDate != rhsDate {
+            return lhsDate < rhsDate
+        }
+        return lhs.firstDetectedAt < rhs.firstDetectedAt
+    }
+    return lhs.id < rhs.id
+}
+
+/// The earlier of two ISO-8601 timestamps, compared by instant so a timezone
+/// offset cannot invert the order, then by string when a value is not parseable.
+private func earlierTimestamp(_ lhs: String, _ rhs: String) -> String {
+    if let lhsDate = DateFormatting.date(from: lhs),
+       let rhsDate = DateFormatting.date(from: rhs),
+       lhsDate != rhsDate {
+        return lhsDate < rhsDate ? lhs : rhs
+    }
+    return lhs <= rhs ? lhs : rhs
+}
+
+/// Whether `lhs` was confirmed more recently than `rhs`, by instant when both
+/// parse, otherwise by the raw value.
+private func isMoreRecentlyConfirmed(_ lhs: String, _ rhs: String) -> Bool {
+    if let lhsDate = DateFormatting.date(from: lhs),
+       let rhsDate = DateFormatting.date(from: rhs),
+       lhsDate != rhsDate {
+        return lhsDate > rhsDate
+    }
+    return lhs > rhs
+}
+
+/// Canonical choice between two previous items that describe the same rule
+/// scope or id: a live item outranks a frozen history entry, then the most
+/// recently confirmed record wins, then a fixed status/severity order, then the
+/// earliest detection. Every comparison is value-derived, so a legacy archive
+/// holding several records for one scope resolves to the same item regardless of
+/// the order they are stored in.
+private func isPreferredPrevious(_ lhs: PendingItem, _ rhs: PendingItem) -> Bool {
+    let lhsResolved = lhs.status == .resolved
+    let rhsResolved = rhs.status == .resolved
+    if lhsResolved != rhsResolved { return !lhsResolved }
+    if lhs.lastConfirmedAt != rhs.lastConfirmedAt {
+        return isMoreRecentlyConfirmed(lhs.lastConfirmedAt, rhs.lastConfirmedAt)
+    }
+    if lhs.status != rhs.status { return lhs.status.rawValue < rhs.status.rawValue }
+    if lhs.severity != rhs.severity { return lhs.severity > rhs.severity }
+    if lhs.snoozedUntil != rhs.snoozedUntil {
+        return (lhs.snoozedUntil ?? "") < (rhs.snoozedUntil ?? "")
+    }
+    return isEarlierPrevious(lhs, rhs)
+}
+
+/// Canonical choice between the candidates one rule produced for one identity
+/// when duplicate repository occurrences disagree: the more severe one wins,
+/// then the one with more evidence, then a stable textual order. Keeps the
+/// surviving item independent of the order the occurrences were scanned in.
+private func isPreferredCandidate(_ lhs: PendingItem, _ rhs: PendingItem) -> Bool {
+    if lhs.severity != rhs.severity { return lhs.severity > rhs.severity }
+    if lhs.evidence.count != rhs.evidence.count { return lhs.evidence.count > rhs.evidence.count }
+    if lhs.evidence != rhs.evidence { return lhs.evidence.lexicographicallyPrecedes(rhs.evidence) }
+    if lhs.explanation != rhs.explanation { return lhs.explanation < rhs.explanation }
+    if lhs.duration != rhs.duration { return lhs.duration > rhs.duration }
+    return false
+}
+
+private extension PendingItemSource {
+    /// The evaluator's fixed rule dispatch order. A replaced history item
+    /// inherits into the lowest-ranked live source of its owner, so duplicate
+    /// repository occurrences cannot change which item inherits.
+    var dispatchRank: Int {
+        switch self {
+        case .dirtyWorkspace: return 0
+        case .unpushedCommits: return 1
+        case .behindRemote: return 2
+        case .mergeConflict: return 3
+        case .upstreamMissing: return 4
+        case .unavailable: return 5
+        case .staleRepository: return 6
+        case .scanFailure: return 7
+        case .creepingChanges: return 8
+        case .staleActivity: return 9
+        case .healthTrend: return 10
+        case .workspaceDegraded: return 11
+        case .workspaceConflicts: return 12
+        case .workspaceAggregation: return 13
+        }
+    }
+}
+
 // MARK: - Pending item evaluator
 
 /// Background evaluator that generates pending items from scan results.
@@ -123,18 +232,27 @@ enum PendingItemEvaluator {
         let warnings: [String] = []
 
         let previousItems = previousArchive?.items ?? context.previousItems
-        // A legacy or hand-edited archive could repeat an id; keep the first so
-        // a duplicate cannot trap the dictionary.
+        // A legacy or hand-edited archive could repeat an id or a rule scope with
+        // conflicting state. Keep one canonical item for each: a live item
+        // outranks a frozen history entry, then the most recently confirmed
+        // record wins, so neither the choice nor the traversal depends on the
+        // order the archive happens to store them in.
         var previousByID: [String: PendingItem] = [:]
         previousByID.reserveCapacity(previousItems.count)
-        for item in previousItems where previousByID[item.id] == nil {
-            previousByID[item.id] = item
+        for item in previousItems {
+            guard let existing = previousByID[item.id] else {
+                previousByID[item.id] = item
+                continue
+            }
+            if isPreferredPrevious(item, existing) {
+                previousByID[item.id] = item
+            }
         }
         // Resolution and status carry-forward match a rule's own item by scope
         // rather than by the id derived from its title, so a condition that
         // disappeared is still found (and a retitled rule does not orphan its
         // history). A rule owns one item per scope; if a legacy archive holds
-        // several, the live one wins over a resolved one.
+        // several, the same canonical choice applies.
         var previousByScope: [RuleScopeKey: PendingItem] = [:]
         previousByScope.reserveCapacity(previousItems.count)
         for item in previousItems {
@@ -143,7 +261,7 @@ enum PendingItemEvaluator {
                 previousByScope[key] = item
                 continue
             }
-            if existing.status == .resolved && item.status != .resolved {
+            if isPreferredPrevious(item, existing) {
                 previousByScope[key] = item
             }
         }
@@ -229,83 +347,128 @@ enum PendingItemEvaluator {
         }
 
         // Post-processing: carry forward firstDetectedAt from previous items
-        // with a different source but the same repositoryID. This ensures
-        // transitions like unavailable → staleRepository preserve the
-        // original detection timestamp.
-        // Also resolve previous items whose source changed to a different
-        // category (e.g. .unavailable → .staleRepository).
-        // Preserve the values traversal order within each bucket, including nil
-        // repository IDs used by workspace items. Only these statuses can resolve.
-        let resolvablePreviousByRepository = state.items.isEmpty ? [:] : Dictionary(grouping: previousByID.values.filter {
-            switch $0.status {
-            case .active, .acknowledged, .restored: return true
-            case .snoozed, .muted, .resolved, .permanentlyIgnored: return false
+        // with a different source but the same repository or workspace. This
+        // ensures transitions like unavailable → staleRepository preserve the
+        // original detection timestamp, and it resolves previous items whose
+        // source changed to a different category.
+        //
+        // One canonical record per rule scope, so duplicate or conflicting scope
+        // history is neither double-counted nor reported through a suppressed
+        // record. Only these statuses can resolve.
+        var resolvablePreviousByOwner: [OwnerKey: [PendingItem]] = [:]
+        if !state.items.isEmpty {
+            resolvablePreviousByOwner.reserveCapacity(previousByScope.count)
+            for item in previousByScope.values {
+                switch item.status {
+                case .active, .acknowledged, .restored:
+                    resolvablePreviousByOwner[OwnerKey(item), default: []].append(item)
+                case .snoozed, .muted, .resolved, .permanentlyIgnored:
+                    break
+                }
             }
-        }, by: \.repositoryID)
+        }
 
-        for i in state.items.indices {
-            let currentItem = state.items[i]
-            // Only a source that took the repository over resolves the previous
-            // source; a source that still produced its own candidate was
-            // handled by its rule and must not be reported as recovered.
-            guard currentItem.status != .resolved else { continue }
-            let matchingPrev = resolvablePreviousByRepository[currentItem.repositoryID] ?? []
+        // Consume the replaced history per owner. A previous record goes to the
+        // lowest-ranked live source that can replace it, so a duplicate
+        // repository occurrence and the input order cannot change which item
+        // inherits the timestamp or which transition is reported.
+        var liveIndicesByOwner: [OwnerKey: [Int]] = [:]
+        var ownerOrder: [OwnerKey] = []
+        for index in state.items.indices {
+            let item = state.items[index]
+            guard item.status != .resolved else { continue }
+            let owner = OwnerKey(item)
+            guard resolvablePreviousByOwner[owner]?.isEmpty == false else { continue }
+            if liveIndicesByOwner[owner] == nil { ownerOrder.append(owner) }
+            liveIndicesByOwner[owner, default: []].append(index)
+        }
 
-            for prev in matchingPrev {
+        for owner in ownerOrder {
+            guard let liveIndices = liveIndicesByOwner[owner],
+                  let matchingPrev = resolvablePreviousByOwner[owner] else { continue }
+            let targets = liveIndices.sorted { lhs, rhs in
+                let lhsRank = state.items[lhs].source.dispatchRank
+                let rhsRank = state.items[rhs].source.dispatchRank
+                if lhsRank != rhsRank { return lhsRank < rhsRank }
+                return lhs < rhs
+            }
+            // Visit matching previous items in a canonical, value-derived order
+            // so the transitions stay stable across input and archive order.
+            for prev in matchingPrev.sorted(by: isEarlierPrevious) {
                 // Skip a source that still produced a candidate (its rule handled
                 // it), one the absent-candidate branch already resolved or kept,
-                // and one already replaced by another new source for this
-                // repository.
-                guard prev.source != currentItem.source,
-                      !state.firingScopes.contains(RuleScopeKey(prev)),
+                // and one already replaced by another live source for this owner.
+                guard !state.firingScopes.contains(RuleScopeKey(prev)),
                       !state.absentScopes.contains(RuleScopeKey(prev)),
-                      state.supersededScopes.insert(RuleScopeKey(prev)).inserted else { continue }
-                // Record a transition from the old source to the new one.
-                // The old item is not added to state.items — the new item
-                // replaces it with the preserved firstDetectedAt.
+                      !state.supersededScopes.contains(RuleScopeKey(prev)) else { continue }
+                guard let targetIndex = targets.first(where: { state.items[$0].source != prev.source }) else {
+                    continue
+                }
+                state.supersededScopes.insert(RuleScopeKey(prev))
+                let target = state.items[targetIndex]
+                // Record a transition from the old source to the new one. The old
+                // item is not added to state.items — the new item replaces it with
+                // the preserved firstDetectedAt.
                 let transition = PendingItemTransition(
                     from: prev.status,
                     to: .resolved,
                     severityChanged: true,
                     previousSeverity: prev.severity,
-                    newSeverity: currentItem.severity,
-                    reason: "仓库状态从 \(prev.source.displayName) 转为 \(currentItem.source.displayName)"
+                    newSeverity: target.severity,
+                    reason: "仓库状态从 \(prev.source.displayName) 转为 \(target.source.displayName)"
                 )
                 state.transitions.append(transition)
                 state.resolvedCount += 1
 
-                // Carry forward firstDetectedAt from the previous item
-                if prev.firstDetectedAt != currentItem.firstDetectedAt {
-                    state.items[i] = PendingItem(
-                        id: currentItem.id,
-                        source: currentItem.source,
-                        severity: currentItem.severity,
-                        repositoryID: currentItem.repositoryID,
-                        repositoryName: currentItem.repositoryName,
-                        workspaceID: currentItem.workspaceID,
-                        workspaceName: currentItem.workspaceName,
-                        title: currentItem.title,
-                        explanation: currentItem.explanation,
-                        evidence: currentItem.evidence,
-                        firstDetectedAt: prev.firstDetectedAt,
-                        lastConfirmedAt: currentItem.lastConfirmedAt,
-                        status: currentItem.status,
-                        snoozedUntil: currentItem.snoozedUntil,
-                        duration: currentItem.duration,
-                        lastTransition: currentItem.lastTransition
+                // Carry forward the owner's original detection timestamp. The
+                // earliest across the replaced sources keeps the result
+                // independent of the order those sources are stored in.
+                let inherited = earlierTimestamp(target.firstDetectedAt, prev.firstDetectedAt)
+                if inherited != target.firstDetectedAt {
+                    state.items[targetIndex] = PendingItem(
+                        id: target.id,
+                        source: target.source,
+                        severity: target.severity,
+                        repositoryID: target.repositoryID,
+                        repositoryName: target.repositoryName,
+                        workspaceID: target.workspaceID,
+                        workspaceName: target.workspaceName,
+                        title: target.title,
+                        explanation: target.explanation,
+                        evidence: target.evidence,
+                        firstDetectedAt: inherited,
+                        lastConfirmedAt: target.lastConfirmedAt,
+                        status: target.status,
+                        snoozedUntil: target.snoozedUntil,
+                        duration: target.duration,
+                        lastTransition: target.lastTransition
                     )
                 }
             }
         }
 
-        // Sort by severity descending then lastConfirmedAt descending
-        state.items.sort { $0.severity > $1.severity || ($0.severity == $1.severity && $0.lastConfirmedAt > $1.lastConfirmedAt) }
+        // Sort by severity descending, then lastConfirmedAt descending, then id,
+        // so items that tie on the business keys keep a stable order.
+        state.items.sort {
+            if $0.severity != $1.severity { return $0.severity > $1.severity }
+            if $0.lastConfirmedAt != $1.lastConfirmedAt {
+                return isMoreRecentlyConfirmed($0.lastConfirmedAt, $1.lastConfirmedAt)
+            }
+            return $0.id < $1.id
+        }
+
+        // Resolutions cancelled later in the evaluation never reach the caller.
+        let transitions = state.cancelledTransitionIndices.isEmpty
+            ? state.transitions
+            : state.transitions.enumerated()
+                .filter { !state.cancelledTransitionIndices.contains($0.offset) }
+                .map(\.element)
 
         let duration = Date().timeIntervalSince(start) * 1000
 
         return PendingItemEvaluationResult(
             items: state.items,
-            transitions: state.transitions,
+            transitions: transitions,
             notifications: state.notifications,
             repositoryIdsExamined: context.repositories.count,
             workspaceIdsExamined: context.workspaces.count,
@@ -340,6 +503,13 @@ enum PendingItemEvaluator {
         /// Every id already emitted, so an absent-candidate resolution can never
         /// append a second copy of an item a repository occurrence created.
         var itemIDs: Set<String> = []
+        /// Transition index appended when this evaluation resolved a scope,
+        /// keyed by the resolved item's id. A later live occurrence can revive
+        /// the item; the stale recovery is then cancelled.
+        var resolutionTransitionIndexByID: [String: Int] = [:]
+        /// Indices removed from the returned transitions. Kept out-of-band so the
+        /// append-only indices stay valid while the evaluation runs.
+        var cancelledTransitionIndices: Set<Int> = []
         var newCount = 0
         var resolvedCount = 0
         var escalatedCount = 0
@@ -399,6 +569,7 @@ enum PendingItemEvaluator {
             )
             if transition.to == .resolved {
                 state.resolvedCount += 1
+                state.resolutionTransitionIndexByID[previous.id] = state.transitions.count
             }
             state.transitions.append(transition)
             var resolved = previous
@@ -476,10 +647,18 @@ enum PendingItemEvaluator {
             let existing = state.items[existingIdx]
             // A live candidate supersedes a recovery a clean occurrence already
             // carried forward for the same identity earlier in this evaluation;
-            // otherwise keep the entry with more evidence.
+            // otherwise keep the canonical candidate so duplicate occurrences of
+            // one rule do not make the result depend on scan order.
             if existing.status == .resolved && finalItem.status != .resolved {
                 state.items[existingIdx] = finalItem
-            } else if finalItem.evidence.count > existing.evidence.count {
+                // A live occurrence revived an item this evaluation already
+                // resolved; drop the stale recovery so the transitions and the
+                // resolved count match the item that is actually returned.
+                if let index = state.resolutionTransitionIndexByID.removeValue(forKey: finalItem.id) {
+                    state.cancelledTransitionIndices.insert(index)
+                    state.resolvedCount -= 1
+                }
+            } else if isPreferredCandidate(finalItem, existing) {
                 state.items[existingIdx] = finalItem
             }
         } else {
