@@ -123,7 +123,6 @@ public actor BenchmarkRunner {
         let memBefore = memoryUsageMB()
         let cpuBefore = readCPULoad()
         let diskBefore = readDiskWriteBlocks()
-        let gitBefore = countGitSubprocesses()
 
         var firstResultTime: Double = -1
         var completeTime: Double = -1

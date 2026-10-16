@@ -65,7 +65,7 @@ final class BaselineManager: @unchecked Sendable {
     /// Remove the baseline configuration for a repository.
     func clearBaseline(for repositoryPath: String) {
         let id = RepositoryIdentity.id(for: repositoryPath)
-        lock.withLock { $0.removeValue(forKey: id) }
+        lock.withLock { _ = $0.removeValue(forKey: id) }
         logger.debug("Cleared baseline for \(repositoryPath)")
     }
 
@@ -98,7 +98,7 @@ final class BaselineManager: @unchecked Sendable {
         )
 
         if !branchExists {
-            let now = ISO8601DateFormatter().string(from: Date())
+            let now = DateFormatting.isoString(from: Date())
             let degradedState = BaselineState(
                 baselineBranch: baselineBranch,
                 baselineCommitID: entry.commitID,
@@ -124,7 +124,7 @@ final class BaselineManager: @unchecked Sendable {
         if let oldCommitID = entry.commitID, let currentCommitID,
            oldCommitID != currentCommitID, !currentCommitID.isEmpty {
             // Branch was rewritten (force push, rebase)
-            let now = ISO8601DateFormatter().string(from: Date())
+            let now = DateFormatting.isoString(from: Date())
             let degradedState = BaselineState(
                 baselineBranch: baselineBranch,
                 baselineCommitID: currentCommitID,
@@ -148,7 +148,7 @@ final class BaselineManager: @unchecked Sendable {
         // Baseline is healthy — check if recovering from degradation
         let oldState = entry.state
         if oldState.isDegraded {
-            let now = ISO8601DateFormatter().string(from: Date())
+            let now = DateFormatting.isoString(from: Date())
             let healthyState = BaselineState(
                 baselineBranch: baselineBranch,
                 baselineCommitID: currentCommitID ?? entry.commitID,

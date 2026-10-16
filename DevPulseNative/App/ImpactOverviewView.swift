@@ -67,7 +67,6 @@ struct ImpactOverviewView: View {
         let blocked = readinessMap.values.filter { $0 == .blocked }.count
         let attention = readinessMap.values.filter { $0 == .attention }.count
         let ready = readinessMap.values.filter { $0 == .ready }.count
-        let unknown = readinessMap.values.filter { $0 == .unknown }.count
 
         return LazyVGrid(columns: [
             GridItem(.flexible()),

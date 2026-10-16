@@ -1741,7 +1741,8 @@ final class ScanScheduler: ObservableObject {
         if let deferredScanRefresh {
             // Use incoming source to preserve retry semantics: merging() may upcast
             // the source via rawValue comparison (e.g. .configuration over .timer),
-            // causing enqueueScanRequest to incorrectly set waitsForRepositoryRetries.
+            // which would change whether the merged request waits for in-flight
+            // repository retries.
             mergedRequest = DeferredScanRefresh(
                 forceRepositoryDiscovery: deferredScanRefresh.forceRepositoryDiscovery || forceRepositoryDiscovery,
                 source: source
@@ -1773,8 +1774,6 @@ final class ScanScheduler: ObservableObject {
         let shouldCancelRetries = !request.source.isAutomatic
             || request.source == .wake
             || request.source == .pathRecovery
-        let waitsForRepositoryRetries = !shouldCancelRetries
-            && (!repositoryRetryTasks.isEmpty || repositoryRetryDrainTask != nil)
         if shouldCancelRetries {
             cancelRepositoryRetries()
         }
@@ -2971,7 +2970,7 @@ final class ScanScheduler: ObservableObject {
         let repositories = snapshot.repositories
         let measurementObserver = self.measurementObserver
 
-        Task.detached(priority: .utility) { @Sendable [weak self] in
+        Task.detached(priority: .utility) { @Sendable in
             // Classification and read-merge-write share one locked archive load.
             let archiveSaveStartedAt = ProcessInfo.processInfo.systemUptime
             switch historyStore.recordSnapshotStates(repositories: repositories, recordedAt: recordedAt) {

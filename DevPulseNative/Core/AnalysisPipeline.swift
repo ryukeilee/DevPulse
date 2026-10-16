@@ -1,50 +1,11 @@
 import Foundation
 import OSLog
 
-// MARK: - Pipeline errors
-
-enum PipelineError: Error, LocalizedError {
-    case stageCancelled(AnalysisStage)
-    case stageTimeout(AnalysisStage)
-    case stageFailed(AnalysisStage, String)
-
-    var errorDescription: String? {
-        switch self {
-        case .stageCancelled(let stage): return "\(stage.displayName) 已取消"
-        case .stageTimeout(let stage): return "\(stage.displayName) 超时"
-        case .stageFailed(let stage, let error): return "\(stage.displayName) 失败: \(error)"
-        }
-    }
-}
-
-// MARK: - Analysis context
-
-/// Context passed through all pipeline stages.
-struct AnalysisContext: Sendable {
-    let repositoryID: String
-    let repositoryPath: String
-    let collectionInput: ChangeCollectionInput
-    let baselineState: BaselineState
-    let invalidationKey: InvalidationKey
-    let generation: UInt64
-    let config: AnalysisPipelineConfiguration
-}
-
 // MARK: - Pipeline configuration
 
 struct AnalysisPipelineConfiguration: Sendable {
-    var stageTimeouts: [AnalysisStage: TimeInterval] = [
-        .changeCollection: 30.0,
-        .manifestParsing: 15.0,
-        .dependencyModeling: 10.0,
-        .impactPropagation: 10.0,
-        .riskAssessment: 5.0,
-        .resultMerging: 5.0,
-        .snapshotPublishing: 5.0
-    ]
     var maxConcurrency: Int = 4
     var enableCaching: Bool = true
-    var enableSpeculativeImpact: Bool = false
 
     static let `default` = AnalysisPipelineConfiguration()
 }
@@ -79,8 +40,7 @@ struct StageTimingBuilder {
 ///
 /// Design:
 /// - Sequential stages: stages run in order, each consuming previous output.
-/// - Cancellation: cooperative cancellation via generation-based token.
-/// - Timeout: per-stage timeout that aborts the stage and proceeds.
+/// - Cancellation: cooperative cancellation, checked before each stage.
 /// - Cache: stage results can be cached and reused on re-runs.
 /// - Fault isolation: one stage failure produces a degraded result, not a crash.
 ///
@@ -149,9 +109,7 @@ actor AnalysisPipeline {
             }
         }
 
-        let isCancelled: @Sendable () -> Bool = { [generation = currentGen] in
-            Task.isCancelled
-        }
+        let isCancelled: @Sendable () -> Bool = { Task.isCancelled }
 
         // ── Stage 1: Change Collection ───────────────────────────
         var stage1Timing = StageTimingBuilder()
@@ -161,7 +119,6 @@ actor AnalysisPipeline {
         }
 
         let changes = await collectChanges(input: input, timing: &stage1Timing)
-        let stage1Diagnostics = stage1Timing.build(isCompleted: true)
 
         // ── Stage 2: Manifest Parsing + Dependency Modeling ──────
         var stage2Timing = StageTimingBuilder()
@@ -177,7 +134,6 @@ actor AnalysisPipeline {
             workspaceKind: input.workspaceKind
         )
         for _ in modules { stage2Timing.recordItem() }
-        let stage2Diagnostics = stage2Timing.build(isCompleted: true)
 
         // ── Stage 3: Impact Propagation ──────────────────────────
         var stage3Timing = StageTimingBuilder()
@@ -193,7 +149,6 @@ actor AnalysisPipeline {
             directlyChangedModules: directlyChangedIDs
         )
         for _ in impactedModules { stage3Timing.recordItem() }
-        let stage3Diagnostics = stage3Timing.build(isCompleted: true)
 
         // ── Stage 4: Risk Assessment ─────────────────────────────
         var stage4Timing = StageTimingBuilder()
@@ -211,7 +166,6 @@ actor AnalysisPipeline {
             isFromCache: false
         )
         stage4Timing.recordItem()
-        let stage4Diagnostics = stage4Timing.build(isCompleted: true)
 
         // ── Stage 5: Result Merging ──────────────────────────────
         var stage5Timing = StageTimingBuilder()
@@ -225,13 +179,13 @@ actor AnalysisPipeline {
         )
         let scope = FileCategoryClassifier.determineScope(categoryBreakdown: categoryBreakdown)
 
-        let id = "impact-\(repoID)-\(ISO8601DateFormatter().string(from: Date()))"
+        let id = "impact-\(repoID)-\(DateFormatting.isoString(from: Date()))"
         let resultSnapshot = ChangeImpactSnapshot(
             id: id,
             repositoryID: repoID,
             repositoryPath: input.repositoryPath,
             analysisVersion: ChangeImpactSchema.version,
-            analyzedAt: ISO8601DateFormatter().string(from: Date()),
+            analyzedAt: DateFormatting.isoString(from: Date()),
             baselineState: .none(),
             changes: changes,
             modules: impactedModules,
@@ -244,7 +198,6 @@ actor AnalysisPipeline {
             isFromCache: false
         )
         stage5Timing.recordItem()
-        let stage5Diagnostics = stage5Timing.build(isCompleted: true)
 
         // ── Stage 6: Snapshot Publishing ─────────────────────────
         var stage6Timing = StageTimingBuilder()

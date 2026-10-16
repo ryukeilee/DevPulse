@@ -383,7 +383,8 @@ final class BackupManager: @unchecked Sendable {
             config: config.retention
         )
         for backup in toDelete {
-            retentionPolicy.deleteBackup(backup)
+            // The policy logs its own failures; the Boolean is informational.
+            _ = retentionPolicy.deleteBackup(backup)
         }
 
         progress?(1.0)

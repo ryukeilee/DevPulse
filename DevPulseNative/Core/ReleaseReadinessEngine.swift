@@ -64,7 +64,7 @@ final class ReleaseReadinessEngine: @unchecked Sendable {
         isFromCache: Bool
     ) -> ReleaseReadiness {
         var signals: [ReadinessSignal] = []
-        let now = ISO8601DateFormatter().string(from: Date())
+        let now = DateFormatting.isoString(from: Date())
 
         // 1. Uncommitted changes
         if snapshot.changedFileCount > 0 {
@@ -286,7 +286,7 @@ final class ReleaseReadinessEngine: @unchecked Sendable {
         repositoryReadiness: [String: ReleaseReadiness],
         crossRepoSignals: [ReadinessSignal]
     ) -> ReleaseReadiness {
-        let now = ISO8601DateFormatter().string(from: Date())
+        let now = DateFormatting.isoString(from: Date())
         var allSignals: [ReadinessSignal] = crossRepoSignals
 
         for (_, readiness) in repositoryReadiness {

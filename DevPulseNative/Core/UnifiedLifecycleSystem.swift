@@ -1402,7 +1402,6 @@ enum InstallUpgradeVerifier {
         }
 
         let bundleID = plistValue(plistPath, "CFBundleIdentifier") ?? ""
-        let bundleVersion = plistValue(plistPath, "CFBundleShortVersionString") ?? ""
         let extPoint = plistValue(plistPath, "NSExtension:NSExtensionPointIdentifier") ?? ""
         let wkAppID = plistValue(plistPath, "NSExtension:NSExtensionAttributes:WKAppBundleIdentifier") ?? ""
 

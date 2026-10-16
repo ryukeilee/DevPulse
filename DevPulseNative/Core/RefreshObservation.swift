@@ -194,6 +194,9 @@ final class RefreshObservationStore: @unchecked Sendable {
         self.fileURL = url
     }
 
+    /// Failures are logged by `save`; callers that only record an observation
+    /// may ignore the returned result.
+    @discardableResult
     func append(_ observation: RefreshObservation) -> Result<Void, any Error> {
         queue.sync {
             var all = loadAllInternal()

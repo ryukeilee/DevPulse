@@ -173,7 +173,7 @@ final class AnalysisCache: @unchecked Sendable {
     /// Remove a specific entry from the cache.
     func remove(repositoryID: String) {
         lock.withLock {
-            entries.removeValue(forKey: repositoryID)
+            _ = entries.removeValue(forKey: repositoryID)
         }
     }
 

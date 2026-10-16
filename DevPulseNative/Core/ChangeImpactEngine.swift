@@ -81,7 +81,7 @@ actor ChangeImpactEngine {
         forceFull: Bool = false
     ) async -> AnalysisRunResult {
         let startTime = ProcessInfo.processInfo.systemUptime
-        let requestID = "analysis-\(ISO8601DateFormatter().string(from: Date()))"
+        let requestID = "analysis-\(DateFormatting.isoString(from: Date()))"
         var snapshotsByRepo: [String: ChangeImpactSnapshot] = [:]
         var errors: [String: String] = [:]
         var wasCancelled = false
@@ -176,7 +176,7 @@ actor ChangeImpactEngine {
 
         return AnalysisRunResult(
             requestID: requestID,
-            completedAt: ISO8601DateFormatter().string(from: Date()),
+            completedAt: DateFormatting.isoString(from: Date()),
             snapshots: snapshotsByRepo,
             workspaceAnalyses: [:],
             overallDiagnostics: diagnostics,
