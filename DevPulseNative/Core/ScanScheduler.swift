@@ -1865,6 +1865,10 @@ final class ScanScheduler: ObservableObject {
             // revision. Without this, every post-scan write would be rejected
             // by the cross-process guard (observed != actual).
             lastResult = lastResult.withStorageRevision(written.storageRevision)
+            lastCommittedStorageRevision = max(
+                lastCommittedStorageRevision,
+                written.storageRevision
+            )
             diagnostics.sharedDataWriteError = nil
             diagnostics.lastSharedWriteAt = Date()
             diagnostics.lastSnapshotStoreTrigger = "refresh-start"
@@ -1877,8 +1881,18 @@ final class ScanScheduler: ObservableObject {
                 lastWidgetReloadedAt = now
                 AppGroupStore.reloadWidgets()
             }
-        case .failure:
-            break
+        case .failure(let error):
+            // 刷新起点写入失败必须如实汇报，不能被静默吞掉：Widget 仍停留在
+            // 上一次快照，而诊断需要显示真实原因。本轮扫描继续执行。
+            diagnostics.sharedDataWriteError = error.localizedDescription
+            diagnostics.lastSnapshotStoreState = .failed
+            diagnostics.lastSnapshotStoreDetail =
+                "刷新开始时写入共享快照失败：\(error.localizedDescription)"
+            diagnostics.lastSnapshotStoreTrigger = "refresh-start"
+            recordEvent(
+                .sharedDataWriteFailed,
+                "Refresh-start shared snapshot write failed: \(error.localizedDescription)"
+            )
         }
 
         // The synchronous main-actor prelude a refresh start costs, including
@@ -1898,6 +1912,9 @@ final class ScanScheduler: ObservableObject {
         let capturedIgnoredPaths = ignoredRepositoryPaths
         let knownRepositoryPaths = lastDiscoveredRepositoryPaths
         let previousSnapshot = lastResult
+        // 载荷来源的重基代必须与来源快照在同一刻捕获：扫描穿过 await 期间，本实例
+        // 可能已因另一次写入的冲突把基线换成磁盘现状，那种结果不能再发布。
+        let capturedSourceRebaseEpoch = snapshotRebaseEpoch
         let capturedRootsSignature = lastRepositoryDiscoveryScanRootsSignature
         let capturedDiscoveryAt = lastRepositoryDiscoveryAt
         let execution = scanExecution
@@ -1940,9 +1957,30 @@ final class ScanScheduler: ObservableObject {
                 ) {
                 case .success(let written):
                     self.lastResult = self.applyPins(written)
+                    self.lastCommittedStorageRevision = max(
+                        self.lastCommittedStorageRevision,
+                        written.storageRevision
+                    )
+                    // 兜底写入成功时，上一次失败留下的错误必须清掉：否则诊断
+                    // 会一直停在 .failed 上，与磁盘现状矛盾。
+                    self.diagnostics.sharedDataWriteError = nil
+                    self.diagnostics.lastSnapshotStoreState = .verified
+                    self.diagnostics.lastSnapshotStoreDetail =
+                        "看门狗已清除残留的刷新标记并回写兜底快照：\(written.repositories.count) 个仓库。"
                     self.diagnostics.lastSnapshotStoreTrigger = "watchdog-timeout"
+                    let writtenAt = written.writtenAt
+                        .flatMap(DateFormatting.date(from:)) ?? Date()
+                    self.diagnostics.lastSharedWriteAt = writtenAt
+                    self.diagnostics.lastGeneratedAt = written.generatedAt
+                    self.diagnostics.lastWrittenAt = written.writtenAt
                     AppGroupStore.reloadWidgets()
                 case .failure(let err):
+                    // 兜底写入失败不能只记事件：必须让诊断与真相同步。
+                    self.diagnostics.sharedDataWriteError = err.localizedDescription
+                    self.diagnostics.lastSnapshotStoreState = .failed
+                    self.diagnostics.lastSnapshotStoreDetail =
+                        "看门狗回写兜底快照失败：\(err.localizedDescription)"
+                    self.diagnostics.lastSnapshotStoreTrigger = "watchdog-timeout"
                     self.recordEvent(.scanFailed, "Watchdog could not write fallback snapshot: \(err)")
                 }
                 self.completeCurrentScanAndDrain()
@@ -2089,6 +2127,15 @@ final class ScanScheduler: ObservableObject {
                             ) ? Date() : nil
                     }
 
+                    // 失败汇报保持不变，但本轮快照若早于一次冲突重基，就不再写出去。
+                    if self.discardSupersededRound(
+                        capturedSourceEpoch: capturedSourceRebaseEpoch,
+                        phase: .failure
+                    ) {
+                        recordResultHandling()
+                        self.completeCurrentScanAndDrain()
+                        return
+                    }
                     self.persistRepositoryTrustFailure(
                         failureMessage,
                         fallbackSnapshot: result.data
@@ -2097,6 +2144,17 @@ final class ScanScheduler: ObservableObject {
                         previous: previous,
                         current: self.lastResult
                     )
+                    recordResultHandling()
+                    self.completeCurrentScanAndDrain()
+                    return
+                }
+
+                // 来源快照已被一次冲突重基取代时，本轮结果一律不发布：保留重基后
+                // 的 `lastResult` 作为下一次刷新的推导基线。
+                if self.discardSupersededRound(
+                    capturedSourceEpoch: capturedSourceRebaseEpoch,
+                    phase: .idle
+                ) {
                     recordResultHandling()
                     self.completeCurrentScanAndDrain()
                     return
@@ -2226,10 +2284,10 @@ final class ScanScheduler: ObservableObject {
                         reason: "scan-nochanges",
                         canonicalizationScope: derivationScope
                     )
+                    // 本轮刷新确实在此结束，但共享快照只是“已排队写入”：
+                    // .verified/.failed 只能由真正的写入结果（handleSyncSnapshot*
+                    // 与 syncSharedSnapshot 设置的 trigger）给出。
                     self.diagnostics.lastRefreshCompletedAt = Date()
-                    self.diagnostics.lastSnapshotStoreTrigger = "scan-nochanges"
-                    self.diagnostics.lastSnapshotStoreState = .verified
-                    self.diagnostics.lastSnapshotStoreDetail = "仓库状态未变化，已刷新快照时间戳。"
                 }
                 recordResultHandling()
                 self.completeCurrentScanAndDrain()
@@ -2275,6 +2333,8 @@ final class ScanScheduler: ObservableObject {
 
         let execution = repositoryRetryExecution
         let generation = repositoryRetryGeneration
+        // 重试载荷同样跨过 await：来源的重基代必须在此刻捕获。
+        let capturedSourceRebaseEpoch = snapshotRebaseEpoch
         retryingRepositoryIDs.insert(repositoryID)
 
         // Automatic retries use utility priority to avoid competing with
@@ -2307,6 +2367,12 @@ final class ScanScheduler: ObservableObject {
                       }) else {
                     return
                 }
+
+                // 来源快照已被冲突重基取代时，本轮重试结果不发布；`defer` 照常收尾。
+                guard !self.discardSupersededRound(
+                    capturedSourceEpoch: capturedSourceRebaseEpoch,
+                    phase: .idle
+                ) else { return }
 
                 retriedRepository.isPinned = currentRepository.isPinned
                 let previousSnapshot = self.lastResult
@@ -2617,6 +2683,8 @@ final class ScanScheduler: ObservableObject {
         let currentScanRoots = scanRoots()
         let metricsCollector = ScanMetricsCollector()
         let execution = scanExecution
+        // 与 performScanNow 一致：重基代与来源快照一起捕获。
+        let capturedSourceRebaseEpoch = snapshotRebaseEpoch
         let result = await execution(ScanExecutionRequest(
             config: currentConfig,
             roots: currentScanRoots.roots,
@@ -2661,11 +2729,25 @@ final class ScanScheduler: ObservableObject {
             recordEvent(.scanFailed, "Self-check failed: \(failureMessage)")
             lastDiscoveredRepositoryPaths = result.discoveredRepositoryPaths
             lastRepositoryDiscoveryAt = nil
+            // 快照若已早于一次冲突重基，只跳过快照写入，失败汇报保持不变。
+            if discardSupersededRound(
+                capturedSourceEpoch: capturedSourceRebaseEpoch,
+                phase: .failure
+            ) {
+                return makeSelfCheckReport()
+            }
             persistRepositoryTrustFailure(
                 failureMessage,
                 fallbackSnapshot: result.data
             )
             cleanupRemovedRepositoryPins(previous: previousSnapshot, current: lastResult)
+            return makeSelfCheckReport()
+        }
+
+        if discardSupersededRound(
+            capturedSourceEpoch: capturedSourceRebaseEpoch,
+            phase: .idle
+        ) {
             return makeSelfCheckReport()
         }
 
@@ -3048,6 +3130,9 @@ final class ScanScheduler: ObservableObject {
             var restoredSnapshot = migratedPinnedSnapshot
             var sharedSnapshot = snapshot
             var startupWriteError: String?
+            // 启动阶段可能写两次（回写仓库范围、清除残留刷新标记），失败原因必须
+            // 指向真正失败的那一步，不能一律说成“更新共享仓库范围”。
+            var startupWriteFailureSteps: [String] = []
             // 写回携带读盘时观察到的 storageRevision，防止与双实例或
             // --self-check 并发时用旧数据覆盖新写入（跨进程 CAS 保护）。
             var observedStorageRevision = storedRead.snapshot.storageRevision
@@ -3068,12 +3153,17 @@ final class ScanScheduler: ObservableObject {
                     restoredSnapshot = verified
                     sharedSnapshot = verified
                     observedStorageRevision = verified.storageRevision
+                    lastCommittedStorageRevision = max(
+                        lastCommittedStorageRevision,
+                        verified.storageRevision
+                    )
                     requiresStartupScopeRefresh = false
                     if scopeChanged {
                         AppGroupStore.reloadWidgets()
                     }
                 case .failure(let error):
                     startupWriteError = error.localizedDescription
+                    startupWriteFailureSteps.append("写回共享仓库范围")
                 }
             }
 
@@ -3084,16 +3174,29 @@ final class ScanScheduler: ObservableObject {
             // a previous scan that was killed or never completed), clear it now
             // so the Widget doesn't remain stuck in "refreshing" state across
             // app restarts.
+            var clearedRefreshingDetail: String?
             if pinned.isRefreshing == true {
                 let cleared = pinned.withIsRefreshing(nil)
                 // Always clear isRefreshing in memory even if the disk write
                 // fails, so the next scan does not propagate a stale flag.
                 lastResult = cleared
                 switch AppGroupStore.write(cleared, observedStorageRevision: observedStorageRevision) {
-                case .success:
-                    diagnostics.lastSnapshotStoreDetail = "已清除先前残留的 isRefreshing 状态。"
-                case .failure:
-                    diagnostics.lastSnapshotStoreDetail = "已清除内存中的 isRefreshing 状态，但磁盘写入失败。"
+                case .success(let verified):
+                    // 采纳本次写入后的真实快照：磁盘 revision 已经加一，若内存仍
+                    // 停留在旧值，下一次刷新起点的 CAS 写入会因观察到旧版本被拒。
+                    lastResult = verified
+                    sharedSnapshot = verified
+                    observedStorageRevision = verified.storageRevision
+                    lastCommittedStorageRevision = max(
+                        lastCommittedStorageRevision,
+                        verified.storageRevision
+                    )
+                    clearedRefreshingDetail = "已清除先前残留的 isRefreshing 状态。"
+                case .failure(let error):
+                    startupWriteError = error.localizedDescription
+                    startupWriteFailureSteps.append("清除残留的 isRefreshing 标记")
+                    clearedRefreshingDetail =
+                        "已清除内存中的 isRefreshing 状态，但磁盘写入失败：\(error.localizedDescription)"
                 }
             }
 
@@ -3106,12 +3209,19 @@ final class ScanScheduler: ObservableObject {
             }
             diagnostics.lastSnapshotStoreTrigger = "startup"
             diagnostics.lastSnapshotStoreState = startupWriteError == nil ? .restored : .failed
-            diagnostics.lastSnapshotStoreDetail = startupWriteError
-                ?? StartupRestoreDetailBuilder.build(
-                    source: storedRead.source,
-                    persistenceState: storedRead.snapshot.persistenceState,
-                    repositoryCount: restoredSnapshot.repositories.count
-                )
+            let restoreDetail = StartupRestoreDetailBuilder.build(
+                source: storedRead.source,
+                persistenceState: storedRead.snapshot.persistenceState,
+                repositoryCount: restoredSnapshot.repositories.count
+            )
+            // 写入失败时以真实错误为准，并点名失败的步骤；成功时保留启动还原信息
+            // 和残留标记明细。
+            let failedStepDetail = startupWriteError.map { error in
+                "启动时\(startupWriteFailureSteps.joined(separator: "、"))失败：\(error)"
+            }
+            diagnostics.lastSnapshotStoreDetail = failedStepDetail
+                ?? clearedRefreshingDetail.map { "\($0) · \(restoreDetail)" }
+                ?? restoreDetail
             diagnostics.sharedDataSnapshot = sharedSnapshot
             diagnostics.snapshotDecodable = true
             let now = Date()
@@ -3129,7 +3239,9 @@ final class ScanScheduler: ObservableObject {
             }
             let retainedOnly = ScanSchedulerPolicy.allRepositoryDataUnavailable(pinned.repositories)
             if let startupWriteError {
-                sharedSnapshotSyncFailureMessage = "启动时未能更新共享仓库范围"
+                // 只描述真正失败的那一步：仅清除残留标记失败时，仓库范围其实已经落盘。
+                sharedSnapshotSyncFailureMessage =
+                    "启动时未能\(startupWriteFailureSteps.joined(separator: "、"))"
                 warnings = [sharedSnapshotSyncFailureMessage ?? "共享快照同步失败", startupWriteError]
             } else {
                 sharedSnapshotSyncFailureMessage = nil
@@ -3151,7 +3263,9 @@ final class ScanScheduler: ObservableObject {
                 refreshFailureMessage = nil
             }
             setWidgetReadableSnapshot(sharedSnapshot, readAt: now)
-            validateConsistency(expected: pinned, shared: sharedSnapshot, widget: diagnostics.widgetSnapshot, reason: "startup")
+            // 以本实例当前持有的快照（已清除残留标记并采纳写入后的版本）为
+            // 比对基准：否则残留标记被清除后，启动校验会误报“快照不一致”。
+            validateConsistency(expected: lastResult, shared: sharedSnapshot, widget: diagnostics.widgetSnapshot, reason: "startup")
         case .failure(.snapshotMissing):
             diagnostics.snapshotDecodable = false
             diagnostics.sharedDataSnapshot = nil
@@ -3180,9 +3294,68 @@ final class ScanScheduler: ObservableObject {
     /// any older write before reading the current storage revision.
     private var syncTaskGeneration: UInt64 = 0
     private var snapshotSyncTask: Task<Void, Never>?
+    /// 本实例已知自己写入成功的最高 `storageRevision`，即调度器自己的写入来源版本。
+    /// 它只用于跨进程 CAS 的“本实例已提交到哪里”判断，因此绝不能超过磁盘上的
+    /// 真实版本；任何成功写入都必须用 `max` 合入，不能直接覆盖。
+    private var lastCommittedStorageRevision: UInt64 = 0
+    /// 冲突重基代：本实例把基线换成磁盘现状（重基）时推进。
+    /// 排队中的写入若在重基之前就捕获了这一代，说明它的载荷来源版本早于重基后的
+    /// 基线，必须直接放弃——否则会用一个重基前就过期的基线把刚采纳的外部内容
+    /// 覆盖回去，重基本身也失去意义。
+    private var snapshotRebaseEpoch: UInt64 = 0
+    /// 已完成（含被丢弃或被取代）的最高同步代。与 `syncTaskGeneration` 一起回答
+    /// “还有没有排队中或正在执行的共享快照写入”。它只增不减。
+    private var completedSyncGeneration: UInt64 = 0
+
+    /// 是否还有排队中或正在执行的共享快照写入。只有同步任务真正走到退出点才会
+    /// 清除，因此它比采样诊断状态更能证明后台写入已经落地。
+    var hasPendingSnapshotSync: Bool { completedSyncGeneration < syncTaskGeneration }
 
     private func invalidatePendingSnapshotSync() {
         syncTaskGeneration &+= 1
+        // 作废即视为“没有待完成写入”：被作废的任务不会再写出任何东西，完成代
+        // 必须一起推进，否则 `hasPendingSnapshotSync` 会永远为真。
+        completedSyncGeneration = syncTaskGeneration
+    }
+
+    /// 登记一代同步任务的完成（只增不减）。每个退出路径都必须调用它。
+    private func markSnapshotSyncCompleted(_ generation: UInt64) {
+        completedSyncGeneration = max(completedSyncGeneration, generation)
+    }
+
+    /// 丢弃一个来源快照已被冲突重基取代的轮次结果。
+    ///
+    /// 重基代必须绑定在“来源快照被捕获的那一刻”，而不是“同步被调用的那一刻”：
+    /// 本轮的扫描结果跨过 await 之后，本实例可能已经在另一次写入的冲突里把基线
+    /// 换成了磁盘现状。此时再发布本轮结果，等于用一个重基前的旧快照覆盖刚采纳的
+    /// 外部内容，而 `lastCommittedStorageRevision` 还会为它背书，让 CAS 通过。
+    /// 因此这里直接丢弃整轮结果，下一次刷新会基于重基后的基线重新推导。
+    ///
+    /// 队列里那层“写入前比对重基代”的守卫与本判断互补：这里挡住“结果本身早于
+    /// 重基”，那里挡住“载荷入队之后才发生重基”。
+    ///
+    /// 调用方负责收尾（`completeCurrentScanAndDrain()`、`defer` 或直接返回）。
+    /// - Parameter phase: 丢弃后保留的刷新阶段（成功路径用 `.idle`，失败路径保持
+    ///   `.failure` 与已有的失败消息）。
+    /// - Returns: 是否真的丢弃了本轮结果。
+    @discardableResult
+    private func discardSupersededRound(
+        capturedSourceEpoch: UInt64,
+        phase: RefreshPhase
+    ) -> Bool {
+        guard snapshotRebaseEpoch != capturedSourceEpoch else { return false }
+        isScanning = false
+        currentProgress = nil
+        refreshPhase = phase
+        diagnostics.lastRefreshCompletedAt = Date()
+        diagnostics.lastSnapshotStoreState = .idle
+        diagnostics.lastSnapshotStoreDetail =
+            "本轮结果的来源快照已被一次冲突重基取代（基线已换成磁盘现状），本轮结果已丢弃；下一次刷新会基于磁盘现状重新推导。"
+        recordEvent(
+            .sharedDataWriteFailed,
+            "Round result discarded: its source snapshot was superseded by a conflict rebase"
+        )
+        return true
     }
 
     private func syncSharedSnapshot(
@@ -3216,6 +3389,8 @@ final class ScanScheduler: ObservableObject {
 
         syncTaskGeneration &+= 1
         let currentGeneration = syncTaskGeneration
+        // 代与重基代一起捕获：排队期间只要发生过一次重基，本载荷就作废。
+        let capturedRebaseEpoch = snapshotRebaseEpoch
         let previousWrite = snapshotSyncTask
         let measurementObserver = self.measurementObserver
 
@@ -3229,34 +3404,76 @@ final class ScanScheduler: ObservableObject {
             if let previousWrite {
                 await previousWrite.value
             }
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else {
+                // 被取消同样结束了一代同步，必须登记完成代，否则
+                // `hasPendingSnapshotSync` 会永远为真。
+                await MainActor.run { [weak self] in
+                    self?.markSnapshotSyncCompleted(currentGeneration)
+                }
+                return
+            }
 
             let shouldProceed = await MainActor.run { [weak self] in
                 guard let self else { return false }
-                return !self.terminating && self.syncTaskGeneration == currentGeneration
+                guard !self.terminating, self.syncTaskGeneration == currentGeneration else {
+                    // 本任务不会再写入任何东西，这里就是它的最后一个动作。
+                    self.markSnapshotSyncCompleted(currentGeneration)
+                    return false
+                }
+                return true
             }
             guard shouldProceed else { return }
 
-            // Read the revision after the previous scheduler write completes.
-            // This keeps the cross-process compare-and-swap guard meaningful
-            // without making a newer chained write fail on our own revision.
-            let observedStorageRevision: UInt64
-            let snapshotReadStartedAt = ProcessInfo.processInfo.systemUptime
-            switch AppGroupStore.read() {
-            case .success(let current):
-                observedStorageRevision = current.storageRevision
-            case .failure(.snapshotMissing):
-                observedStorageRevision = 0
-            case .failure:
-                observedStorageRevision = fallbackObservedRevision
+            // 与下面“是否仍是最新代”的判断共用同一次主 actor 跳转：同时取回本实例
+            // 自己已提交的最高版本与当前重基代。这里不读磁盘，也不再新增一次
+            // 主 actor 跳转。
+            let preWriteState = await MainActor.run {
+                [weak self] () -> (committedRevision: UInt64, rebaseEpoch: UInt64)? in
+                guard let self else { return nil }
+                guard !self.terminating, self.syncTaskGeneration == currentGeneration else {
+                    return nil
+                }
+                return (self.lastCommittedStorageRevision, self.snapshotRebaseEpoch)
             }
-            measurementObserver?.record(name: "snapshot_revision_read", duration: ProcessInfo.processInfo.systemUptime - snapshotReadStartedAt, calls: 1)
+            guard let preWriteState else {
+                // 与 shouldProceed 同一判定：本任务不会再写入任何东西。
+                await MainActor.run { [weak self] in
+                    self?.markSnapshotSyncCompleted(currentGeneration)
+                }
+                return
+            }
+            // 重基已经推进却仍要提交，等于用重基前过期的基线覆盖刚采纳的外部内容，
+            // 所以这里连写都不发起。
+            guard preWriteState.rebaseEpoch == capturedRebaseEpoch else {
+                // 载荷被丢弃也必须留下终态，否则诊断会一直停在“正在写入”。
+                // 代际已推进或正在终止时不发布终态：那个状态属于更新的一代。
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    let isCurrentGeneration = !self.terminating
+                        && self.syncTaskGeneration == currentGeneration
+                    self.markSnapshotSyncCompleted(currentGeneration)
+                    guard isCurrentGeneration else { return }
+                    self.diagnostics.lastSnapshotStoreState = .idle
+                    self.diagnostics.lastSnapshotStoreDetail =
+                        "本轮载荷的来源快照已被一次冲突重基取代，写入已丢弃；下一次刷新会基于磁盘现状重新推导。"
+                    self.recordEvent(
+                        .sharedDataWriteFailed,
+                        "Shared snapshot write dropped: payload predates a conflict rebase"
+                    )
+                }
+                return
+            }
 
-            let stillCurrent = await MainActor.run { [weak self] in
-                guard let self else { return false }
-                return !self.terminating && self.syncTaskGeneration == currentGeneration
-            }
-            guard stillCurrent else { return }
+            // CAS 比对的是“本轮载荷的来源版本”，而不是刚刚读到的磁盘版本：只要
+            // 磁盘版本不等于本实例的观察值（被外部推进，或被外部删除/还原而回退），
+            // 存储层的 `baselineRevision != observedRevision` 守卫就会拒绝旧载荷，
+            // 不再把旧快照写成新版本。本实例的链式写入不会因此误触发，因为
+            // `await previousWrite.value` 保证 `lastCommittedStorageRevision` 已是最新。
+            let observedStorageRevision = max(
+                snapshotToWrite.storageRevision,
+                fallbackObservedRevision,
+                preWriteState.committedRevision
+            )
 
             let snapshotWriteStartedAt = ProcessInfo.processInfo.systemUptime
             let writeResult = AppGroupStore.write(
@@ -3264,9 +3481,48 @@ final class ScanScheduler: ObservableObject {
                 observedStorageRevision: observedStorageRevision
             )
             measurementObserver?.record(name: "snapshot_commit_and_verify", duration: ProcessInfo.processInfo.systemUptime - snapshotWriteStartedAt, calls: 1)
+
+            // 冲突重基只走对账失败这一条路径：在这里（仍然不在主线程上）读一次
+            // 磁盘，把本实例的基线换成磁盘现状。成功与其他错误都不读，常规写入
+            // 的磁盘开销不变，任务内也不重试。
+            var rebasedSnapshot: AppGroupData?
+            if case .failure(.crossProcessWriteDetected(_, _)) = writeResult,
+               case .success(let onDisk) = AppGroupStore.read() {
+                rebasedSnapshot = onDisk
+            }
+
             await MainActor.run { [weak self] in
-                guard let self,
-                      !self.terminating,
+                guard let self else { return }
+                // 写入的最后一个动作就是这里：先登记完成代，再走成功/失败分支，
+                // 这样被取代的写入同样能清掉 `hasPendingSnapshotSync`。
+                self.markSnapshotSyncCompleted(currentGeneration)
+                if case .success(let readBack) = writeResult {
+                    // 先于“是否仍是最新代”判断记录提交版本：已被取代的写入同样推进了
+                    // 磁盘 revision，漏记会让后续写入用自己的旧值做 CAS 而被拒绝。
+                    self.lastCommittedStorageRevision = max(
+                        self.lastCommittedStorageRevision,
+                        readBack.storageRevision
+                    )
+                }
+                if let rebasedSnapshot {
+                    // 重基同样先于代际判断：即使本任务已被取代，也不能把基线留在
+                    // 旧版本上，否则它之后的每一次写入都会继续被拒。
+                    // 这里用赋值而不是 max：那个高水位正是必须丢弃的东西，继续取
+                    // max 会让本实例永远卡在同一个冲突上。
+                    self.lastResult = self.applyPins(rebasedSnapshot)
+                    self.lastCommittedStorageRevision = rebasedSnapshot.storageRevision
+                    self.snapshotRebaseEpoch &+= 1
+                    // 诊断必须与磁盘现状一致，不能继续显示被放弃的本轮版本。
+                    self.diagnostics.sharedDataSnapshot = rebasedSnapshot
+                    self.diagnostics.lastGeneratedAt = rebasedSnapshot.generatedAt
+                    self.diagnostics.lastWrittenAt = rebasedSnapshot.writtenAt
+                    self.diagnostics.sharedDataReadAt = Date()
+                    // 磁盘快照刚刚被成功读取并采纳：可解码性与读错误必须同步纠正，
+                    // 否则诊断会继续声称快照不可解码。
+                    self.diagnostics.snapshotDecodable = true
+                    self.diagnostics.sharedDataReadError = nil
+                }
+                guard !self.terminating,
                       self.syncTaskGeneration == currentGeneration else { return }
                 switch writeResult {
                 case .success(let readBack):
@@ -3297,6 +3553,10 @@ final class ScanScheduler: ObservableObject {
         sharedSnapshotSyncFailureMessage = nil
         syncStoreInspection()
         appGroupAvailable = AppGroupStore.isAvailable
+        lastCommittedStorageRevision = max(
+            lastCommittedStorageRevision,
+            readBack.storageRevision
+        )
         diagnostics.lastRefreshCompletedAt = now
         diagnostics.lastSharedWriteAt = readBack.writtenAt
             .flatMap(DateFormatting.date(from:)) ?? now
@@ -3351,24 +3611,45 @@ final class ScanScheduler: ObservableObject {
         syncStoreInspection()
         diagnostics.lastRefreshCompletedAt = Date()
         diagnostics.sharedDataWriteError = error.localizedDescription
-        diagnostics.snapshotDecodable = false
+        // 跨进程 CAS 拒绝只说明磁盘版本与观察值不一致，并没有证明快照本身
+        // 不可解码，因此这里不改写 snapshotDecodable。
+        if case .crossProcessWriteDetected(_, _) = error {
+            // 冲突不改变可解码性判断
+        } else {
+            diagnostics.snapshotDecodable = false
+        }
         diagnostics.validationIssues = [error.localizedDescription]
         diagnostics.lastSnapshotStoreState = .failed
-        diagnostics.lastSnapshotStoreDetail = error.localizedDescription
+        diagnostics.lastSnapshotStoreDetail = Self.snapshotStoreFailureDetail(for: error)
         diagnostics.lastWidgetReloadState = .idle
         diagnostics.lastWidgetReloadDetail = "共享快照写入失败，本次没有进入 Widget reload 判断。"
-        markSharedSnapshotSyncFailure(error.localizedDescription)
+        markSharedSnapshotSyncFailure(error)
         recordEvent(.sharedDataWriteFailed, "Shared snapshot write failed: \(error.localizedDescription)")
     }
 
-    private func markSharedSnapshotSyncFailure(_ reason: String) {
-        let message = "当前列表数据已保留，但 Widget 数据同步失败"
+    private static func snapshotStoreFailureDetail(for error: AppGroupStoreError) -> String {
+        if case .crossProcessWriteDetected(let observed, let actual) = error {
+            return "另一个实例改动了共享快照：磁盘版本 \(actual) 与本轮来源版本 \(observed) 不一致，本轮写入已放弃以保护磁盘数据。"
+        }
+        return error.localizedDescription
+    }
+
+    private func markSharedSnapshotSyncFailure(_ error: AppGroupStoreError) {
+        let message: String
+        switch error {
+        case .crossProcessWriteDetected:
+            // 跨进程 CAS 拒绝不是 Widget 侧故障：另一个实例改动了共享快照，
+            // 磁盘版本与本轮来源版本不一致，本轮写入被放弃以保护磁盘数据。
+            message = "另一个实例已改动共享快照，本轮写入已放弃并保留磁盘数据；当前列表数据已保留。"
+        default:
+            message = "当前列表数据已保留，但 Widget 数据同步失败"
+        }
         sharedSnapshotSyncFailureMessage = message
         if !warnings.contains(message) {
             warnings.append(message)
         }
-        if !warnings.contains(reason) {
-            warnings.append(reason)
+        if !warnings.contains(error.localizedDescription) {
+            warnings.append(error.localizedDescription)
         }
     }
 

@@ -4089,7 +4089,9 @@ enum AppGroupStoreError: LocalizedError, Equatable {
         case .verificationFailed(let reason):
             return "Shared snapshot verification failed: \(reason)"
         case .crossProcessWriteDetected(let observed, let actual):
-            return "Cross-process write conflict: observed revision \(observed), but current revision is \(actual)."
+            // 中立描述：磁盘版本与本轮观察值不一致（可能更新，也可能是外部删除/
+            // 恢复导致回退），两边都要点名。
+            return "Cross-process write conflict: on-disk revision \(actual) does not match the observed revision \(observed)."
         }
     }
 }

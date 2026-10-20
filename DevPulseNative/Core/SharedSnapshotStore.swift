@@ -83,8 +83,8 @@ final class SharedSnapshotStore: @unchecked Sendable {
 
     /// Commit a snapshot with an optional observed cross-process storage revision.
     /// When `observedStorageRevision` is provided, the commit fails with
-    /// `.crossProcessWriteDetected` if the on-disk revision has advanced past
-    /// the observed value, preventing stale data from overwriting a newer write
+    /// `.crossProcessWriteDetected` unless the on-disk revision is exactly the
+    /// observed value, preventing stale data from overwriting a newer write
     /// from another process.
     func commit(
         _ candidate: AppGroupData,
@@ -413,13 +413,19 @@ final class SharedSnapshotStore: @unchecked Sendable {
     ) throws -> AppGroupData {
         let baseline = try commitBaselineUnlocked()
 
-        // Cross-process generation guard: if the on-disk storageRevision has
-        // advanced past what the caller observed when they started working,
-        // reject the commit to prevent stale data from overwriting a newer
-        // write from another process.
+        // Cross-process generation guard: the observation is this payload's
+        // provenance, so the on-disk revision must still be exactly what the
+        // caller observed. Both directions are rejected: a newer baseline means
+        // the payload is stale, and a baseline that moved backwards means the
+        // snapshot was deleted or restored under us — neither may be overwritten.
+        //
+        // Explicit exception: when there is no readable baseline at all (both
+        // artifacts missing or unreadable), there is nothing to compare against,
+        // so `observedStorageRevision` cannot be checked and a verified
+        // candidate is allowed to establish a new snapshot.
         if let observedRevision = observedStorageRevision,
            let baselineRevision = baseline.snapshot?.storageRevision,
-           baselineRevision > observedRevision {
+           baselineRevision != observedRevision {
             throw AppGroupStoreError.crossProcessWriteDetected(
                 observed: observedRevision,
                 actual: baselineRevision
