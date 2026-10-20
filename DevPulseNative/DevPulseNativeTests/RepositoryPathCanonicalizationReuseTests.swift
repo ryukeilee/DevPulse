@@ -122,6 +122,37 @@ struct RepositoryPathCanonicalizationReuseTests {
         return inputs
     }
 
+    /// The scan-location helpers capture two values that are properties of the
+    /// running process: the resolved home directory and the expansion of the
+    /// constant built-in list. This locks the cached expansions to the
+    /// documented rule evaluated from that same home, so a future edit to the
+    /// expansion logic cannot silently leave the cached forms behind. It does
+    /// not (and cannot, without injecting candidates) prove that the captured
+    /// home still matches a fresh process lookup.
+    @Test func cachedScanLocationExpansionAgreesWithDocumentedRule() {
+        let home = ScanLocationProvider.resolvedUserHomeDirectory()
+        let liveExpansion = Set(ScanLocationProvider.builtInLocations.map { raw -> String in
+            if raw == "~" { return home }
+            if raw.hasPrefix("~/") { return home + String(raw.dropFirst(1)) }
+            return raw
+        })
+
+        #expect(ScanLocationProvider.builtInAbsoluteSet == liveExpansion)
+        #expect(Set(ScanLocationProvider.builtInAbsolute) == liveExpansion)
+        #expect(ScanLocationProvider.builtInAbsolute == ScanLocationProvider.builtInAbsolute.sorted())
+        for builtIn in liveExpansion {
+            #expect(ScanLocationProvider.isBuiltInPath(builtIn))
+        }
+        #expect(!ScanLocationProvider.isBuiltInPath("/tmp/devpulse-not-a-built-in-root"))
+
+        // A path that needs no expansion must pass through unchanged.
+        for path in ["", "/", "/tmp", "/tmp/with space/", "relative/path", "~tilde-without-slash"] {
+            #expect(ScanLocationProvider.expandTilde(path) == path)
+        }
+        #expect(ScanLocationProvider.expandTilde("~") == home)
+        #expect(ScanLocationProvider.expandTilde("~/Projects") == home + "/Projects")
+    }
+
     @Test func scopedAndUnscopedCanonicalizationAreByteIdentical() async throws {
         let scratch = scratchRoot("equivalence")
         defer { try? FileManager.default.removeItem(at: scratch) }

@@ -14,8 +14,13 @@ enum ScanLocationProvider {
     ]
 
     /// Expand a tilde-prefixed path to an absolute path.
+    ///
+    /// A path that needs no expansion must not pay for resolving the home
+    /// directory: callers such as `normalizePersistedPath` run this for every
+    /// discovered repository path on every refresh.
     static func expandTilde(_ path: String) -> String {
-        expandTilde(path, home: resolvedUserHomeDirectory())
+        guard path.hasPrefix("~") else { return path }
+        return expandTilde(path, home: resolvedUserHomeDirectory())
     }
 
     private static func expandTilde(_ path: String, home: String) -> String {
@@ -29,7 +34,17 @@ enum ScanLocationProvider {
     }
 
     /// Resolve the real user home directory, avoiding the sandbox container home.
+    ///
+    /// The answer comes from `passwd`, `HOME` and `NSHomeDirectory()`, which are
+    /// properties of the running process, so it is captured at first use instead
+    /// of being re-resolved on every path operation. Resolving one non-built-in
+    /// path used to look it up seven times, and a timer refresh canonicalizes
+    /// every discovered path at background QoS, where each lookup is measurable.
     static func resolvedUserHomeDirectory() -> String {
+        resolvedUserHomeDirectoryValue
+    }
+
+    private static let resolvedUserHomeDirectoryValue: String = {
         let candidates = [
             passwdHomeDirectory(),
             ProcessInfo.processInfo.environment["HOME"],
@@ -48,7 +63,7 @@ enum ScanLocationProvider {
         }
 
         return "/Users"
-    }
+    }()
 
     /// Normalize persisted scan paths from older sandboxed builds.
     static func normalizePersistedPath(_ path: String) -> String {
@@ -107,13 +122,13 @@ enum ScanLocationProvider {
     }
 
     /// Built-in locations expanded to absolute paths.
-    static var builtInAbsolute: [String] {
-        expandAll(builtInLocations)
-    }
+    ///
+    /// Both forms are derived from the constant `builtInLocations` list and the
+    /// process-constant home directory, so they are computed once instead of
+    /// rebuilt for each caller that needs the enabled-root defaults.
+    static let builtInAbsolute: [String] = expandAll(builtInLocations)
 
-    static var builtInAbsoluteSet: Set<String> {
-        Set(builtInAbsolute)
-    }
+    static let builtInAbsoluteSet: Set<String> = Set(builtInAbsolute)
 
     static func isBuiltInPath(_ path: String) -> Bool {
         let normalized = normalizePersistedPath(path)

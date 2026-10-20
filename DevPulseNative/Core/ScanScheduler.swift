@@ -1831,6 +1831,7 @@ final class ScanScheduler: ObservableObject {
 
     private func performScanNow(request: ScanRefreshCoordinator.Request) {
         guard !isScanning else { return }
+        let roundStartedAt = ProcessInfo.processInfo.systemUptime
         pendingRepositoryRefreshRequirements.removeAll()
 
         isScanning = true
@@ -1879,6 +1880,16 @@ final class ScanScheduler: ObservableObject {
         case .failure:
             break
         }
+
+        // The synchronous main-actor prelude a refresh start costs, including
+        // the shared-snapshot commit that publishes the refreshing banner.
+        // State capture and task creation follow on the main actor as well, so
+        // this span covers only the part before them.
+        measurementObserver?.record(
+            name: "scheduler_scan_start_main",
+            duration: ProcessInfo.processInfo.systemUptime - roundStartedAt,
+            calls: 1
+        )
 
         // Capture all values needed by the background task while on the
         // main actor so the detached task never touches isolated state.
@@ -1941,6 +1952,7 @@ final class ScanScheduler: ObservableObject {
         scanTask = Task.detached(priority: request.taskPriority) {
             defer { watchdogTask.cancel() }
             // ---- Everything below runs OFF the main actor ----
+            let taskStartedAt = ProcessInfo.processInfo.systemUptime
 
             // 1. Git availability check (synchronous file check, off-main).
             let gitAvailable = ProcessRunner.isGitAvailable()
@@ -1991,6 +2003,12 @@ final class ScanScheduler: ObservableObject {
                 metrics: metricsCollector,
                 progressHandler: progressHandler
             )
+            let engineCallStartedAt = ProcessInfo.processInfo.systemUptime
+            self.measurementObserver?.record(
+                name: "scheduler_scan_task_startup",
+                duration: engineCallStartedAt - taskStartedAt,
+                calls: 1
+            )
             let result = await execution(requestObj)
             let wasCancelled = Task.isCancelled
 
@@ -2000,6 +2018,23 @@ final class ScanScheduler: ObservableObject {
                 // If a newer scan generation already advanced, our result is
                 // stale — the newer scan owns `isScanning`.
                 guard self.scanGeneration == generation else { return }
+                let postScanStartedAt = ProcessInfo.processInfo.systemUptime
+                // Recorded only for a result this round owns, and before
+                // `completeCurrentScanAndDrain()` can synchronously start the
+                // queued successor — otherwise the next round's start-up would
+                // be charged to this round's tail.
+                func recordResultHandling() {
+                    self.measurementObserver?.record(
+                        name: "scheduler_post_scan_main",
+                        duration: ProcessInfo.processInfo.systemUptime - postScanStartedAt,
+                        calls: 1
+                    )
+                    self.measurementObserver?.record(
+                        name: "scheduler_round_total",
+                        duration: ProcessInfo.processInfo.systemUptime - roundStartedAt,
+                        calls: 1
+                    )
+                }
                 self.scanTask = nil
                 self.lastScanMetrics = metricsCollector.snapshot()
                 self.gitAvailable = true
@@ -2019,6 +2054,7 @@ final class ScanScheduler: ObservableObject {
                     // cross-process guard — that is safe because the new scan will
                     // produce its own final snapshot.
                     self.syncSharedSnapshot(from: self.lastResult, reason: "cancel")
+                    recordResultHandling()
                     self.completeCurrentScanAndDrain()
                     return
                 }
@@ -2061,6 +2097,7 @@ final class ScanScheduler: ObservableObject {
                         previous: previous,
                         current: self.lastResult
                     )
+                    recordResultHandling()
                     self.completeCurrentScanAndDrain()
                     return
                 }
@@ -2194,6 +2231,7 @@ final class ScanScheduler: ObservableObject {
                     self.diagnostics.lastSnapshotStoreState = .verified
                     self.diagnostics.lastSnapshotStoreDetail = "仓库状态未变化，已刷新快照时间戳。"
                 }
+                recordResultHandling()
                 self.completeCurrentScanAndDrain()
             }
         }
