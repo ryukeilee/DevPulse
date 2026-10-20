@@ -72,8 +72,13 @@ private struct GitRefreshBenchmark {
         let root = environment["BENCH_ROOT"]!
         let storage = environment["BENCH_STORAGE"]!
         let paths = try FileManager.default.contentsOfDirectory(atPath: root).sorted().map { root + "/" + $0 }
+        // BENCH_CONCURRENCY overrides the default concurrency of six. The app's
+        // own ScanConfig default is ten, which is above the core count of most
+        // Macs, so a benchmark that only exercises six under-reports the
+        // executor contention the production default can produce.
+        // BENCH_STAGES=1 prints each scenario's stage durations.
         let config = ScanConfig(enabledBuiltInPaths: [], customPaths: [], maxDepth: 0,
-                                changedPreviewLimit: 5, maxConcurrentGitOps: 6,
+                                changedPreviewLimit: 5, maxConcurrentGitOps: Int(ProcessInfo.processInfo.environment["BENCH_CONCURRENCY"] ?? "6") ?? 6,
                                 gitCommandTimeout: 5, scanTimeout: 120,
                                 slowReposkipSeconds: 0, activeRepoThreshold: 30)
         var samples: [String: Sample] = [:]
@@ -97,6 +102,12 @@ private struct GitRefreshBenchmark {
                   result.data.repositories.count == scenarioPaths.count,
                   result.data.repositories.allSatisfy({ $0.status != .error }) else {
                 fatalError("Incomplete refresh: \(scenario)")
+            }
+            if ProcessInfo.processInfo.environment["BENCH_STAGES"] == "1" {
+                let stages = result.stageDurations.sorted { $0.key.rawValue < $1.key.rawValue }
+                    .map { "\($0.key.rawValue)=\(String(format: "%.1f", $0.value * 1000))" }
+                    .joined(separator: " ")
+                print("STAGES scenario=\(scenario) \(stages)")
             }
             samples[scenario] = Sample(wall_ms: (ProcessInfo.processInfo.systemUptime - started) * 1000,
                                        cpu_ms: cpu() - cpuBefore, status_calls: probe.statusCalls,

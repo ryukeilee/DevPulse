@@ -1,0 +1,559 @@
+{
+  "description": "Paired end-to-end timer-refresh measurement (Debug configuration, the configuration scripts/install-and-self-check.sh installs). Baseline = HEAD da95f8a worktree, candidate = RefreshEngine blocking-Git offload. 6 pairs, alternating order, 200 repositories from /tmp repo list, isolated App Group container and defaults suite per sample.",
+  "command": "REAL_REPOSITORIES_FILE=<200 repository directories> PAIRS=6 OUTPUT_DIR=/tmp/devpulse-refresh-ab DERIVED_DATA_PATH=/tmp/devpulse-refresh-ab-dd ./scripts/measure-refresh-execution-ab.sh",
+  "environment": {
+    "repositories": 200,
+    "configuration": "Debug",
+    "harness": "DevPulseTests/EndToEndRefreshMeasurementTests/scheduledIncrementalRefresh()",
+    "workload": "real-repository-list"
+  },
+  "samples": [
+    {
+      "pair": 1,
+      "label": "baseline",
+      "scheduler_wall_ms": "2889.807",
+      "refresh_engine_ms": "1705.704",
+      "discovery_ms": "437.838",
+      "core_status_ms": "1255.736",
+      "core_status_git_runner_ms": "9532.715",
+      "core_status_snapshot_build_ms": "43.675",
+      "extended_info_ms": "1.940",
+      "merge_ms": "6.319",
+      "scheduler_apply_pins_ms": "27.637",
+      "snapshot_prepare_apply_pins_ms": "7.536",
+      "snapshot_revision_read_ms": "9.154",
+      "snapshot_commit_and_verify_ms": "24.606",
+      "refresh_cpu_user_ms": "2483.665",
+      "refresh_cpu_system_ms": "1443.007"
+    },
+    {
+      "pair": 1,
+      "label": "current",
+      "scheduler_wall_ms": "2034.886",
+      "refresh_engine_ms": "822.260",
+      "discovery_ms": "432.675",
+      "core_status_ms": "378.612",
+      "core_status_git_runner_ms": "3597.318",
+      "core_status_snapshot_build_ms": "47.029",
+      "extended_info_ms": "1.835",
+      "merge_ms": "5.344",
+      "scheduler_apply_pins_ms": "21.020",
+      "snapshot_prepare_apply_pins_ms": "7.645",
+      "snapshot_revision_read_ms": "9.140",
+      "snapshot_commit_and_verify_ms": "29.570",
+      "refresh_cpu_user_ms": "2584.738",
+      "refresh_cpu_system_ms": "1586.888"
+    },
+    {
+      "pair": 2,
+      "label": "baseline",
+      "scheduler_wall_ms": "2830.222",
+      "refresh_engine_ms": "1722.076",
+      "discovery_ms": "456.395",
+      "core_status_ms": "1252.503",
+      "core_status_git_runner_ms": "9630.595",
+      "core_status_snapshot_build_ms": "44.448",
+      "extended_info_ms": "1.962",
+      "merge_ms": "6.388",
+      "scheduler_apply_pins_ms": "26.274",
+      "snapshot_prepare_apply_pins_ms": "7.617",
+      "snapshot_revision_read_ms": "8.987",
+      "snapshot_commit_and_verify_ms": "28.070",
+      "refresh_cpu_user_ms": "2346.233",
+      "refresh_cpu_system_ms": "1365.600"
+    },
+    {
+      "pair": 2,
+      "label": "current",
+      "scheduler_wall_ms": "1998.981",
+      "refresh_engine_ms": "831.222",
+      "discovery_ms": "436.855",
+      "core_status_ms": "385.577",
+      "core_status_git_runner_ms": "3659.689",
+      "core_status_snapshot_build_ms": "54.007",
+      "extended_info_ms": "1.813",
+      "merge_ms": "3.166",
+      "scheduler_apply_pins_ms": "20.795",
+      "snapshot_prepare_apply_pins_ms": "7.656",
+      "snapshot_revision_read_ms": "9.102",
+      "snapshot_commit_and_verify_ms": "31.328",
+      "refresh_cpu_user_ms": "2554.543",
+      "refresh_cpu_system_ms": "1593.158"
+    },
+    {
+      "pair": 3,
+      "label": "baseline",
+      "scheduler_wall_ms": "2819.545",
+      "refresh_engine_ms": "1694.721",
+      "discovery_ms": "438.495",
+      "core_status_ms": "1243.949",
+      "core_status_git_runner_ms": "9553.361",
+      "core_status_snapshot_build_ms": "45.909",
+      "extended_info_ms": "2.002",
+      "merge_ms": "6.525",
+      "scheduler_apply_pins_ms": "27.171",
+      "snapshot_prepare_apply_pins_ms": "7.595",
+      "snapshot_revision_read_ms": "9.073",
+      "snapshot_commit_and_verify_ms": "29.742",
+      "refresh_cpu_user_ms": "2415.921",
+      "refresh_cpu_system_ms": "1416.140"
+    },
+    {
+      "pair": 3,
+      "label": "current",
+      "scheduler_wall_ms": "1922.955",
+      "refresh_engine_ms": "831.131",
+      "discovery_ms": "434.842",
+      "core_status_ms": "384.156",
+      "core_status_git_runner_ms": "3655.802",
+      "core_status_snapshot_build_ms": "48.510",
+      "extended_info_ms": "1.854",
+      "merge_ms": "6.354",
+      "scheduler_apply_pins_ms": "20.965",
+      "snapshot_prepare_apply_pins_ms": "7.657",
+      "snapshot_revision_read_ms": "9.087",
+      "snapshot_commit_and_verify_ms": "28.943",
+      "refresh_cpu_user_ms": "2545.434",
+      "refresh_cpu_system_ms": "1572.915"
+    },
+    {
+      "pair": 4,
+      "label": "baseline",
+      "scheduler_wall_ms": "2751.590",
+      "refresh_engine_ms": "1647.541",
+      "discovery_ms": "432.051",
+      "core_status_ms": "1203.067",
+      "core_status_git_runner_ms": "9169.520",
+      "core_status_snapshot_build_ms": "44.160",
+      "extended_info_ms": "1.979",
+      "merge_ms": "6.513",
+      "scheduler_apply_pins_ms": "26.286",
+      "snapshot_prepare_apply_pins_ms": "7.654",
+      "snapshot_revision_read_ms": "9.030",
+      "snapshot_commit_and_verify_ms": "26.125",
+      "refresh_cpu_user_ms": "2369.798",
+      "refresh_cpu_system_ms": "1373.291"
+    },
+    {
+      "pair": 4,
+      "label": "current",
+      "scheduler_wall_ms": "1943.532",
+      "refresh_engine_ms": "840.576",
+      "discovery_ms": "442.158",
+      "core_status_ms": "386.537",
+      "core_status_git_runner_ms": "3692.373",
+      "core_status_snapshot_build_ms": "47.227",
+      "extended_info_ms": "1.855",
+      "merge_ms": "6.263",
+      "scheduler_apply_pins_ms": "20.651",
+      "snapshot_prepare_apply_pins_ms": "7.657",
+      "snapshot_revision_read_ms": "8.962",
+      "snapshot_commit_and_verify_ms": "28.731",
+      "refresh_cpu_user_ms": "2563.913",
+      "refresh_cpu_system_ms": "1577.152"
+    },
+    {
+      "pair": 5,
+      "label": "baseline",
+      "scheduler_wall_ms": "2932.509",
+      "refresh_engine_ms": "1744.816",
+      "discovery_ms": "431.836",
+      "core_status_ms": "1301.351",
+      "core_status_git_runner_ms": "10045.420",
+      "core_status_snapshot_build_ms": "44.138",
+      "extended_info_ms": "1.942",
+      "merge_ms": "6.356",
+      "scheduler_apply_pins_ms": "25.547",
+      "snapshot_prepare_apply_pins_ms": "7.694",
+      "snapshot_revision_read_ms": "9.044",
+      "snapshot_commit_and_verify_ms": "29.702",
+      "refresh_cpu_user_ms": "2434.957",
+      "refresh_cpu_system_ms": "1416.472"
+    },
+    {
+      "pair": 5,
+      "label": "current",
+      "scheduler_wall_ms": "1938.236",
+      "refresh_engine_ms": "832.082",
+      "discovery_ms": "434.781",
+      "core_status_ms": "385.544",
+      "core_status_git_runner_ms": "3674.308",
+      "core_status_snapshot_build_ms": "49.036",
+      "extended_info_ms": "1.835",
+      "merge_ms": "6.475",
+      "scheduler_apply_pins_ms": "20.906",
+      "snapshot_prepare_apply_pins_ms": "7.671",
+      "snapshot_revision_read_ms": "9.021",
+      "snapshot_commit_and_verify_ms": "30.708",
+      "refresh_cpu_user_ms": "2558.522",
+      "refresh_cpu_system_ms": "1559.838"
+    },
+    {
+      "pair": 6,
+      "label": "baseline",
+      "scheduler_wall_ms": "2809.451",
+      "refresh_engine_ms": "1695.773",
+      "discovery_ms": "438.961",
+      "core_status_ms": "1244.942",
+      "core_status_git_runner_ms": "9666.717",
+      "core_status_snapshot_build_ms": "44.499",
+      "extended_info_ms": "1.854",
+      "merge_ms": "6.258",
+      "scheduler_apply_pins_ms": "24.625",
+      "snapshot_prepare_apply_pins_ms": "7.498",
+      "snapshot_revision_read_ms": "9.105",
+      "snapshot_commit_and_verify_ms": "29.564",
+      "refresh_cpu_user_ms": "2358.156",
+      "refresh_cpu_system_ms": "1372.192"
+    },
+    {
+      "pair": 6,
+      "label": "current",
+      "scheduler_wall_ms": "1917.283",
+      "refresh_engine_ms": "830.605",
+      "discovery_ms": "440.149",
+      "core_status_ms": "379.146",
+      "core_status_git_runner_ms": "3602.065",
+      "core_status_snapshot_build_ms": "43.822",
+      "extended_info_ms": "1.837",
+      "merge_ms": "6.187",
+      "scheduler_apply_pins_ms": "20.744",
+      "snapshot_prepare_apply_pins_ms": "7.633",
+      "snapshot_revision_read_ms": "8.943",
+      "snapshot_commit_and_verify_ms": "25.048",
+      "refresh_cpu_user_ms": "2512.345",
+      "refresh_cpu_system_ms": "1533.194"
+    }
+  ],
+  "summary": {
+    "scheduler_wall_ms": {
+      "baseline_median": 2824.8835,
+      "candidate_median": 1940.884,
+      "paired_median_delta": -873.5445,
+      "paired_mad": 32.674499999999966,
+      "faster_pairs": 6,
+      "pairs": 6
+    },
+    "refresh_engine_ms": {
+      "baseline_median": 1700.7385,
+      "candidate_median": 831.1765,
+      "paired_median_delta": -874.3059999999999,
+      "paired_mad": 13.632000000000005,
+      "faster_pairs": 6,
+      "pairs": 6
+    },
+    "discovery_ms": {
+      "baseline_median": 438.16650000000004,
+      "candidate_median": 435.8485,
+      "paired_median_delta": -1.232500000000016,
+      "paired_mad": 4.054000000000002,
+      "faster_pairs": 3,
+      "pairs": 6
+    },
+    "core_status_ms": {
+      "baseline_median": 1248.7224999999999,
+      "candidate_median": 384.85,
+      "paired_median_delta": -866.361,
+      "paired_mad": 8.665499999999952,
+      "faster_pairs": 6,
+      "pairs": 6
+    },
+    "core_status_git_runner_ms": {
+      "baseline_median": 9591.978,
+      "candidate_median": 3657.7455,
+      "paired_median_delta": -5953.1515,
+      "paired_mad": 83.54649999999947,
+      "faster_pairs": 6,
+      "pairs": 6
+    },
+    "core_status_snapshot_build_ms": {
+      "baseline_median": 44.304,
+      "candidate_median": 47.8685,
+      "paired_median_delta": 3.2105000000000032,
+      "paired_mad": 1.148500000000002,
+      "faster_pairs": 1,
+      "pairs": 6
+    },
+    "extended_info_ms": {
+      "baseline_median": 1.952,
+      "candidate_median": 1.8359999999999999,
+      "paired_median_delta": -0.11550000000000005,
+      "paired_mad": 0.021499999999999853,
+      "faster_pairs": 6,
+      "pairs": 6
+    },
+    "merge_ms": {
+      "baseline_median": 6.372,
+      "candidate_median": 6.225,
+      "paired_median_delta": -0.21050000000000013,
+      "paired_mad": 0.23450000000000015,
+      "faster_pairs": 5,
+      "pairs": 6
+    },
+    "scheduler_apply_pins_ms": {
+      "baseline_median": 26.28,
+      "candidate_median": 20.8505,
+      "paired_median_delta": -5.557,
+      "paired_mad": 0.7824999999999989,
+      "faster_pairs": 6,
+      "pairs": 6
+    },
+    "snapshot_prepare_apply_pins_ms": {
+      "baseline_median": 7.606,
+      "candidate_median": 7.656499999999999,
+      "paired_median_delta": 0.05049999999999999,
+      "paired_mad": 0.052999999999999936,
+      "faster_pairs": 1,
+      "pairs": 6
+    },
+    "snapshot_revision_read_ms": {
+      "baseline_median": 9.0585,
+      "candidate_median": 9.054,
+      "paired_median_delta": -0.018499999999999517,
+      "paired_mad": 0.04099999999999948,
+      "faster_pairs": 4,
+      "pairs": 6
+    },
+    "snapshot_commit_and_verify_ms": {
+      "baseline_median": 28.817,
+      "candidate_median": 29.256500000000003,
+      "paired_median_delta": 1.8059999999999992,
+      "paired_mad": 2.0284999999999993,
+      "faster_pairs": 2,
+      "pairs": 6
+    },
+    "refresh_cpu_user_ms": {
+      "baseline_median": 2392.8594999999996,
+      "candidate_median": 2556.5325000000003,
+      "paired_median_delta": 141.8510000000001,
+      "paired_mad": 29.532000000000153,
+      "faster_pairs": 0,
+      "pairs": 6
+    },
+    "refresh_cpu_system_ms": {
+      "baseline_median": 1394.7155,
+      "candidate_median": 1575.0335,
+      "paired_median_delta": 158.8884999999999,
+      "paired_mad": 15.264999999999986,
+      "faster_pairs": 0,
+      "pairs": 6
+    }
+  },
+  "result_signature": [
+    "85d3dabac04ca70a7cf01a0de4876880b2de9b136b39b7fc46ef14c1289b92a2"
+  ],
+  "optimized_engine_benchmark": {
+    "cold_refresh": {
+      "cpu_ms": {
+        "baseline_median": 411.604,
+        "candidate_median": 395.178,
+        "faster_pairs": 7,
+        "paired_mad": 3.3449999999999136,
+        "paired_median_delta": -17.698999999999955,
+        "two_sided_sign_p": 0.015625
+      },
+      "log_calls": {
+        "baseline_median": 100,
+        "candidate_median": 100,
+        "faster_pairs": 0,
+        "paired_mad": 0,
+        "paired_median_delta": 0,
+        "two_sided_sign_p": 1
+      },
+      "peak": {
+        "baseline_median": 8,
+        "candidate_median": 10,
+        "faster_pairs": 0,
+        "paired_mad": 0,
+        "paired_median_delta": 2,
+        "two_sided_sign_p": 0.015625
+      },
+      "status_calls": {
+        "baseline_median": 200,
+        "candidate_median": 200,
+        "faster_pairs": 0,
+        "paired_mad": 0,
+        "paired_median_delta": 0,
+        "two_sided_sign_p": 1
+      },
+      "wall_ms": {
+        "baseline_median": 628.8303332985379,
+        "candidate_median": 614.5470833289437,
+        "faster_pairs": 6,
+        "paired_mad": 6.490124971605837,
+        "paired_median_delta": -14.99433332355693,
+        "two_sided_sign_p": 0.125
+      }
+    },
+    "committed_incremental_refresh": {
+      "cpu_ms": {
+        "baseline_median": 145.56100000000004,
+        "candidate_median": 136.49400000000014,
+        "faster_pairs": 7,
+        "paired_mad": 1.1959999999999127,
+        "paired_median_delta": -9.058999999999969,
+        "two_sided_sign_p": 0.015625
+      },
+      "log_calls": {
+        "baseline_median": 0,
+        "candidate_median": 0,
+        "faster_pairs": 0,
+        "paired_mad": 0,
+        "paired_median_delta": 0,
+        "two_sided_sign_p": 1
+      },
+      "peak": {
+        "baseline_median": 8,
+        "candidate_median": 10,
+        "faster_pairs": 0,
+        "paired_mad": 0,
+        "paired_median_delta": 2,
+        "two_sided_sign_p": 0.015625
+      },
+      "status_calls": {
+        "baseline_median": 100,
+        "candidate_median": 100,
+        "faster_pairs": 0,
+        "paired_mad": 0,
+        "paired_median_delta": 0,
+        "two_sided_sign_p": 1
+      },
+      "wall_ms": {
+        "baseline_median": 227.8311249683611,
+        "candidate_median": 223.51974999764934,
+        "faster_pairs": 7,
+        "paired_mad": 1.035208406392485,
+        "paired_median_delta": -3.041125077288598,
+        "two_sided_sign_p": 0.015625
+      }
+    },
+    "concurrency_probe": {
+      "cpu_ms": {
+        "baseline_median": 156.892,
+        "candidate_median": 175.904,
+        "faster_pairs": 0,
+        "paired_mad": 1.725999999999999,
+        "paired_median_delta": 18.998999999999995,
+        "two_sided_sign_p": 0.015625
+      },
+      "log_calls": {
+        "baseline_median": 200,
+        "candidate_median": 200,
+        "faster_pairs": 0,
+        "paired_mad": 0,
+        "paired_median_delta": 0,
+        "two_sided_sign_p": 1
+      },
+      "peak": {
+        "baseline_median": 8,
+        "candidate_median": 10,
+        "faster_pairs": 0,
+        "paired_mad": 0,
+        "paired_median_delta": 2,
+        "two_sided_sign_p": 0.015625
+      },
+      "status_calls": {
+        "baseline_median": 200,
+        "candidate_median": 200,
+        "faster_pairs": 0,
+        "paired_mad": 0,
+        "paired_median_delta": 0,
+        "two_sided_sign_p": 1
+      },
+      "wall_ms": {
+        "baseline_median": 1490.6242083525285,
+        "candidate_median": 1212.0494166738354,
+        "faster_pairs": 7,
+        "paired_mad": 6.9802916259504855,
+        "paired_median_delta": -281.94566658930853,
+        "two_sided_sign_p": 0.015625
+      }
+    },
+    "incremental_refresh": {
+      "cpu_ms": {
+        "baseline_median": 319.337,
+        "candidate_median": 312.96000000000004,
+        "faster_pairs": 7,
+        "paired_mad": 3.1119999999999663,
+        "paired_median_delta": -8.278999999999996,
+        "two_sided_sign_p": 0.015625
+      },
+      "log_calls": {
+        "baseline_median": 0,
+        "candidate_median": 0,
+        "faster_pairs": 0,
+        "paired_mad": 0,
+        "paired_median_delta": 0,
+        "two_sided_sign_p": 1
+      },
+      "peak": {
+        "baseline_median": 8,
+        "candidate_median": 10,
+        "faster_pairs": 0,
+        "paired_mad": 0,
+        "paired_median_delta": 2,
+        "two_sided_sign_p": 0.015625
+      },
+      "status_calls": {
+        "baseline_median": 200,
+        "candidate_median": 200,
+        "faster_pairs": 0,
+        "paired_mad": 0,
+        "paired_median_delta": 0,
+        "two_sided_sign_p": 1
+      },
+      "wall_ms": {
+        "baseline_median": 436.0838750144467,
+        "candidate_median": 420.7620000233874,
+        "faster_pairs": 7,
+        "paired_mad": 6.086416658945382,
+        "paired_median_delta": -14.493166643660516,
+        "two_sided_sign_p": 0.015625
+      }
+    },
+    "incremental_scanner": {
+      "cpu_ms": {
+        "baseline_median": 520.2650000000001,
+        "candidate_median": 522.435,
+        "faster_pairs": 2,
+        "paired_mad": 1.1660000000001673,
+        "paired_median_delta": 2.1699999999998454,
+        "two_sided_sign_p": 0.453125
+      },
+      "log_calls": {
+        "baseline_median": 0,
+        "candidate_median": 0,
+        "faster_pairs": 0,
+        "paired_mad": 0,
+        "paired_median_delta": 0,
+        "two_sided_sign_p": 1
+      },
+      "peak": {
+        "baseline_median": 8,
+        "candidate_median": 8,
+        "faster_pairs": 0,
+        "paired_mad": 0,
+        "paired_median_delta": 0,
+        "two_sided_sign_p": 1
+      },
+      "status_calls": {
+        "baseline_median": 200,
+        "candidate_median": 200,
+        "faster_pairs": 0,
+        "paired_mad": 0,
+        "paired_median_delta": 0,
+        "two_sided_sign_p": 1
+      },
+      "wall_ms": {
+        "baseline_median": 570.4466666211374,
+        "candidate_median": 570.4727916745469,
+        "faster_pairs": 3,
+        "paired_mad": 3.5749583621509373,
+        "paired_median_delta": 0.02612505340948701,
+        "two_sided_sign_p": 1
+      }
+    }
+  },
+  "optimized_engine_benchmark_note": "scripts/benchmark-git-refresh.py --baseline-git HEAD --runs 7 --repos 200 with BENCH_CONCURRENCY=10 (the app's ScanConfig default). Stage split at -O, 200 repositories: coreStatus 353.2 ms, discovery 56.7 ms, merge 0.4 ms of a 411.8 ms incremental refresh.",
+  "notes": "CPU figures are RUSAGE_SELF + RUSAGE_CHILDREN increments over the measured refresh window, so they include the Git child processes. The candidate completes the same 200 git status calls; it does so with more overlap and less idle waiting, so window CPU rises while wall time falls. The optimized engine benchmark below measures RUSAGE_SELF only. refresh_result_signature covers repository name, branch, status, file counts and pin state, not the whole payload."
+}

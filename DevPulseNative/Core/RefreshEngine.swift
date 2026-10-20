@@ -613,9 +613,68 @@ extension RefreshEngine {
     }
 }
 
+// MARK: - Blocking Git execution
+
+/// A blocking Git command must not occupy a Swift cooperative-executor thread
+/// for the lifetime of the child process. `ProcessRunner` waits for the child
+/// with a bounded poll loop, so running it inline in a task group worker kept
+/// one cooperative thread busy per in-flight command; with the scan's
+/// concurrency default above the core count, the executor then had no free
+/// thread left to resume the engine's own actor work between commands.
+///
+/// Commands therefore run on a dedicated concurrent queue, and the task waits
+/// for the result through a continuation. Task cancellation is forwarded into
+/// the runner's cancellation closure, so a superseded refresh still stops its
+/// Git processes with the same bounded latency as before.
+private enum BlockingGitExecution {
+    static let queue = DispatchQueue(
+        label: "local.devpulse.app.RefreshEngine.git-execution",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
+}
+
+/// Cancellation state shared between a task and the blocking call it offloaded.
+private final class OffloadedCallCancellation: @unchecked Sendable {
+    private let lock = OSAllocatedUnfairLock(initialState: false)
+
+    var isCancelled: Bool {
+        lock.withLock { $0 }
+    }
+
+    func cancel() {
+        lock.withLock { $0 = true }
+    }
+}
+
 // MARK: - Stage 2: Core status with priority batching
 
 extension RefreshEngine {
+    /// Run one blocking Git command off the cooperative executor. Shared by
+    /// the core-status and extended-info stages.
+    private func runGitCommandOffExecutor(
+        _ arguments: [String],
+        workingDirectory: String,
+        timeout: TimeInterval,
+        outputLimit: Int,
+        isCancelled: @escaping @Sendable () -> Bool,
+        gitCommandRunner: @escaping GitCommandRunner
+    ) async -> ProcessRunResult {
+        let cancellation = OffloadedCallCancellation()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<ProcessRunResult, Never>) in
+                BlockingGitExecution.queue.async {
+                    let result = gitCommandRunner(arguments, workingDirectory, timeout, outputLimit) {
+                        cancellation.isCancelled || isCancelled()
+                    }
+                    continuation.resume(returning: result)
+                }
+            }
+        } onCancel: {
+            cancellation.cancel()
+        }
+    }
+
     private func readCoreStatusPriorityBatched(
         paths: [PrioritizedRepository],
         config: ScanConfig,
@@ -680,11 +739,13 @@ extension RefreshEngine {
                     let timeout = min(config.gitCommandTimeout, max(0.5, remaining))
 
                     let gitStartedAt = ProcessInfo.processInfo.systemUptime
-                    let result = gitCommandRunner(
+                    let result = await self.runGitCommandOffExecutor(
                         ["status", "--porcelain=v2", "--branch"],
-                        canonical, timeout,
-                        ProcessRunner.defaultOutputLimit,
-                        { self.isCancelled || Task.isCancelled || stale }
+                        workingDirectory: canonical,
+                        timeout: timeout,
+                        outputLimit: ProcessRunner.defaultOutputLimit,
+                        isCancelled: { self.isCancelled || stale },
+                        gitCommandRunner: gitCommandRunner
                     )
                     measurementObserver?.record(
                         name: "core_status_git_runner",
@@ -985,11 +1046,13 @@ extension RefreshEngine {
                     guard remaining > 0 else { return (origIdx, nil) }
                     let timeout = min(config.gitCommandTimeout, max(0.5, remaining))
 
-                    let logResult = countedGitCommandRunner(
+                    let logResult = await self.runGitCommandOffExecutor(
                         ["log", "-1", "--pretty=%H%x00%cI%x00%s"],
-                        snapshot.path, timeout,
-                        ProcessRunner.defaultOutputLimit,
-                        { self.isCancelled || Task.isCancelled || isStale }
+                        workingDirectory: snapshot.path,
+                        timeout: timeout,
+                        outputLimit: ProcessRunner.defaultOutputLimit,
+                        isCancelled: { self.isCancelled || isStale },
+                        gitCommandRunner: countedGitCommandRunner
                     )
 
                     guard !isStale else {

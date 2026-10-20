@@ -22,9 +22,14 @@ private final class MockGitCommandRunner: @unchecked Sendable {
     private var _calls: [Call] = []
     private var _activeCount = 0
     private var _peakActive = 0
+    private var _cancellationObservedCount = 0
 
     var calls: [Call] { lock.withLock { _calls } }
     var peakActive: Int { lock.withLock { _peakActive } }
+
+    /// Number of polling commands that stopped because the closure they were
+    /// given reported cancellation.
+    var cancellationObservedCount: Int { lock.withLock { _cancellationObservedCount } }
 
     var statusCallCount: Int {
         lock.withLock { _calls.filter { $0.arguments.first == "status" }.count }
@@ -84,6 +89,7 @@ private final class MockGitCommandRunner: @unchecked Sendable {
                     if isCancelled() {
                         mock.lock.lock()
                         mock._activeCount -= 1
+                        mock._cancellationObservedCount += 1
                         mock.lock.unlock()
                         return .cancelled
                     }
@@ -484,6 +490,57 @@ struct RefreshEngineIntegrationTests {
         #expect(result.data.repositories.count <= 4)
         // The first two repos (processed before polling blocks) should be present
         #expect(mock.statusCallCount >= 2)
+    }
+
+    /// Cancelling the task that drives a refresh — not the engine's own cancel
+    /// flag — must still reach an in-flight Git command. Commands now run off
+    /// the cooperative executor, so they cannot read `Task.isCancelled`
+    /// themselves; the engine forwards the task's cancellation into the
+    /// runner's cancellation closure. Without that forwarding the polling
+    /// command below would spin for its own 20 s limit instead of stopping.
+    @Test func taskCancellationStopsInFlightGitCommands() async throws {
+        let root = reposRoot("task-cancellation")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let repoURLs = try (0..<4).map { index in
+            let url = root.appendingPathComponent("repo-\(index)")
+            try createTempGitRepo(at: url)
+            return url
+        }
+
+        let mock = MockGitCommandRunner()
+        for url in repoURLs {
+            mock.setPollingPath(RepositoryIdentity.canonicalPath(url.path))
+        }
+
+        let engine = RefreshEngine()
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let executeTask = Task {
+            await engine.execute(
+                config: scanConfig(maxConcurrent: 2, commandTimeout: 5, scanTimeout: 60),
+                scanRoots: [root.path],
+                forceRepositoryDiscovery: true,
+                source: .manual,
+                gitCommandRunner: mock.runner()
+            )
+        }
+
+        var waited = 0
+        while mock.statusCallCount == 0, waited < 300 {
+            try await Task.sleep(for: .milliseconds(10))
+            waited += 1
+        }
+        #expect(mock.statusCallCount > 0, "the refresh must reach the status stage before cancelling")
+
+        executeTask.cancel()
+        _ = await executeTask.value
+        let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+
+        #expect(
+            mock.cancellationObservedCount > 0,
+            "an offloaded Git command must observe the task's cancellation"
+        )
+        #expect(elapsed < 10, "task cancellation must stop the refresh instead of waiting out the command limit")
     }
 
     /// Cancellation raised while `git log` tasks are in flight must keep every
