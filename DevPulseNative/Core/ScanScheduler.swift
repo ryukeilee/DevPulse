@@ -904,6 +904,9 @@ final class ScanScheduler: ObservableObject {
     /// Timeout in seconds for waiting on repository retry drain before
     /// proceeding with a new scan regardless.
     private static let repositoryRetryDrainTimeout: TimeInterval = 2.0
+    /// Entry count above which recording history also trims the archive. The trim is
+    /// part of the same save, so the round's returned archive view still matches disk.
+    private static let backgroundHistoryCompactionThreshold = 8000
     private let activityEventStore: ActivityEventStore?
     private let measurementObserver: RefreshMeasurementSink?
     let historyStore: RepositoryHistoryStore?
@@ -1034,9 +1037,14 @@ final class ScanScheduler: ObservableObject {
     /// confirmed subset instead of aggregating those workspaces again; without it
     /// (a time-based re-evaluation with no fresh scan) the aggregation is
     /// computed here.
+    ///
+    /// `historyEntriesRound` is the history recording for this same scan result.
+    /// Supplying it reuses the archive view that recording just wrote instead of
+    /// decoding that file again; without it the archive is read from disk here.
     func refreshPendingItems(
         skipHealthAssessments: Bool = false,
-        aggregationRound: Task<WorkspaceAggregationRound, Never>? = nil
+        aggregationRound: Task<WorkspaceAggregationRound, Never>? = nil,
+        historyEntriesRound: Task<Result<[String: [RepositoryHistoryEntry]], HistoryStoreError>, Never>? = nil
     ) {
         let repos = lastResult.repositories
         let confirmedWorkspaces = workspaces.filter { $0.autoSuggestConfirmed }
@@ -1053,7 +1061,22 @@ final class ScanScheduler: ObservableObject {
             var healthAssessments: [String: RepositoryHealthAssessment] = [:]
             var historyLoadErrors: [String] = []
             if !skipHealthAssessments, let historyStore {
-                switch historyStore.loadGrouped() {
+                // The recording round for this same snapshot already decoded the
+                // archive and returns the view it wrote; reuse it rather than
+                // decoding the identical file again. A missing or failed round
+                // falls back to reading the archive, as before.
+                let recordedEntries: Result<[String: [RepositoryHistoryEntry]], HistoryStoreError>?
+                if let historyEntriesRound {
+                    switch await historyEntriesRound.value {
+                    case .success(let entriesByRepository):
+                        recordedEntries = .success(entriesByRepository)
+                    case .failure:
+                        recordedEntries = nil
+                    }
+                } else {
+                    recordedEntries = nil
+                }
+                switch recordedEntries ?? historyStore.loadGrouped() {
                 case .success(let entriesByRepository):
                     for repo in repos {
                         let assessment = RepositoryHealthEngine.assess(
@@ -2201,9 +2224,13 @@ final class ScanScheduler: ObservableObject {
                 if hadChanges {
                     self.lastResult = recorded
                 }
-                // Record repository state history in background (skip when nothing changed)
+                // Record repository state history in background (skip when nothing changed).
+                // The round's own task is handed to the pending-item evaluation below so
+                // that evaluation reuses the archive view this round wrote instead of
+                // decoding the same history file a second time.
+                var historyEntriesRound: Task<Result<[String: [RepositoryHistoryEntry]], HistoryStoreError>, Never>?
                 if hadChanges {
-                    self.recordHistoryFromSnapshot(recorded)
+                    historyEntriesRound = self.recordHistoryFromSnapshot(recorded)
                 }
                 self.lastScanAt = completedAt
                 self.diagnostics.lastScanAt = self.lastScanAt
@@ -2234,7 +2261,10 @@ final class ScanScheduler: ObservableObject {
                     let aggregationRound = self.refreshWorkspaceAggregations()
                     self.refreshWorkspaceSuggestions()
                     // Refresh pending items (uses health assessments and workspace aggregations)
-                    self.refreshPendingItems(aggregationRound: aggregationRound)
+                    self.refreshPendingItems(
+                        aggregationRound: aggregationRound,
+                        historyEntriesRound: historyEntriesRound
+                    )
                 } else {
                     // Still refresh pending items for time-based rule evaluation (escalation, auto-recovery)
                     // but skip the expensive per-repo history loading since no state changed.
@@ -3084,29 +3114,34 @@ final class ScanScheduler: ObservableObject {
 
     /// Record repository state history points into the history store.
     /// Runs asynchronously on a utility queue to avoid blocking the main thread.
-    private func recordHistoryFromSnapshot(_ snapshot: AppGroupData) {
-        guard let historyStore else { return }
+    /// Returns the round's task, which yields the grouped archive view the recording
+    /// wrote so the same refresh can assess it without decoding the file again.
+    private func recordHistoryFromSnapshot(
+        _ snapshot: AppGroupData
+    ) -> Task<Result<[String: [RepositoryHistoryEntry]], HistoryStoreError>, Never>? {
+        guard let historyStore else { return nil }
         let recordedAt = snapshot.generatedAt
         let repositories = snapshot.repositories
         let measurementObserver = self.measurementObserver
+        let backgroundCompactionThreshold = Self.backgroundHistoryCompactionThreshold
 
-        Task.detached(priority: .utility) { @Sendable in
+        return Task.detached(priority: .utility) { @Sendable in
             // Classification and read-merge-write share one locked archive load.
             let archiveSaveStartedAt = ProcessInfo.processInfo.systemUptime
-            switch historyStore.recordSnapshotStates(repositories: repositories, recordedAt: recordedAt) {
-            case .success(let outcome):
-                if outcome.addedCount > 0 {
-                    // Non-blocking background compaction if nearing limit.
-                    if outcome.totalEntryCount > 8000 {
-                        historyStore.compact()
-                    }
-                    // Non-blocking background note — diagnostics available via scheduler.historyDiagnostics
-                    _ = historyStore.diagnosticsSnapshot()
-                }
-            case .failure:
-                break
+            // The "nearing the entry limit" trim is part of this save, so the view
+            // returned below is the archive on disk rather than a pre-trim snapshot
+            // of it, and the file is decoded once instead of twice.
+            let recorded = historyStore.recordSnapshotStates(
+                repositories: repositories,
+                recordedAt: recordedAt,
+                backgroundCompactionThreshold: backgroundCompactionThreshold
+            )
+            if case .success(let result) = recorded, result.outcome.addedCount > 0 {
+                // Non-blocking background note — diagnostics available via scheduler.historyDiagnostics
+                _ = historyStore.diagnosticsSnapshot()
             }
             measurementObserver?.record(name: "repository_history_archive_update", duration: ProcessInfo.processInfo.systemUptime - archiveSaveStartedAt, calls: 1)
+            return recorded.map(\.groupedEntries)
         }
     }
 

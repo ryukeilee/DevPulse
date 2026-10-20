@@ -183,11 +183,11 @@ struct RepositoryHistoryStoreTests {
             let entries = [older, tiedFirst, tiedSecond]
             try JSONEncoder().encode(RepositoryHistoryArchive(entries: entries)).write(to: url)
             let historyStore = RepositoryHistoryStore(fileURL: url)
-            let outcome = try historyStore.recordSnapshotStates(
+            let recording = try historyStore.recordSnapshotStates(
                 repositories: [repository], recordedAt: "2026-07-22T12:00:00Z"
             ).get()
             let added = kind == .scanRecord ? 0 : 1
-            #expect(outcome == HistoryRecordOutcome(addedCount: added, totalEntryCount: 3 + added))
+            #expect(recording.outcome == HistoryRecordOutcome(addedCount: added, totalEntryCount: 3 + added))
             #expect(historyStore.loadMetrics().archiveDecodeCount == 1)
             let newEntry = RepositoryHistoryEntry(repositoryID: repository.id,
                 recordedAt: "2026-07-22T12:00:00Z", kind: .scanRecord, state: state)
@@ -284,25 +284,234 @@ struct RepositoryHistoryStoreTests {
         }
     }
 
-    @Test func refreshHistoryPathsDecodeArchiveAtMostTwice() throws {
+    @Test func refreshHistoryRoundDecodesArchiveOnce() throws {
         let benchmarkStore = makeBenchmarkStore()
         let repositories = (0..<5).map { makeSnapshot(name: "history-\($0)", branch: "main", changedCount: $0) }
         seed(benchmarkStore, entries: makeHistoryEntries(repositoryCount: 5, entriesPerRepository: 60))
 
         benchmarkStore.resetDiagnostics()
-        let outcome = try benchmarkStore.recordSnapshotStates(
+        let recording = try benchmarkStore.recordSnapshotStates(
             repositories: repositories,
             recordedAt: "2026-08-01T00:00:00Z"
         ).get()
-        #expect(outcome.addedCount == repositories.count)
+        #expect(recording.outcome.addedCount == repositories.count)
+        // The whole refresh round — recording plus the grouped view the pending-item
+        // evaluation assesses — decodes the archive exactly once.
         #expect(benchmarkStore.loadMetrics().archiveDecodeCount == 1)
+        #expect(recording.groupedEntries.count == repositories.count)
+        #expect(recording.groupedEntries[repositories[0].id]?.first?.kind == .scanRecord)
 
-        let grouped = try benchmarkStore.loadGrouped().get()
-        #expect(grouped.count == repositories.count)
-        #expect(grouped[repositories[0].id]?.first?.kind == .scanRecord)
+        // That returned view is the same data a second decode of the file would read.
+        let decodedAgain = try benchmarkStore.loadGrouped().get()
+        #expect(recording.groupedEntries == decodedAgain)
+
         let metrics = benchmarkStore.loadMetrics()
         #expect(metrics.archiveDecodeCount == 2)
         #expect(metrics.archiveBytesRead > 0)
+    }
+
+    /// A refresh that records history and then evaluates pending items must reach the
+    /// same result whether the health assessments come from the archive view the
+    /// recording returned or from a second decode of that same file on disk.
+    @Test func pendingItemsMatchBetweenReturnedArchiveViewAndDiskLoad() throws {
+        let repositories = (0..<5).map {
+            makeSnapshot(name: "history-\($0)", branch: "main", changedCount: $0 + 1)
+        }
+
+        func pendingItems(usingReturnedArchiveView: Bool) throws -> [PendingItem] {
+            let historyStore = makeBenchmarkStore()
+            seed(historyStore, entries: makeHistoryEntries(repositoryCount: 5, entriesPerRepository: 60))
+            let recording = try historyStore.recordSnapshotStates(
+                repositories: repositories,
+                recordedAt: "2026-08-01T00:00:00Z"
+            ).get()
+            let entriesByRepository = usingReturnedArchiveView
+                ? recording.groupedEntries
+                : try historyStore.loadGrouped().get()
+            return evaluatePendingItems(
+                repositories: repositories,
+                entriesByRepository: entriesByRepository
+            )
+        }
+
+        let reused = try pendingItems(usingReturnedArchiveView: true)
+        let reloaded = try pendingItems(usingReturnedArchiveView: false)
+        #expect(!reused.isEmpty)
+        #expect(reused.map(\.id) == reloaded.map(\.id))
+        #expect(reused.map(\.severity) == reloaded.map(\.severity))
+    }
+
+    /// A save that crosses the background-compaction threshold trims the archive: one
+    /// repository has 500 entries, one more state point is recorded, and the oldest of
+    /// those 501 is dropped by the per-repository cap. The view the recording returns
+    /// must be the archive that ends up on disk, in the same per-repository order — a
+    /// view taken before that trim would rate health and pending severity from entries
+    /// the file no longer holds.
+    @Test func recordingAboveBackgroundThresholdReturnsTheTrimmedArchive() throws {
+        let repositoryCount = 16
+        let entriesPerRepository = 500
+        let seeded = makeHistoryEntries(
+            repositoryCount: repositoryCount,
+            entriesPerRepository: entriesPerRepository
+        )
+        #expect(seeded.count == 8000)
+
+        let url = tempDir.appendingPathComponent("history-background-threshold.json")
+        try JSONEncoder().encode(RepositoryHistoryArchive(entries: seeded)).write(to: url)
+        let historyStore = RepositoryHistoryStore(
+            fileURL: url,
+            config: .init(
+                retentionDays: 100_000,
+                maxEntriesPerRepo: entriesPerRepository,
+                maxTotalEntries: 10_000,
+                compactionInterval: 10_000,
+                // Above 9000 entries only, so the trim below comes from the
+                // background-compaction threshold rather than from this trigger.
+                softThresholdFraction: 0.9
+            )
+        )
+        historyStore.resetDiagnostics()
+
+        let targetID = historyRepositoryID(0)
+        let oldestForTarget = seeded
+            .filter { $0.repositoryID == targetID }
+            .min { $0.recordedAt < $1.recordedAt }
+        let target = makeSnapshot(name: "history-0", branch: "main", changedCount: 99)
+        let recording = try historyStore.recordSnapshotStates(
+            repositories: [target],
+            recordedAt: "2026-08-01T00:00:00Z",
+            backgroundCompactionThreshold: 8000
+        ).get()
+
+        // The trim happened inside this save: 8000 seeded + 1 new = 8001, capped back to
+        // 500 entries for the target repository.
+        #expect(recording.outcome.addedCount == 1)
+        #expect(recording.outcome.totalEntryCount == 8000)
+        // Even with the trim, the round decodes the archive once.
+        #expect(historyStore.loadMetrics().archiveDecodeCount == 1)
+
+        let returned = recording.groupedEntries
+        #expect(returned.values.reduce(0) { $0 + $1.count } == 8000)
+        #expect(returned[targetID]?.count == 500)
+        #expect(returned[targetID]?.first?.recordedAt == "2026-08-01T00:00:00Z")
+        if let oldestForTarget {
+            #expect(returned[targetID]?.contains(oldestForTarget) == false)
+        } else {
+            Issue.record("expected a seeded entry for the target repository")
+        }
+
+        // Same archive a fresh decode of the file yields: entry set, per-repository
+        // order, and per-repository membership all match.
+        let onDisk = try historyStore.loadGrouped().get()
+        #expect(returned == onDisk)
+        #expect(Set(returned.keys) == Set(onDisk.keys))
+        for repositoryID in returned.keys {
+            #expect(returned[repositoryID]?.map(\.id) == onDisk[repositoryID]?.map(\.id))
+            #expect(returned[repositoryID]?.map(\.recordedAt) == onDisk[repositoryID]?.map(\.recordedAt))
+        }
+        #expect(historyStore.loadMetrics().archiveDecodeCount == 2)
+    }
+
+    /// The per-repository trim during a save must not change what pending items are
+    /// derived from. Here the oldest entry is a two-day-old dirty workspace and the rest
+    /// are dirty within the last hour, so dropping it drops the pending severity from
+    /// high to low: the archive view the recording returns and a forced disk read must
+    /// agree on that outcome.
+    @Test func pendingItemsMatchBetweenReturnedArchiveViewAndDiskLoadWhenSaveTrims() throws {
+        let repository = makeSnapshot(name: "trim", branch: "main", changedCount: 5)
+        let formatter = ISO8601DateFormatter()
+        let reference = Date()
+        let dirtyTwoDaysAgo = RepositoryHistoryEntry(
+            repositoryID: repository.id,
+            recordedAt: formatter.string(from: reference.addingTimeInterval(-48 * 3600)),
+            kind: .stateChange,
+            state: HistoryStatePoint(snapshot: makeSnapshot(name: "trim", branch: "main", changedCount: 3))
+        )
+        let dirtyRecently = (0..<2).map { index in
+            RepositoryHistoryEntry(
+                repositoryID: repository.id,
+                recordedAt: formatter.string(
+                    from: reference.addingTimeInterval(-TimeInterval(50 - index * 10) * 60)
+                ),
+                kind: .stateChange,
+                state: HistoryStatePoint(snapshot: makeSnapshot(name: "trim", branch: "main", changedCount: 5))
+            )
+        }
+        let seeded = [dirtyTwoDaysAgo] + dirtyRecently
+
+        struct Outcome {
+            let trimmed: [PendingItem]
+            let withTrimmedEntry: [PendingItem]
+            let decodesAfterRecording: Int
+            let decodesAfterAssessment: Int
+        }
+
+        func evaluate(usingReturnedArchiveView: Bool) throws -> Outcome {
+            let url = tempDir.appendingPathComponent(
+                "history-trim-\(usingReturnedArchiveView ? "reused" : "disk").json"
+            )
+            try JSONEncoder().encode(RepositoryHistoryArchive(entries: seeded)).write(to: url)
+            let historyStore = RepositoryHistoryStore(
+                fileURL: url,
+                config: .init(
+                    retentionDays: 100_000,
+                    // One below the seeded count, so recording the fifth entry trims.
+                    maxEntriesPerRepo: 3,
+                    maxTotalEntries: 100,
+                    compactionInterval: 10_000,
+                    softThresholdFraction: 0.99
+                )
+            )
+            historyStore.resetDiagnostics()
+            let recording = try historyStore.recordSnapshotStates(
+                repositories: [repository],
+                recordedAt: formatter.string(from: reference.addingTimeInterval(-30 * 60)),
+                backgroundCompactionThreshold: 3
+            ).get()
+            #expect(recording.outcome.addedCount == 1)
+            #expect(recording.outcome.totalEntryCount == 3)
+            let decodesAfterRecording = historyStore.loadMetrics().archiveDecodeCount
+            #expect(decodesAfterRecording == 1)
+
+            let entriesByRepository = usingReturnedArchiveView
+                ? recording.groupedEntries
+                : try historyStore.loadGrouped().get()
+            #expect(entriesByRepository[repository.id]?.count == 3)
+            #expect(entriesByRepository[repository.id]?.contains(dirtyTwoDaysAgo) == false)
+
+            var withTrimmedEntry = entriesByRepository
+            withTrimmedEntry[repository.id] = ((entriesByRepository[repository.id] ?? []) + [dirtyTwoDaysAgo])
+                .sorted { $0.recordedAt > $1.recordedAt }
+
+            return Outcome(
+                trimmed: evaluatePendingItems(
+                    repositories: [repository],
+                    entriesByRepository: entriesByRepository
+                ),
+                withTrimmedEntry: evaluatePendingItems(
+                    repositories: [repository],
+                    entriesByRepository: withTrimmedEntry
+                ),
+                decodesAfterRecording: decodesAfterRecording,
+                decodesAfterAssessment: historyStore.loadMetrics().archiveDecodeCount
+            )
+        }
+
+        let reused = try evaluate(usingReturnedArchiveView: true)
+        let reloaded = try evaluate(usingReturnedArchiveView: false)
+
+        #expect(!reused.trimmed.isEmpty)
+        #expect(reused.trimmed.map(\.id) == reloaded.trimmed.map(\.id))
+        #expect(reused.trimmed.map(\.severity) == reloaded.trimmed.map(\.severity))
+        #expect(reused.decodesAfterRecording == 1)
+        #expect(reused.decodesAfterAssessment == 1)
+        #expect(reloaded.decodesAfterRecording == 1)
+        #expect(reloaded.decodesAfterAssessment == 2)
+
+        // Keeping the trimmed entry in the assessment input rates the repository higher,
+        // so the two views are not interchangeable: the equivalence above is a real result.
+        #expect(reused.withTrimmedEntry.map(\.severity) != reused.trimmed.map(\.severity))
+        #expect(reused.withTrimmedEntry.map(\.severity) == reloaded.withTrimmedEntry.map(\.severity))
     }
 
     @Test func groupedLoadBenchmark300EntriesFiveRepositories() throws {
@@ -660,6 +869,27 @@ private func elapsedMilliseconds(_ operation: () -> Void) -> Double {
     let start = DispatchTime.now().uptimeNanoseconds
     operation()
     return Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+}
+
+/// Assesses every repository from one archive view and evaluates the pending-item
+/// rules on top of it, mirroring what a refresh does with its history view.
+private func evaluatePendingItems(
+    repositories: [RepositorySnapshot],
+    entriesByRepository: [String: [RepositoryHistoryEntry]]
+) -> [PendingItem] {
+    var healthAssessments: [String: RepositoryHealthAssessment] = [:]
+    for repository in repositories {
+        healthAssessments[repository.id] = RepositoryHealthEngine.assess(
+            repositoryID: repository.id,
+            repositoryName: repository.name,
+            entries: entriesByRepository[repository.id] ?? []
+        )
+    }
+    let context = PendingItemEvaluationContext(
+        repositories: repositories,
+        healthAssessments: healthAssessments
+    )
+    return PendingItemEvaluator.evaluate(context: context).items
 }
 
 private func median(_ samples: [Double]) -> Double {

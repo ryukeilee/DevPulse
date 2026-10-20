@@ -99,17 +99,32 @@ final class RepositoryHistoryStore: @unchecked Sendable {
             processLock.lock()
             defer { processLock.unlock() }
 
-            return recordUnlocked(entries: entries, archive: loadArchiveForRecordingUnlocked())
-                .map(\.addedCount)
+            return recordUnlocked(
+                entries: entries,
+                archive: loadArchiveForRecordingUnlocked(),
+                backgroundCompactionThreshold: nil
+            )
+            .map { $0.outcome.addedCount }
         }
     }
 
     /// Record state points derived from one snapshot while the archive remains locked.
     /// This keeps classification and read-merge-write on the same archive decode.
+    ///
+    /// The result carries the grouped view of the archive this call persisted, so a
+    /// consumer that assesses the same refresh's history can reuse it instead of
+    /// decoding the file it just wrote a second time.
+    ///
+    /// `backgroundCompactionThreshold` is the entry count above which the caller would
+    /// otherwise run a follow-up `compact()`. Passing it here runs that trim on the
+    /// array that is about to be saved, so the file and the returned view describe the
+    /// same archive. Trimming afterwards instead would leave the returned view holding
+    /// entries the file no longer has, and would decode the archive a second time.
     func recordSnapshotStates(
         repositories: [RepositorySnapshot],
-        recordedAt: String
-    ) -> Result<HistoryRecordOutcome, HistoryStoreError> {
+        recordedAt: String,
+        backgroundCompactionThreshold: Int? = nil
+    ) -> Result<RepositoryHistoryRecordResult, HistoryStoreError> {
         queue.sync {
             processLock.lock()
             defer { processLock.unlock() }
@@ -123,9 +138,16 @@ final class RepositoryHistoryStore: @unchecked Sendable {
                     previousStates: latestStates
                 )
                 guard !entries.isEmpty else {
-                    return .success(HistoryRecordOutcome(addedCount: 0, totalEntryCount: archive.entries.count))
+                    return .success(RepositoryHistoryRecordResult(
+                        outcome: HistoryRecordOutcome(addedCount: 0, totalEntryCount: archive.entries.count),
+                        groupedEntries: Self.groupedByRepository(archive.entries)
+                    ))
                 }
-                return recordUnlocked(entries: entries, archive: archive)
+                return recordSnapshotStatesUnlocked(
+                    entries: entries,
+                    archive: archive,
+                    backgroundCompactionThreshold: backgroundCompactionThreshold
+                )
             case .failure:
                 // Preserve the existing retry behavior: classify with no prior state,
                 // then let the read-merge-write path make one recovery attempt.
@@ -135,10 +157,34 @@ final class RepositoryHistoryStore: @unchecked Sendable {
                     previousStates: [:]
                 )
                 guard !entries.isEmpty else {
-                    return .success(HistoryRecordOutcome(addedCount: 0, totalEntryCount: 0))
+                    return .success(RepositoryHistoryRecordResult(
+                        outcome: HistoryRecordOutcome(addedCount: 0, totalEntryCount: 0),
+                        groupedEntries: [:]
+                    ))
                 }
-                return recordUnlocked(entries: entries, archive: loadArchiveForRecordingUnlocked())
+                return recordSnapshotStatesUnlocked(
+                    entries: entries,
+                    archive: loadArchiveForRecordingUnlocked(),
+                    backgroundCompactionThreshold: backgroundCompactionThreshold
+                )
             }
+        }
+    }
+
+    private func recordSnapshotStatesUnlocked(
+        entries: [RepositoryHistoryEntry],
+        archive: RepositoryHistoryArchive,
+        backgroundCompactionThreshold: Int?
+    ) -> Result<RepositoryHistoryRecordResult, HistoryStoreError> {
+        recordUnlocked(
+            entries: entries,
+            archive: archive,
+            backgroundCompactionThreshold: backgroundCompactionThreshold
+        ).map { recorded in
+            RepositoryHistoryRecordResult(
+                outcome: recorded.outcome,
+                groupedEntries: Self.groupedByRepository(recorded.entries)
+            )
         }
     }
 
@@ -208,8 +254,7 @@ final class RepositoryHistoryStore: @unchecked Sendable {
 
             switch loadUnlocked() {
             case .success(let archive):
-                return .success(Dictionary(grouping: archive.entries, by: \.repositoryID)
-                    .mapValues { $0.sorted { $0.recordedAt > $1.recordedAt } })
+                return .success(Self.groupedByRepository(archive.entries))
             case .failure(let error):
                 return .failure(error)
             }
@@ -437,6 +482,16 @@ final class RepositoryHistoryStore: @unchecked Sendable {
         }
     }
 
+    /// Group entries by repository, newest first within each group.
+    /// Shared by `loadGrouped()` and the recording path so both views of the same
+    /// archive are produced identically.
+    private static func groupedByRepository(
+        _ entries: [RepositoryHistoryEntry]
+    ) -> [String: [RepositoryHistoryEntry]] {
+        Dictionary(grouping: entries, by: \.repositoryID)
+            .mapValues { $0.sorted { $0.recordedAt > $1.recordedAt } }
+    }
+
     private func loadArchiveForRecordingUnlocked() -> RepositoryHistoryArchive {
         switch loadUnlocked() {
         case .success(let archive):
@@ -447,10 +502,18 @@ final class RepositoryHistoryStore: @unchecked Sendable {
         }
     }
 
+    /// Returns the outcome plus the entries as persisted, so a caller that needs the
+    /// resulting archive view can derive it without decoding the file again.
+    ///
+    /// When `backgroundCompactionThreshold` is supplied and the archive grows past it,
+    /// that trim runs here, before the save, on the same array that is written. Running
+    /// it as a separate follow-up pass instead would rewrite the file after the caller
+    /// received its view, so the view could list entries the archive no longer holds.
     private func recordUnlocked(
         entries: [RepositoryHistoryEntry],
-        archive: RepositoryHistoryArchive
-    ) -> Result<HistoryRecordOutcome, HistoryStoreError> {
+        archive: RepositoryHistoryArchive,
+        backgroundCompactionThreshold: Int?
+    ) -> Result<(outcome: HistoryRecordOutcome, entries: [RepositoryHistoryEntry]), HistoryStoreError> {
         let beforeCount = archive.entries.count
 
         // Keep the first entry at the latest timestamp, matching max(by:) on the archive.
@@ -509,6 +572,22 @@ final class RepositoryHistoryStore: @unchecked Sendable {
             writeCountSinceLastCompaction += 1
         }
 
+        // The caller's follow-up trim (the "nearing the entry limit" pass), folded into
+        // this save: `updated` after the block above is both what gets written and what
+        // is returned, so the caller's view cannot describe an entry the file dropped.
+        if let threshold = backgroundCompactionThreshold, added > 0, updated.count > threshold {
+            switch compactUnlocked(entries: updated) {
+            case .success(let trimmed):
+                _diagnostics.totalEntriesPurged += updated.count - trimmed.count
+                _diagnostics.totalCompactionRuns += 1
+                writeCountSinceLastCompaction = 0
+                updated = trimmed
+            case .failure(let error):
+                logger.error("background compaction failed: \(error.localizedDescription)")
+                _diagnostics.lastRecoveryCount = (_diagnostics.lastRecoveryCount ?? 0) + 1
+            }
+        }
+
         let archiveToSave = RepositoryHistoryArchive(
             schemaVersion: RepositoryHistorySchema.version,
             entries: updated
@@ -519,7 +598,10 @@ final class RepositoryHistoryStore: @unchecked Sendable {
             updateFileSizeDiagnostics()
             _diagnostics.currentEntryCount = updated.count
             _diagnostics.totalRepositoryCount = Set(updated.map(\.repositoryID)).count
-            return .success(HistoryRecordOutcome(addedCount: added, totalEntryCount: updated.count))
+            return .success((
+                outcome: HistoryRecordOutcome(addedCount: added, totalEntryCount: updated.count),
+                entries: updated
+            ))
         case .failure(let error):
             return .failure(error)
         }
@@ -635,6 +717,18 @@ final class RepositoryHistoryStore: @unchecked Sendable {
 struct HistoryRecordOutcome: Equatable, Sendable {
     let addedCount: Int
     let totalEntryCount: Int
+}
+
+/// One snapshot recording plus the grouped archive view it produced.
+///
+/// `groupedEntries` is derived from the entries this recording persisted, by the same
+/// helper `loadGrouped()` uses, so the two are interchangeable. A refresh round that
+/// records history and then assesses it can therefore reuse this value instead of
+/// decoding the file it just wrote — including when the save trimmed the archive,
+/// because the trim happens on the array that is written.
+struct RepositoryHistoryRecordResult: Equatable, Sendable {
+    let outcome: HistoryRecordOutcome
+    let groupedEntries: [String: [RepositoryHistoryEntry]]
 }
 
 struct RepositoryHistoryLoadMetrics: Equatable, Sendable {
