@@ -729,6 +729,65 @@ enum ScanRootResolver {
         warningContext: WarningContext,
         resolveCustomURL: (CustomScanDirectory) -> URL?
     ) -> (roots: [String], warning: String?) {
+        assemble(configuration, warningContext: warningContext) { index in
+            resolveCustomURL(configuration.customDirectories[index])
+        }
+    }
+
+    /// Resolves the custom-directory URLs with bounded concurrency and then
+    /// assembles exactly like `resolve`. Each resolution is a synchronous XPC
+    /// round trip to the bookmark agent, so a small pool overlaps the waits.
+    ///
+    /// Only the *timing* of the resolutions changes: every resolved URL is put
+    /// back at its original index and the shared assembly walks the original
+    /// order, so the root set, its order, the counters and the warning text are
+    /// identical to the sequential path. Read-only resolution only — bookmark
+    /// refresh/persist stays with the caller's sequential path.
+    static func resolveConcurrently(
+        _ configuration: ScanLocationConfiguration,
+        warningContext: WarningContext,
+        maximumConcurrentResolutions: Int = maximumConcurrentBookmarkResolutions,
+        resolveCustomURL: @escaping @Sendable (CustomScanDirectory) -> URL?
+    ) async -> (roots: [String], warning: String?) {
+        let directories = configuration.customDirectories
+        guard directories.count > 1 else {
+            return resolve(configuration, warningContext: warningContext, resolveCustomURL: resolveCustomURL)
+        }
+        // A non-positive width must degrade to the sequential path rather than
+        // skipping every fill iteration, which would return an all-nil buffer.
+        let width = max(1, min(maximumConcurrentResolutions, directories.count))
+        let resolvedURLs: [URL?] = await withTaskGroup(of: (offset: Int, url: URL?).self) { group in
+            var buffer = [URL?](repeating: nil, count: directories.count)
+            var pending = 0
+            while pending < width {
+                let offset = pending
+                group.addTask { (offset, resolveCustomURL(directories[offset])) }
+                pending += 1
+            }
+            while let finished = await group.next() {
+                buffer[finished.offset] = finished.url
+                if pending < directories.count {
+                    let offset = pending
+                    group.addTask { (offset, resolveCustomURL(directories[offset])) }
+                    pending += 1
+                }
+            }
+            return buffer
+        }
+        return assemble(configuration, warningContext: warningContext) { index in
+            resolvedURLs[index]
+        }
+    }
+
+    /// Concurrency width for security-scoped bookmark resolution. Bounded so the
+    /// blocking XPC waits cannot saturate the cooperative pool or starve the UI.
+    static let maximumConcurrentBookmarkResolutions = 6
+
+    private static func assemble(
+        _ configuration: ScanLocationConfiguration,
+        warningContext: WarningContext,
+        customURLAtIndex: (Int) -> URL?
+    ) -> (roots: [String], warning: String?) {
         let enabledBuiltIns = ScanLocationProvider.builtInLocations
             .map(ScanLocationProvider.expandTilde)
             .filter { configuration.enabledBuiltInPaths.contains($0) }
@@ -751,8 +810,8 @@ enum ScanRootResolver {
         }
 
         enabledBuiltIns.forEach(append)
-        for directory in configuration.customDirectories {
-            append(resolveCustomURL(directory)?.path ?? directory.path)
+        for (index, directory) in configuration.customDirectories.enumerated() {
+            append(customURLAtIndex(index)?.path ?? directory.path)
         }
 
         let deduped = Array(Set(roots)).sorted()
@@ -2027,7 +2086,8 @@ final class ScanScheduler: ObservableObject {
             }
 
             // 2. Resolve scan roots (synchronous FileManager checks, off-main).
-            let resolvedRoots = Self.resolveScanRootsOffMain(
+            //    Bookmark resolutions are overlapped with bounded concurrency.
+            let resolvedRoots = await Self.resolveScanRootsOffMain(
                 locationConfig: capturedLocationConfig
             )
             let executionConfig: ScanConfig = {
@@ -2955,8 +3015,8 @@ final class ScanScheduler: ObservableObject {
     /// Background resolution deliberately does not refresh or persist bookmarks.
     private nonisolated static func resolveScanRootsOffMain(
         locationConfig: ScanLocationConfiguration
-    ) -> (roots: [String], warning: String?) {
-        ScanRootResolver.resolve(locationConfig, warningContext: .scan) { directory in
+    ) async -> (roots: [String], warning: String?) {
+        await ScanRootResolver.resolveConcurrently(locationConfig, warningContext: .scan) { directory in
             guard let bookmark = directory.bookmarkData else { return nil }
             var stale = false
             return try? URL(
