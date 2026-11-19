@@ -452,9 +452,8 @@ struct SharedSnapshotStoreTests {
         print("SharedSnapshotStore non-identical recovery operations: writes=\(writeCount), F_FULLFSYNC=\(fullSyncCount), json_decodes=\(jsonDecodeCount), json_encodes=\(jsonEncodeCount)")
         #expect(writeCount == 3)
         #expect(fullSyncCount == 5)
-        // Three file decodes, each reading its top-level header and payload in
-        // two parses now that the header is a single pass.
-        #expect(jsonDecodeCount == 6)
+        // Each divergent copy and the staged candidate are parsed once.
+        #expect(jsonDecodeCount == 3)
         #expect(jsonEncodeCount == 1)
         #expect(try Data(contentsOf: snapshotStore.primaryURL)
             == Data(contentsOf: snapshotStore.backupURL))
@@ -492,9 +491,8 @@ struct SharedSnapshotStoreTests {
         print("SharedSnapshotStore steady-state operations: writes=\(writeCount), F_FULLFSYNC=\(fullSyncCount), json_decodes=\(jsonDecodeCount), json_encodes=\(jsonEncodeCount)")
         #expect(writeCount == 2)
         #expect(fullSyncCount == 3)
-        // Two file decodes (shared baseline + staged verification), each header
-        // now read in the same pass as its payload.
-        #expect(jsonDecodeCount == 4)
+        // Parse the shared baseline and staged candidate once each.
+        #expect(jsonDecodeCount == 2)
         #expect(jsonEncodeCount == 1)
         #expect(try Data(contentsOf: snapshotStore.primaryURL)
             == Data(contentsOf: snapshotStore.backupURL))
@@ -700,8 +698,7 @@ struct SharedSnapshotStoreTests {
         print("SharedSnapshotStore identical-copy load operations: json_decodes=\(jsonDecodeCount), json_encodes=\(jsonEncodeCount), writes=\(writeCount)")
         #expect(loaded.source == .primary)
         #expect(loaded.snapshot.repositories.first?.id == "load-shared")
-        // One shared file decode: one header pass plus one payload pass.
-        #expect(jsonDecodeCount == 2)
+        #expect(jsonDecodeCount == 1)
         #expect(jsonEncodeCount == 0)
         #expect(writeCount == 0)
     }
@@ -719,6 +716,34 @@ struct SharedSnapshotStoreTests {
         #expect(loaded.snapshot.repositories.first?.id == "widget-ready")
         #expect(loaded.snapshot.repositories.first?.resolvedDataSource == .current)
         #expect(loaded.snapshot.persistenceState == .committed)
+    }
+
+    @Test func prettyPrintedBaselineAndCompactCommitShareTheSameStorageContract() throws {
+        let directory = try temporaryDirectory()
+        defer { removeTemporaryDirectory(directory) }
+
+        let snapshotStore = store(in: directory, now: date("2026-07-18T10:00:00Z"))
+        let previous = try requireSuccess(snapshotStore.commit(
+            fixture(label: "previous", timestamp: "2026-07-18T09:00:00Z")
+        ))
+        let previousEncoder = JSONEncoder()
+        previousEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let previousBytes = try previousEncoder.encode(previous)
+        try previousBytes.write(to: snapshotStore.primaryURL)
+        try previousBytes.write(to: snapshotStore.backupURL)
+        #expect(try requireSuccess(snapshotStore.load()).snapshot == previous)
+
+        let committed = try requireSuccess(snapshotStore.commit(
+            previous,
+            observedStorageRevision: previous.storageRevision
+        ))
+        let compactBytes = try Data(contentsOf: snapshotStore.primaryURL)
+        #expect(committed.storageRevision == previous.storageRevision + 1)
+        #expect(committed.schemaVersion == previous.schemaVersion)
+        #expect(committed.storageFormatVersion == previous.storageFormatVersion)
+        #expect(compactBytes.count < previousBytes.count)
+        #expect(try JSONDecoder().decode(AppGroupData.self, from: compactBytes) == committed)
+        #expect(try Data(contentsOf: snapshotStore.backupURL) == compactBytes)
     }
 
     @Test func corruptedJsonPrimaryFallsBackToValidBackup() throws {
@@ -847,7 +872,8 @@ struct SharedSnapshotStoreTests {
         #expect(next.storageRevision == second.storageRevision + 1)
     }
 
-    @Test func futureSchemaPrimaryRefusesBackupFallback() throws {
+    @Test(arguments: [true, false])
+    func futureEnvelopePrimaryRefusesBackupFallback(futureSchema: Bool) throws {
         let directory = try temporaryDirectory()
         defer { removeTemporaryDirectory(directory) }
 
@@ -856,8 +882,13 @@ struct SharedSnapshotStoreTests {
         try requireSuccess(snapshotStore.commit(fixture(label: "current", timestamp: "2026-07-18T09:01:00Z")))
 
         var future = try jsonObject(from: fixture(label: "future", timestamp: "2026-07-18T10:00:00Z"))
-        future["schemaVersion"] = RepositorySnapshotSchema.version + 1
+        if futureSchema {
+            future["schemaVersion"] = RepositorySnapshotSchema.version + 1
+        } else {
+            future["storageFormatVersion"] = RepositorySnapshotSchema.storageFormatVersion + 1
+        }
         future["persistenceState"] = "archived"
+        future["repositories"] = ["incompatible": true]
         let futureBytes = try JSONSerialization.data(withJSONObject: future, options: [.sortedKeys])
         try futureBytes.write(to: snapshotStore.primaryURL)
         let abandoned = directory.appendingPathComponent(
