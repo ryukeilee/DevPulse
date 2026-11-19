@@ -295,59 +295,17 @@ final class SharedSnapshotStore: @unchecked Sendable {
         guard !bytes.isEmpty else {
             return .failure(.invalid("file is empty"))
         }
-        let decoder = JSONDecoder()
-        let header: SnapshotFileHeader
+        let decoded: AppGroupData
         do {
-            // One decode reads the whole top-level header. A future schema may
-            // introduce enum values or field shapes this process cannot decode,
-            // so `SnapshotFileHeader` reads the metadata fields tolerantly while
-            // keeping `schemaVersion` required: the version guard must still
-            // recognize and protect such an artifact instead of failing on a
-            // field it does not understand.
             operationObserver?(.jsonDecode)
-            header = try decoder.decode(SnapshotFileHeader.self, from: bytes)
+            decoded = try JSONDecoder().decode(SnapshotFilePayload.self, from: bytes).snapshot
+        } catch let failure as SnapshotFileFailure {
+            return .failure(failure)
         } catch {
             return .failure(.decode("schema header: \(error.localizedDescription)"))
         }
 
-        if header.schemaVersion > RepositorySnapshotSchema.version {
-            return .failure(.futureSchema(header.schemaVersion, appVersion: header.appVersion))
-        }
-
-        guard header.schemaVersion >= RepositorySnapshotSchema.oldestMigratableVersion else {
-            return .failure(.unsupportedSchema(header.schemaVersion))
-        }
-
-        // Protocol-level envelope check: if the file carries a storageFormatVersion
-        // that exceeds what this process understands, reject immediately without
-        // attempting to decode the payload body. This header read already covered
-        // the same top-level field the metadata header used to re-check.
-        if let fileProtocolVersion = header.storageFormatVersion,
-           fileProtocolVersion > RepositorySnapshotSchema.storageFormatVersion {
-            return .failure(.futureSchema(header.schemaVersion, appVersion: header.appVersion))
-        }
-
-        if header.schemaVersion == RepositorySnapshotSchema.version {
-            guard header.writtenAt != nil else {
-                return .failure(.invalid("schema-v2 writtenAt field is missing"))
-            }
-            guard header.storageRevision != nil else {
-                return .failure(.invalid("schema-v2 storageRevision field is missing"))
-            }
-            guard header.persistenceState != nil else {
-                return .failure(.invalid("schema-v2 persistenceState field is missing"))
-            }
-        }
-
-        let decoded: AppGroupData
-        do {
-            operationObserver?(.jsonDecode)
-            decoded = try decoder.decode(AppGroupData.self, from: bytes)
-        } catch {
-            return .failure(.decode(error.localizedDescription))
-        }
-
-        if header.schemaVersion == RepositorySnapshotSchema.version {
+        if decoded.schemaVersion == RepositorySnapshotSchema.version {
             do {
                 try validatePersistedSnapshot(decoded)
                 return .success(DecodedFile(snapshot: decoded, bytes: bytes, wasMigrated: false))
@@ -438,7 +396,9 @@ final class SharedSnapshotStore: @unchecked Sendable {
         try validatePersistedSnapshot(prepared)
 
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        // The app and widget both decode this internal file as JSON. Compact
+        // output avoids sorting keys and writing whitespace to both copies.
+        encoder.outputFormatting = [.withoutEscapingSlashes]
         let encoded: Data
         do {
             operationObserver?(.jsonEncode)
@@ -1188,42 +1148,45 @@ struct SnapshotVersionHeader: Decodable {
     }
 }
 
-/// Top-level header of a stored snapshot, read in one pass.
-///
-/// `schemaVersion` and the two version fields keep `SnapshotVersionHeader`'s
-/// strict typing, so a malformed or future envelope is classified exactly as it
-/// was when the header was decoded on its own. The metadata fields are read
-/// tolerantly: a schema may reshape them before the `schemaVersion` guard
-/// rejects the artifact, and `decodeSnapshotBytes` still requires them for the
-/// current schema before decoding the payload body.
-struct SnapshotFileHeader: Decodable {
-    let schemaVersion: Int
-    let storageFormatVersion: Int?
-    let appVersion: String?
-    let writtenAt: String?
-    let storageRevision: UInt64?
-    let persistenceState: String?
+/// Check the envelope before decoding repositories, using the same parsed JSON
+/// for both. A newer envelope can contain body fields this reader cannot decode.
+private struct SnapshotFilePayload: Decodable {
+    let snapshot: AppGroupData
 
     init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
-        // The version fields keep the strict typing `SnapshotVersionHeader`
-        // used: a wrong type here must stay a decode failure, not a tolerant nil,
-        // so a future artifact is classified exactly as before.
-        storageFormatVersion = try container.decodeIfPresent(Int.self, forKey: .storageFormatVersion)
-        appVersion = try container.decodeIfPresent(String.self, forKey: .appVersion)
-        // The metadata fields are read tolerantly: they are only decoded for the
-        // current schema, but a future schema may reshape them before the
-        // `schemaVersion` guard rejects the artifact.
-        writtenAt = try? container.decode(String.self, forKey: .writtenAt)
-        storageRevision = try? container.decode(UInt64.self, forKey: .storageRevision)
-        persistenceState = try? container.decode(String.self, forKey: .persistenceState)
+        let header = try SnapshotVersionHeader(from: decoder)
+
+        if header.schemaVersion > RepositorySnapshotSchema.version {
+            throw SnapshotFileFailure.futureSchema(header.schemaVersion, appVersion: header.appVersion)
+        }
+        guard header.schemaVersion >= RepositorySnapshotSchema.oldestMigratableVersion else {
+            throw SnapshotFileFailure.unsupportedSchema(header.schemaVersion)
+        }
+        if let version = header.storageFormatVersion,
+           version > RepositorySnapshotSchema.storageFormatVersion {
+            throw SnapshotFileFailure.futureSchema(header.schemaVersion, appVersion: header.appVersion)
+        }
+        if header.schemaVersion == RepositorySnapshotSchema.version {
+            let metadata = try decoder.container(keyedBy: MetadataKeys.self)
+            guard (try? metadata.decode(String.self, forKey: .writtenAt)) != nil else {
+                throw SnapshotFileFailure.invalid("schema-v2 writtenAt field is missing")
+            }
+            guard (try? metadata.decode(UInt64.self, forKey: .storageRevision)) != nil else {
+                throw SnapshotFileFailure.invalid("schema-v2 storageRevision field is missing")
+            }
+            guard (try? metadata.decode(String.self, forKey: .persistenceState)) != nil else {
+                throw SnapshotFileFailure.invalid("schema-v2 persistenceState field is missing")
+            }
+        }
+
+        do {
+            snapshot = try AppGroupData(from: decoder)
+        } catch {
+            throw SnapshotFileFailure.decode(error.localizedDescription)
+        }
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case schemaVersion
-        case storageFormatVersion
-        case appVersion
+    private enum MetadataKeys: String, CodingKey {
         case writtenAt
         case storageRevision
         case persistenceState

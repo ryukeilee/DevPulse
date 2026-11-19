@@ -143,6 +143,7 @@ struct EndToEndRefreshMeasurementTests {
 
         let revisionBeforeRefresh = initialSnapshot.storageRevision
         let cpuBeforeRefresh = try Self.processCPUUsage()
+        let hostUsageBeforeRefresh = try Self.hostResourceUsage()
         let refreshStartedAt = ProcessInfo.processInfo.systemUptime
         scheduler.scanNow(forceRepositoryDiscovery: false, source: .timer)
         let finalSnapshot = try await waitForCommittedSnapshot(
@@ -169,6 +170,7 @@ struct EndToEndRefreshMeasurementTests {
             )
         }
         let refreshElapsed = ProcessInfo.processInfo.systemUptime - refreshStartedAt
+        let hostUsageAfterRefresh = try Self.hostResourceUsage()
         let cpuAfterRefresh = try Self.processCPUUsage()
         try await Task.sleep(nanoseconds: 20_000_000)
         let execution = try #require(await executionRecorder.snapshot())
@@ -181,6 +183,10 @@ struct EndToEndRefreshMeasurementTests {
         #expect(!updatedActivityArchive.isEmpty)
         #expect(!updatedHistoryArchive.isEmpty)
         #expect(scheduler.refreshPhase == .success)
+        let snapshotURL = expectedContainer.appendingPathComponent(SharedSnapshotLocation.fileName)
+        let snapshotFileBytes = try #require(
+            snapshotURL.resourceValues(forKeys: [.fileSizeKey]).fileSize
+        )
 
         let resultSignatureInput = finalSnapshot.repositories
             .sorted { $0.name < $1.name }
@@ -208,6 +214,10 @@ struct EndToEndRefreshMeasurementTests {
             "scheduler_wall_ms=\(Self.format(refreshElapsed * 1_000))",
             "refresh_cpu_user_ms=\(Self.format(max(0, cpuAfterRefresh.user - cpuBeforeRefresh.user) * 1_000))",
             "refresh_cpu_system_ms=\(Self.format(max(0, cpuAfterRefresh.system - cpuBeforeRefresh.system) * 1_000))",
+            "refresh_host_disk_read_bytes=\(hostUsageAfterRefresh.ri_diskio_bytesread - hostUsageBeforeRefresh.ri_diskio_bytesread)",
+            "refresh_host_disk_write_bytes=\(hostUsageAfterRefresh.ri_diskio_byteswritten - hostUsageBeforeRefresh.ri_diskio_byteswritten)",
+            "host_peak_phys_footprint_bytes=\(hostUsageAfterRefresh.ri_lifetime_max_phys_footprint)",
+            "snapshot_file_bytes=\(snapshotFileBytes)",
             "refresh_engine_ms=\(Self.format(execution.engineElapsed * 1_000))",
             "discovery_ms=\(Self.format((execution.stageDurations[.discovery] ?? 0) * 1_000))",
             "core_status_ms=\(Self.format((execution.stageDurations[.coreStatus] ?? 0) * 1_000))",
@@ -349,6 +359,17 @@ struct EndToEndRefreshMeasurementTests {
         return (selfUser + childUser, selfSystem + childSystem)
     }
 
+    private static func hostResourceUsage() throws -> rusage_info_v4 {
+        var usage = rusage_info_v4()
+        let status = withUnsafeMutablePointer(to: &usage) { pointer in
+            pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+                proc_pid_rusage(getpid(), RUSAGE_INFO_V4, $0)
+            }
+        }
+        guard status == 0 else { throw MeasurementError.hostResourceMeasurementFailed }
+        return usage
+    }
+
     private static func format(_ value: Double) -> String {
         String(format: "%.3f", value)
     }
@@ -423,6 +444,7 @@ private enum MeasurementError: Error {
     case appGroupIsolationMismatch
     case invalidRealRepositoryList
     case cpuMeasurementFailed
+    case hostResourceMeasurementFailed
     case refreshDidNotCommit
     case archiveWasNotWritten
     case archiveWasNotUpdated

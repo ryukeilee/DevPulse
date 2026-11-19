@@ -65,6 +65,11 @@ enum DigestHex {
 enum RepositoryIdentity {
     static let version = 1
     private static let prefix = "repo-v\(version)-"
+    private static let homePaths = (
+        user: resolvedUserHomeDirectory(),
+        sandbox: NSHomeDirectory()
+    )
+    private static let legacyContainerPrefix = homePaths.user + "/Library/Containers/local.devpulse.app/Data"
 
     static func isSameOrDescendantPath(_ path: String, of prefix: String) -> Bool {
         let normalizedPrefix: String
@@ -102,16 +107,16 @@ enum RepositoryIdentity {
 
         let expanded: String
         if trimmed == "~" {
-            expanded = resolvedUserHomeDirectory()
+            expanded = homePaths.user
         } else if trimmed.hasPrefix("~/") {
-            expanded = resolvedUserHomeDirectory() + String(trimmed.dropFirst(1))
+            expanded = homePaths.user + String(trimmed.dropFirst(1))
         } else {
             expanded = trimmed
         }
 
-        let home = resolvedUserHomeDirectory()
-        let legacyContainerPrefix = home + "/Library/Containers/local.devpulse.app/Data"
-        let sandboxHome = NSHomeDirectory()
+        // Home paths are fixed for this app or Widget process. Existence and
+        // symlink resolution below still use the current filesystem.
+        let (home, sandboxHome) = homePaths
         let migratedPath: String
         if isSameOrDescendantPath(expanded, of: legacyContainerPrefix) {
             migratedPath = home + String(expanded.dropFirst(legacyContainerPrefix.count))
